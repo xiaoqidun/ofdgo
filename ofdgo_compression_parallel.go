@@ -95,7 +95,7 @@ func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, e
 		}
 	}
 	base, cancel := context.WithCancel(e.output.ctx)
-	ctx := outputImageContext{Context: base, parent: e.output.ctx}
+	ctx := outputImageContext{Context: context.WithValue(base, outputImageNestedKey{}, true), parent: e.output.ctx}
 	var group sync.WaitGroup
 	defer func() {
 		cancel()
@@ -250,9 +250,10 @@ func (e *Editor) runOutputImages(jobs []outputImageJob, results map[outputImageK
 	if len(jobs) == 1 {
 		optimize(&jobs[0])
 	} else {
+		nestedCtx := context.WithValue(ctx, outputImageNestedKey{}, true)
 		var group sync.WaitGroup
 		for i := range jobs {
-			group.Go(func() { optimize(&jobs[i]) })
+			group.Go(func() { jobs[i].candidate, jobs[i].err = optimizeOutputImage(nestedCtx, jobs[i]) })
 		}
 		group.Wait()
 	}

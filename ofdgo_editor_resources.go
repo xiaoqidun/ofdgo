@@ -24,6 +24,7 @@ import (
 	"iter"
 	"maps"
 	"path"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -186,7 +187,8 @@ func (r *editorResourceRefs) reference(name, base, key, value string, resource b
 // 返回: map[string]bool 可移除条目, error 读取或取消错误
 func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Reader, progress editorProgress, generated map[string]editorGeneratedReferences, retired map[string]bool) (map[string]bool, error) {
 	multiple := reader != nil && reader.DocumentCount() > 1
-	versioned := reader != nil && reader.OFD.DocBody[reader.documentIndex].versioned
+	currentVersioned := reader != nil && reader.currentVersioned()
+	packageVersioned := reader != nil && reader.packageVersioned()
 	prune := e.output != nil && e.output.options.Mode != CompressionUnchanged
 	if e.output != nil && e.output.protected {
 		return nil, nil
@@ -194,19 +196,25 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 	if !multiple && len(parts) == 0 && len(retired) == 0 && e.revision == 0 && (e.output == nil || e.output.options.Mode == CompressionUnchanged) {
 		return nil, nil
 	}
+	if !multiple && !currentVersioned && !prune && len(retired) == 0 && e.canSkipResourceCompaction(reader) {
+		return nil, nil
+	}
 	generated = e.generatedVectorReferences(parts, generated)
 	ctx := context.Background()
 	if e.output != nil {
 		ctx = e.output.ctx
 	}
+	var protectedFiles map[string]bool
 	if reader != nil {
-		protected, err := reader.hasOutputSignatures(ctx)
+		var protected bool
+		var err error
+		_, protectedFiles, protected, err = e.outputProtection(ctx, reader)
 		if err != nil || protected {
 			return nil, err
 		}
 	}
 	progress = progress.withContext(ctx)
-	_, scope, err := reader.versionResourceFiles(ctx, parts, generated)
+	selectedVersionFiles, scope, err := reader.versionResourceFiles(ctx, parts, generated)
 	if err != nil {
 		if multiple && !prune {
 			return nil, ctx.Err()
@@ -244,6 +252,20 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 	if !safe {
 		return nil, nil
 	}
+	if packageVersioned {
+		preserved, err := reader.versionPreservedFiles(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for name := range preserved {
+			if !currentVersioned || !selectedVersionFiles[name] {
+				refs.files[name], refs.versions[name] = true, true
+			}
+		}
+	}
+	for name := range protectedFiles {
+		refs.files[name] = true
+	}
 	var scoped map[string]*editorResourceRefs
 	if prune {
 		for _, name := range resources {
@@ -254,7 +276,8 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 					return nil, err
 				}
 			}
-			indexed, err := editorResourceDefinitions(ctx, data, name, references[name], refs.versions[cleanPackagePath(name)])
+			cleanName := cleanPackagePath(name)
+			indexed, err := editorResourceDefinitions(ctx, data, name, references[name], refs.versions[cleanName] || protectedFiles[cleanName])
 			if err != nil || indexed == nil {
 				return nil, err
 			}
@@ -263,7 +286,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 	}
 	if multiple || prune {
 		selected := ""
-		if reader != nil && reader.OFD.DocBody[reader.documentIndex].versioned {
+		if currentVersioned {
 			selected, err = reader.DocumentRootContext(ctx)
 			if err != nil {
 				return nil, err
@@ -292,15 +315,20 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 				maps.Copy(protectedProfiles, source.files)
 				continue
 			}
+			cleanName := cleanPackagePath(name)
 			usage := scoped[name]
 			for id, definition := range source.definitions {
-				if refs.versions[cleanPackagePath(name)] || usage == nil || usage.ids[id] {
+				if refs.versions[cleanName] || protectedFiles[cleanName] || usage == nil || usage.ids[id] {
 					maps.Copy(usedFiles, definition.files)
-					if refs.versions[cleanPackagePath(name)] || usage == nil {
+					if refs.versions[cleanName] || protectedFiles[cleanName] || usage == nil {
 						maps.Copy(protectedProfiles, definition.files)
 					}
 				}
 			}
+		}
+		for name := range protectedFiles {
+			usedFiles[name] = true
+			protectedProfiles[name] = true
 		}
 	} else {
 		usedFiles = maps.Clone(refs.files)
@@ -327,7 +355,8 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 		if multiple || prune {
 			usageRefs = scoped[name]
 		}
-		preserved := refs.versions[cleanPackagePath(name)] || usageRefs == nil
+		cleanName := cleanPackagePath(name)
+		preserved := refs.versions[cleanName] || protectedFiles[cleanName] || usageRefs == nil
 		var patches []editorXMLPatch
 		for _, group := range root.children {
 			var members []editorXMLPatch
@@ -360,13 +389,13 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 				}
 				if location := editorResourceLocation(name, root.attr("BaseLoc"), value); location != "" {
 					alternate := cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), value))
-					if field == "FontFile" && !multiple && !versioned && keep {
+					if field == "FontFile" && !multiple && !currentVersioned && keep {
 						var usage *editorFontUsage
 						if usageRefs != nil {
 							usage = usageRefs.fonts[id]
 						}
 						charset := node.attr("Charset")
-						unsafe := preserved || refs.fontUnsafe || id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != alternate
+						unsafe := preserved || refs.fontUnsafe || protectedFiles[location] || protectedFiles[alternate] || id == "" || charset != "" && !strings.EqualFold(charset, "unicode") || location != alternate
 						for _, file := range []string{location, alternate} {
 							if fontFiles[file] == nil {
 								fontFiles[file] = newEditorFontUsage()
@@ -378,7 +407,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 						usedFiles[location] = true
 						usedFiles[alternate] = true
 						if prune {
-							if profile && !preserved && location == alternate {
+							if profile && !preserved && !protectedFiles[location] && location == alternate {
 								profiles[location] = append(profiles[location], editorProfileReference{index: name, id: id})
 							} else {
 								protectedProfiles[location] = true
@@ -409,6 +438,9 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 	for name := range usedFiles {
 		delete(removed, name)
 	}
+	for name := range protectedFiles {
+		delete(removed, name)
+	}
 	var fontCache editorSourceFontCache
 	for i, name := range ordered {
 		if err := progress.report("fonts", i, len(ordered)); err != nil {
@@ -416,7 +448,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 		}
 		key := cleanPackagePath(name)
 		usage := fontFiles[key]
-		if e.backends.FontResources == nil || refs.fontUnsafe || usage == nil || usage.unsafe || refs.files[key] || removed[key] || parts[name] != nil {
+		if e.backends.FontResources == nil || refs.fontUnsafe || usage == nil || usage.unsafe || refs.files[key] || protectedFiles[key] || removed[key] || parts[name] != nil {
 			continue
 		}
 		data, err := reader.readFile(name)
@@ -450,6 +482,68 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 		return nil, err
 	}
 	return removed, nil
+}
+
+// recordAppendOnlyFiles 记录通过纯追加路径写入内存覆盖层的条目，保持快照写时复制隔离
+// 入参: files 本次纯追加写入的包内路径及字节切片
+func (s *editorSource) recordAppendOnlyFiles(files map[string][]byte) {
+	if s == nil || len(files) == 0 {
+		return
+	}
+	next := maps.Clone(s.appendOnlyFiles)
+	if next == nil {
+		next = make(map[string][]byte, len(files))
+	}
+	for name, data := range files {
+		next[cleanPackagePath(name)] = data
+	}
+	s.appendOnlyFiles = next
+}
+
+// canSkipResourceCompaction 判断当前未压缩保存是否未发生删除、替换或文本缩减，可安全跳过全包重扫与原包字体重子集化
+// 入参: reader 原包阅读器
+// 返回: bool 是否允许短路跳过全包资源重扫
+func (e *Editor) canSkipResourceCompaction(reader *Reader) bool {
+	if e.source == nil || reader == nil || e.source.mayShrinkResources {
+		return false
+	}
+	if len(e.removedPages) != 0 || len(e.source.retiredAttachments) != 0 || len(e.source.removedAttachments) != 0 {
+		return false
+	}
+	if e.source.info.Cover != "" && e.Info.Cover != e.source.info.Cover {
+		return false
+	}
+	if e.outlines != nil && len(e.source.document.Outlines.OutlineElem) != 0 {
+		return false
+	}
+	if len(e.pages) < len(e.source.pages) {
+		return false
+	}
+	for name, data := range reader.files {
+		clean := cleanPackagePath(name)
+		if initial, ok := e.source.initialFiles[clean]; ok && sameByteSlice(initial, data) {
+			continue
+		}
+		if appended, ok := e.source.appendOnlyFiles[clean]; ok && sameByteSlice(appended, data) {
+			continue
+		}
+		return false
+	}
+	keptSourceCount := 0
+	for _, page := range e.pages {
+		orig := e.source.pages[page.ID]
+		if orig == nil {
+			continue
+		}
+		keptSourceCount++
+		if orig.original == nil || sourcePageUntouched(page, orig) {
+			continue
+		}
+		if sourcePageMayShrink(page, orig) {
+			return false
+		}
+	}
+	return keptSourceCount == len(e.source.pages)
 }
 
 // editorResourceReferenceKind 区分标准标识和文件引用，其他文本不参与资源扫描
@@ -602,4 +696,86 @@ func knownResourceSafeCustomTag(tag CustomTag, root *StructureNode) bool {
 		return false
 	}
 	return structureInvoiceReferences(root) || tag.TypeID == pdfAuxiliaryTagType && root.Namespace == pdfStructureNamespace || tag.TypeID == pdfInformationTagType && root.Namespace == pdfInformationNamespace
+}
+
+// sourcePageMayShrink 判断已修改原页面是否可能减少原包资源引用或缩减原文文字内容
+// 入参: page 当前页面内容, orig 原页面快照
+// 返回: bool 是否可能缩减资源引用或文本用字
+func sourcePageMayShrink(page PageContent, orig *editorSourcePage) bool {
+	if orig == nil || orig.original == nil {
+		return false
+	}
+	if len(orig.original.Actions) != 0 && !reflect.DeepEqual(page.Actions, orig.original.Actions) {
+		beforeRefs := make(map[string]bool)
+		collectActionReferences(orig.original.Actions, beforeRefs)
+		normalizeResourceReferences(beforeRefs)
+		if len(beforeRefs) != 0 {
+			afterRefs := make(map[string]bool)
+			collectActionReferences(page.Actions, afterRefs)
+			normalizeResourceReferences(afterRefs)
+			for id := range beforeRefs {
+				if !afterRefs[id] {
+					return true
+				}
+			}
+		}
+	}
+	if len(page.Content.Layer) < len(orig.original.Content.Layer) {
+		return true
+	}
+	for i, origLayer := range orig.original.Content.Layer {
+		curLayer := page.Content.Layer[i]
+		if curLayer.ID != origLayer.ID {
+			return true
+		}
+		if origLayer.DrawParam != "" && curLayer.DrawParam != origLayer.DrawParam {
+			return true
+		}
+		if len(origLayer.Objects) == 0 {
+			continue
+		}
+		curObjects := make(map[string]GraphicObject, len(curLayer.Objects))
+		for _, obj := range curLayer.Objects {
+			curObjects[editorObjectID(obj)] = obj
+		}
+		for _, origObj := range origLayer.Objects {
+			curObj, ok := curObjects[editorObjectID(origObj)]
+			if !ok {
+				return true
+			}
+			if reflect.DeepEqual(origObj, curObj) {
+				continue
+			}
+			if !objectPreservesRefsAndText(origObj, curObj) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// objectPreservesRefsAndText 判断对象修改是否保留原有文字内容及全部既有资源引用
+// 入参: before 原对象, after 新对象
+// 返回: bool 是否未缩减原有资源引用或文本用字
+func objectPreservesRefsAndText(before, after GraphicObject) bool {
+	if !editorPreservedObject(before, after) {
+		return false
+	}
+	beforeRefs := make(map[string]bool)
+	collectObjectReferences(before, beforeRefs)
+	delete(beforeRefs, "")
+	if len(beforeRefs) == 0 {
+		return true
+	}
+	afterRefs := make(map[string]bool)
+	collectObjectReferences(after, afterRefs)
+	delete(afterRefs, "")
+	normalizeResourceReferences(beforeRefs)
+	normalizeResourceReferences(afterRefs)
+	for id := range beforeRefs {
+		if !afterRefs[id] {
+			return false
+		}
+	}
+	return true
 }

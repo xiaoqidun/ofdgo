@@ -21,67 +21,87 @@ import (
 	"slices"
 )
 
-// compactCFFGlyphs 重排已裁剪字体的字形，同步字符集、编码和字体字典归属
-// 入参: data 已裁剪的CFF数据, keep 保留的原字形编号
+// compactCFFDirect 直接从原始CFF构建紧凑子集，仅对保留字形及组合组件执行Type2分析
+// 入参: data 原始CFF数据, expectedGlyphs 期望字形总数，小于等于0时跳过校验, keep 保留的原字形编号
 // 返回: []byte 紧凑CFF数据, []uint16 新编号对应的原编号, error 结构或编码错误
-func compactCFFGlyphs(data []byte, keep map[uint16]bool) ([]byte, []uint16, error) {
-	ids := []uint16{0}
-	for gid, used := range keep {
-		if used && gid != 0 {
-			ids = append(ids, gid)
-		}
-	}
-	slices.Sort(ids)
+func compactCFFDirect(data []byte, expectedGlyphs int, keep map[uint16]bool) ([]byte, []uint16, error) {
 	font, err := readType2Font(data)
 	if err == nil {
-		sids, _, _, _, ok := getCFFCharsetInfo(data, len(font.chars))
-		if !ok {
-			return nil, nil, fmt.Errorf("invalid CFF charset")
+		if expectedGlyphs > 0 && len(font.chars) != expectedGlyphs {
+			return nil, nil, fmt.Errorf("CFF glyph count does not match maxp")
 		}
-		_, end, _ := readType2Index(data, int(data[2]))
-		tops, _, _ := readType2Index(data, end)
-		dict, _ := readCFFDict(tops[0])
-		encoding, err := cffSubsetEncoding(data, dict)
+		locals, globals, err := collectType2Dependencies([]*type2Font{font}, nil, keep)
 		if err != nil {
 			return nil, nil, err
 		}
-		if encoding != nil {
-			codes, err := readCFFSubsetEncoding(encoding, sids)
-			if err != nil {
-				return nil, nil, err
-			}
-			ordered := []uint16{0}
-			seen := map[uint16]bool{0: true}
-			for _, gid := range codes {
-				if keep[gid] && !seen[gid] {
-					ordered = append(ordered, gid)
-					seen[gid] = true
-				}
-			}
-			for _, gid := range ids {
-				if !seen[gid] {
-					ordered = append(ordered, gid)
-				}
-			}
-			ids = ordered
+		font.globals = subsetCFFSubroutines(font.globals, globals)
+		font.locals = subsetCFFSubroutines(font.locals, locals[0])
+		ids, chars, err := compactNamedCFFOrder(data, font, keep)
+		if err != nil {
+			return nil, nil, err
 		}
-		chars := make([][]byte, len(ids))
-		for index, gid := range ids {
-			if int(gid) >= len(font.chars) {
-				return nil, nil, fmt.Errorf("CFF glyph index out of range")
-			}
-			chars[index] = font.chars[gid]
-		}
-		result, err := rebuildNamedCFF(data, font, chars, ids)
+		result, err := rebuildNamedCFF(data, font, chars, ids, false)
 		return result, ids, err
 	}
 	cid, err := readCIDSubsetFont(data)
 	if err != nil {
 		return nil, nil, err
 	}
-	cids, _, _, _, ok := getCFFCharsetInfo(data, len(cid.selects))
-	if !ok {
-		return nil, nil, fmt.Errorf("invalid CID CFF charset")
+	if expectedGlyphs > 0 && len(cid.selects) != expectedGlyphs {
+		return nil, nil, fmt.Errorf("CFF glyph count does not match maxp")
+	}
+	locals, globals, err := collectType2Dependencies(cid.fonts, cid.selects, keep)
+	if err != nil {
+		return nil, nil, err
+	}
+	ids := sortedKeepGlyphs(keep)
+	globalPrograms := subsetCFFSubroutines(cid.fonts[0].globals, globals)
+	chars := make([][]byte, len(ids))
+	selected := make([]int, len(ids))
+	selects := make([]int, len(ids))
+	dicts, private, fonts := []cffDict{}, []cffDict{}, []*type2Font{}
+	remap := make(map[int]int)
+	for index, gid := range ids {
+		if int(gid) >= len(cid.selects) {
+			return nil, nil, fmt.Errorf("CFF glyph index out of range")
+		}
+		fd := cid.selects[gid]
+		mapped, exists := remap[fd]
+		if !exists {
+			mapped = len(fonts)
+			remap[fd] = mapped
+			f := cid.fonts[fd]
+			f.locals = subsetCFFSubroutines(f.locals, locals[fd])
+			f.globals = globalPrograms
+			dicts = append(dicts, cid.dicts[fd])
+			private = append(private, cid.private[fd])
+			fonts = append(fonts, f)
+		}
+		chars[index], selected[index], selects[index] = cid.fonts[fd].chars[gid], cid.cids[gid], mapped
+	}
+	cid.dicts, cid.private, cid.fonts = dicts, private, fonts
+	cid.charset, cid.selects = encodeCFFSubsetCharset(selected), selects
+	result, err := cid.write(chars)
+	return result, ids, err
+}
+
+// compactCFFGlyphs 重排已裁剪字体的字形，同步字符集、编码和字体字典归属
+// 入参: data 已裁剪的CFF数据, keep 保留的原字形编号
+// 返回: []byte 紧凑CFF数据, []uint16 新编号对应的原编号, error 结构或编码错误
+func compactCFFGlyphs(data []byte, keep map[uint16]bool) ([]byte, []uint16, error) {
+	font, err := readType2Font(data)
+	if err == nil {
+		ids, chars, err := compactNamedCFFOrder(data, font, keep)
+		if err != nil {
+			return nil, nil, err
+		}
+		result, err := rebuildNamedCFF(data, font, chars, ids, false)
+		return result, ids, err
+	}
+	ids := sortedKeepGlyphs(keep)
+	cid, err := readCIDSubsetFont(data)
+	if err != nil {
+		return nil, nil, err
 	}
 	chars := make([][]byte, len(ids))
 	selected := make([]int, len(ids))
@@ -101,12 +121,163 @@ func compactCFFGlyphs(data []byte, keep map[uint16]bool) ([]byte, []uint16, erro
 			private = append(private, cid.private[fd])
 			fonts = append(fonts, cid.fonts[fd])
 		}
-		chars[index], selected[index], selects[index] = cid.fonts[fd].chars[gid], cids[gid], mapped
+		chars[index], selected[index], selects[index] = cid.fonts[fd].chars[gid], cid.cids[gid], mapped
 	}
 	cid.dicts, cid.private, cid.fonts = dicts, private, fonts
 	cid.charset, cid.selects = encodeCFFSubsetCharset(selected), selects
 	result, err := cid.write(chars)
 	return result, ids, err
+}
+
+// compactCFFOrdered 按调用方指定字形顺序构建PDF紧凑CFF子集，保持前len(glyphs)项编号一致
+// 入参: data 原始CFF数据, expectedGlyphs 期望字形总数，小于等于0时跳过校验, glyphs 按目标CID排列的原字形编号
+// 返回: []byte 紧凑CFF数据, []uint16 新编号对应的原编号, error 结构或编码错误
+func compactCFFOrdered(data []byte, expectedGlyphs int, glyphs []uint16) ([]byte, []uint16, error) {
+	ids := []uint16{0}
+	keep := map[uint16]bool{0: true}
+	for _, gid := range glyphs {
+		if !keep[gid] {
+			keep[gid] = true
+			ids = append(ids, gid)
+		}
+	}
+	appendDeps := func() {
+		var extra []uint16
+		for gid, used := range keep {
+			if used && !slices.Contains(ids, gid) {
+				extra = append(extra, gid)
+			}
+		}
+		slices.Sort(extra)
+		ids = append(ids, extra...)
+	}
+	font, err := readType2Font(data)
+	if err == nil {
+		if expectedGlyphs > 0 && len(font.chars) != expectedGlyphs {
+			return nil, nil, fmt.Errorf("CFF glyph count does not match maxp")
+		}
+		for _, gid := range ids {
+			if int(gid) >= len(font.chars) {
+				return nil, nil, fmt.Errorf("CFF glyph index out of range")
+			}
+		}
+		locals, globals, err := collectType2Dependencies([]*type2Font{font}, nil, keep)
+		if err != nil {
+			return nil, nil, err
+		}
+		appendDeps()
+		font.globals = subsetCFFSubroutines(font.globals, globals)
+		font.locals = subsetCFFSubroutines(font.locals, locals[0])
+		chars := make([][]byte, len(ids))
+		for index, gid := range ids {
+			chars[index] = font.chars[gid]
+		}
+		result, err := rebuildNamedCFF(data, font, chars, ids, true)
+		return result, ids, err
+	}
+	cid, err := readCIDSubsetFont(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	if expectedGlyphs > 0 && len(cid.selects) != expectedGlyphs {
+		return nil, nil, fmt.Errorf("CFF glyph count does not match maxp")
+	}
+	for _, gid := range ids {
+		if int(gid) >= len(cid.selects) {
+			return nil, nil, fmt.Errorf("CFF glyph index out of range")
+		}
+	}
+	locals, globals, err := collectType2Dependencies(cid.fonts, cid.selects, keep)
+	if err != nil {
+		return nil, nil, err
+	}
+	appendDeps()
+	globalPrograms := subsetCFFSubroutines(cid.fonts[0].globals, globals)
+	chars := make([][]byte, len(ids))
+	selected := make([]int, len(ids))
+	selects := make([]int, len(ids))
+	dicts, private, fonts := []cffDict{}, []cffDict{}, []*type2Font{}
+	remap := make(map[int]int)
+	for index, gid := range ids {
+		fd := cid.selects[gid]
+		mapped, exists := remap[fd]
+		if !exists {
+			mapped = len(fonts)
+			remap[fd] = mapped
+			f := cid.fonts[fd]
+			f.locals = subsetCFFSubroutines(f.locals, locals[fd])
+			f.globals = globalPrograms
+			dicts = append(dicts, cid.dicts[fd])
+			private = append(private, cid.private[fd])
+			fonts = append(fonts, f)
+		}
+		chars[index], selected[index], selects[index] = cid.fonts[fd].chars[gid], index, mapped
+	}
+	cid.top[1234] = []float64{float64(len(ids))}
+	cid.dicts, cid.private, cid.fonts = dicts, private, fonts
+	cid.charset, cid.selects = encodeCFFSubsetCharset(selected), selects
+	result, err := cid.write(chars)
+	return result, ids, err
+}
+
+// sortedKeepGlyphs 返回以0起始并按升序排列的保留字形编号
+// 入参: keep 保留字形集合
+// 返回: []uint16 排序后的字形编号
+func sortedKeepGlyphs(keep map[uint16]bool) []uint16 {
+	ids := make([]uint16, 1, len(keep)+1)
+	for gid, used := range keep {
+		if used && gid != 0 {
+			ids = append(ids, gid)
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// compactNamedCFFOrder 按自定义编码约束确定非CID字体的紧凑字形顺序与程序切片
+// 入参: data CFF数据, font 执行资源, keep 保留字形集合
+// 返回: []uint16 新编号对应的原编号, [][]byte 重排后的字形程序, error 结构或越界错误
+func compactNamedCFFOrder(data []byte, font *type2Font, keep map[uint16]bool) ([]uint16, [][]byte, error) {
+	ids := sortedKeepGlyphs(keep)
+	sids, _, _, _, ok := getCFFCharsetInfo(data, len(font.chars))
+	if !ok {
+		return nil, nil, fmt.Errorf("invalid CFF charset")
+	}
+	_, end, _ := readType2Index(data, int(data[2]))
+	tops, _, _ := readType2Index(data, end)
+	dict, _ := readCFFDict(tops[0])
+	encoding, err := cffSubsetEncoding(data, dict)
+	if err != nil {
+		return nil, nil, err
+	}
+	if encoding != nil {
+		codes, err := readCFFSubsetEncoding(encoding, sids)
+		if err != nil {
+			return nil, nil, err
+		}
+		ordered := make([]uint16, 1, len(ids))
+		seen := map[uint16]bool{0: true}
+		for _, gid := range codes {
+			if keep[gid] && !seen[gid] {
+				ordered = append(ordered, gid)
+				seen[gid] = true
+			}
+		}
+		for _, gid := range ids {
+			if !seen[gid] {
+				ordered = append(ordered, gid)
+			}
+		}
+		ids = ordered
+	}
+	chars := make([][]byte, len(ids))
+	for index, gid := range ids {
+		if int(gid) >= len(font.chars) {
+			return nil, nil, fmt.Errorf("CFF glyph index out of range")
+		}
+		chars[index] = font.chars[gid]
+	}
+	return ids, chars, nil
 }
 
 // compactCFFTables 重建按字形编号索引的度量、字符映射和格式14变体子表

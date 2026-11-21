@@ -39,7 +39,7 @@ self.onmessage = ({ data }) => {
 			self.postMessage({ engineID, type: "exit", error: "engine already exists" });
 			return;
 		}
-		const engine = { id: engineID, operations: new Map(), fontRequests: new Map(), active: new Set(), closed: false };
+		const engine = { id: engineID, operations: new Map(), fontRequests: new Map(), active: new Set(), closed: false, outputFormats: null };
 		engines.set(engineID, engine);
 		engine.pending = runtimeReady.then(async () => {
 			if (engine.closed) return;
@@ -141,8 +141,8 @@ async function handleBatchMessage(engine, { id, name, args }) {
 		if (name === "ofdgoConvertFile") {
 			const [file, options, fonts, destination] = args;
 			credentials = options.credentials;
-			const formats = JSON.parse(await globalThis.ofdgoEngineCall(engine.id, "ofdgoOutputFormats", null)).data;
-			const format = formats.find(item => item.value === options.format);
+			engine.outputFormats ||= JSON.parse(await globalThis.ofdgoEngineCall(engine.id, "ofdgoOutputFormats", null)).data;
+			const format = engine.outputFormats.find(item => item.value === options.format);
 			if (!format) throw new Error("不支持此格式");
 			root = destination;
 			const base = options.base.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/g, "") || "document";

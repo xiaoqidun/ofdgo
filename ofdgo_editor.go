@@ -125,6 +125,9 @@ func NewEditor() *Editor {
 // SetFontDirs 设置编辑与几何度量使用的外部字体目录，不嵌入或替换文档字体
 // 入参: dirs 字体目录，空参数清除目录配置
 func (e *Editor) SetFontDirs(dirs ...string) {
+	if slices.Equal(e.fontDirs, dirs) {
+		return
+	}
 	e.fontDirs = slices.Clone(dirs)
 	e.fontRenderer = nil
 	e.fontSourcesCache = nil
@@ -134,6 +137,9 @@ func (e *Editor) SetFontDirs(dirs ...string) {
 // SetFontFS 设置编辑与几何度量使用的外部字体来源，不嵌入或替换文档字体
 // 入参: fsys 字体文件系统，空参数清除文件系统配置
 func (e *Editor) SetFontFS(fsys ...fs.FS) {
+	if sameFontFS(e.fontFS, fsys) {
+		return
+	}
 	e.fontFS = slices.Clone(fsys)
 	e.fontRenderer = nil
 	e.fontSourcesCache = nil
@@ -144,6 +150,9 @@ func (e *Editor) SetFontFS(fsys ...fs.FS) {
 // 与Renderer使用相同实例可统一显示、搜索和选区，nil禁用度量，不隐式回退
 // 入参: compiler 页面编译器
 func (e *Editor) SetPageCompiler(compiler PageCompiler) {
+	if sameBackend(e.backends.Compiler, compiler) {
+		return
+	}
 	e.backends.Compiler = compiler
 	e.fontRenderer = nil
 }
@@ -151,6 +160,9 @@ func (e *Editor) SetPageCompiler(compiler PageCompiler) {
 // SetRenderBackends 设置完整后端组合，字体能力变化时更新度量，不改变文档或撤销历史
 // 入参: backends 后端组合，未配置的能力不会沿用默认实现
 func (e *Editor) SetRenderBackends(backends RenderBackends) {
+	if sameRenderBackends(e.backends, backends) {
+		return
+	}
 	fontsChanged := !sameBackend(e.backends.Fonts, backends.Fonts)
 	if !sameBackend(e.backends.FontResources, backends.FontResources) {
 		e.clearFontResourceCache()
@@ -1589,4 +1601,44 @@ func escapeOFDText(value string) string {
 		}
 	}
 	return text.String()
+}
+
+// sameFS 判断两个字体文件系统配置是否安全等价，避免不可比较具体类型触发异常
+// 入参: left 原文件系统, right 新文件系统
+// 返回: bool 是否等价
+func sameFS(left, right fs.FS) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	lt, rt := reflect.TypeOf(left), reflect.TypeOf(right)
+	return lt == rt && lt.Comparable() && left == right
+}
+
+// sameFontFS 判断字体文件系统切片配置是否完全一致
+// 入参: left 原配置, right 新配置
+// 返回: bool 是否一致
+func sameFontFS(left, right []fs.FS) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !sameFS(left[i], right[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// sameRenderBackends 判断完整后端组合的不可变配置是否完全一致
+// 入参: left 原后端组合, right 新后端组合
+// 返回: bool 是否一致
+func sameRenderBackends(left, right RenderBackends) bool {
+	return sameBackend(left.FontResources, right.FontResources) &&
+		sameBackend(left.Fonts, right.Fonts) &&
+		sameBackend(left.Geometry, right.Geometry) &&
+		sameBackend(left.Compiler, right.Compiler) &&
+		sameBackend(left.Raster, right.Raster) &&
+		sameBackend(left.SVG, right.SVG) &&
+		sameBackend(left.PDF, right.PDF) &&
+		sameBackend(left.EPS, right.EPS)
 }

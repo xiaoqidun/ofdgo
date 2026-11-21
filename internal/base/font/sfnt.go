@@ -32,9 +32,12 @@ type SFNT struct {
 	IsTrueType, IsCFF                  bool
 	cmaps                              []sfntCmap
 	hasUnicodeCmap                     bool
+	hasCmapVariations                  bool
 	units, count, horizontal, vertical uint16
 	reverseOnce                        sync.Once
 	reverse                            map[uint16][]rune
+	cidOnce                            sync.Once
+	cidToGID                           map[uint16]uint16
 }
 
 // ParseSFNT 校验独立字体的必需表、度量范围及字符映射
@@ -83,6 +86,7 @@ func ParseSFNTTables(table map[string][]byte) (*SFNT, error) {
 	}
 	f.cmaps = cmaps
 	f.hasUnicodeCmap = slices.ContainsFunc(cmaps, func(c sfntCmap) bool { return c.isUnicode() })
+	f.hasCmapVariations = slices.ContainsFunc(cmaps, func(c sfntCmap) bool { return c.format == 14 })
 	for _, cmap := range f.cmaps {
 		if cmap.duplicate {
 			continue
@@ -176,6 +180,24 @@ func (f *SFNT) VerticalMetrics() (uint16, uint16, uint16) {
 // Write 保留原始表数据并重新计算字体校验和
 // 返回: []byte 独立字体
 func (f *SFNT) Write() []byte { data, _ := SerializeOTF(f.Tables); return data }
+
+// HasCmapVariations 判断已解析字体是否包含格式14变体序列子表
+// 返回: bool 是否包含格式14子表
+func (f *SFNT) HasCmapVariations() bool {
+	return f != nil && f.hasCmapVariations
+}
+
+// CFFCIDToGID 返回CID编码CFF字体的CID到GID反查表，结果在字体实例内复用
+// 返回: map[uint16]uint16 CID到GID映射，非CID字体返回nil
+func (f *SFNT) CFFCIDToGID() map[uint16]uint16 {
+	if f == nil || !f.IsCFF {
+		return nil
+	}
+	f.cidOnce.Do(func() {
+		f.cidToGID = cffCIDToGIDFromCFF(f.Tables["CFF "])
+	})
+	return f.cidToGID
+}
 
 // sfntCmap 保存编码记录及字符映射，连续区间与共享子表不重复展开
 type sfntCmap struct {

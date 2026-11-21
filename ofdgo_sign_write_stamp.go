@@ -24,30 +24,87 @@ import (
 	"strconv"
 )
 
+// SignatureStampCapability 描述页面中单个签章外观及其编辑能力
+type SignatureStampCapability struct {
+	Stamp        Stamp
+	Path         ObjectPath
+	Capabilities ObjectCapabilities
+}
+
 // SignatureStampCapabilities 返回签章外观的编辑能力，不以签名有效性限制编辑
 // 共享历史签名无法独立改写时保留原入口，避免改变其他版本
 // 入参: page 页面索引, path 签名及外观标识
 // 返回: ObjectCapabilities 移动缩放及删除能力, error 外观或读取错误
 func (e *Editor) SignatureStampCapabilities(page int, path ObjectPath) (ObjectCapabilities, error) {
-	if _, err := e.signatureStamp(page, path); err != nil {
-		return ObjectCapabilities{}, err
+	if page < 0 || page >= len(e.pages) {
+		return ObjectCapabilities{}, fmt.Errorf("page index %d out of range", page)
 	}
-	reader, err := e.reader(nil)
-	if err != nil {
-		return ObjectCapabilities{}, err
+	if e.source == nil || e.source.pages[e.pages[page].ID] == nil {
+		return ObjectCapabilities{}, fmt.Errorf("signature appearance not found: %s/%s", path.Signature, path.ID)
 	}
-	defer reader.Close()
+	reader := e.source.reader
 	doc, err := reader.Doc()
 	if err != nil {
 		return ObjectCapabilities{}, err
 	}
-	if err := reader.signatureStampVersionDependency(context.Background(), reader.ResPath(doc.Signatures)); err != nil {
-		if !errors.Is(err, ErrSignatureDependency) {
-			return ObjectCapabilities{}, err
-		}
-		return ObjectCapabilities{Reason: err.Error(), ReasonCode: EditUnsupportedObject}, nil
+	if doc.Signatures == "" {
+		return ObjectCapabilities{}, fmt.Errorf("signature appearance not found: %s/%s", path.Signature, path.ID)
 	}
-	return ObjectCapabilities{Transform: true, Delete: true, Stretch: true}, nil
+	stamps, err := reader.PageStamps(e.pages[page].ID)
+	if err != nil {
+		return ObjectCapabilities{}, err
+	}
+	found := false
+	for _, stamp := range stamps {
+		if stamp.ID == path.ID && stamp.SignatureID == path.Signature {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return ObjectCapabilities{}, fmt.Errorf("signature appearance not found: %s/%s", path.Signature, path.ID)
+	}
+	return reader.signatureStampCapabilities(context.Background(), doc)
+}
+
+// PageSignatureStampCapabilities 批量返回指定页面全部签章外观及其编辑能力，复用单次只读快照
+// 入参: page 零基页面索引
+// 返回: []SignatureStampCapability 页面签章外观及能力清单, error 页面或读取错误
+func (e *Editor) PageSignatureStampCapabilities(page int) ([]SignatureStampCapability, error) {
+	if page < 0 || page >= len(e.pages) {
+		return nil, fmt.Errorf("page index %d out of range", page)
+	}
+	if e.source == nil || e.source.pages[e.pages[page].ID] == nil {
+		return []SignatureStampCapability{}, nil
+	}
+	reader := e.source.reader
+	doc, err := reader.Doc()
+	if err != nil {
+		return nil, err
+	}
+	if doc.Signatures == "" {
+		return []SignatureStampCapability{}, nil
+	}
+	stamps, err := reader.PageStamps(e.pages[page].ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(stamps) == 0 {
+		return []SignatureStampCapability{}, nil
+	}
+	capability, err := reader.signatureStampCapabilities(context.Background(), doc)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]SignatureStampCapability, len(stamps))
+	for i, stamp := range stamps {
+		result[i] = SignatureStampCapability{
+			Stamp:        stamp,
+			Path:         ObjectPath{ID: stamp.ID, Signature: stamp.SignatureID},
+			Capabilities: capability,
+		}
+	}
+	return result, nil
 }
 
 // SignaturePageStamps 生成所选页面相同毫米坐标的印章位置并检查页内范围
@@ -113,6 +170,19 @@ type signatureStampEdit struct {
 	data    []byte
 	root    *editorXML
 	patches []editorXMLPatch
+}
+
+// signatureStampCapabilities 按文档签章版本依赖返回统一的签章外观编辑能力
+// 入参: ctx 取消上下文, doc 当前文档结构
+// 返回: ObjectCapabilities 移动缩放及删除能力, error 读取错误
+func (r *Reader) signatureStampCapabilities(ctx context.Context, doc *Document) (ObjectCapabilities, error) {
+	if err := r.signatureStampVersionDependency(ctx, r.ResPath(doc.Signatures)); err != nil {
+		if !errors.Is(err, ErrSignatureDependency) {
+			return ObjectCapabilities{}, err
+		}
+		return ObjectCapabilities{Reason: err.Error(), ReasonCode: EditUnsupportedObject}, nil
+	}
+	return ObjectCapabilities{Transform: true, Delete: true, Stretch: true}, nil
 }
 
 // signatureStampVersionDependency 判断文档级签名是否被其他历史入口共用，不改写版本语义
@@ -220,19 +290,21 @@ func (r *Reader) signatureStampChanges(ctx context.Context, name string, changes
 // 入参: page 页面索引, path 签名及外观标识
 // 返回: Stamp 当前外观, error 页面、签名或读取错误
 func (e *Editor) signatureStamp(page int, path ObjectPath) (Stamp, error) {
-	reader, err := e.reader(nil)
-	if err != nil {
-		return Stamp{}, err
+	if page < 0 || page >= len(e.pages) {
+		return Stamp{}, fmt.Errorf("page index %d out of range", page)
 	}
-	defer reader.Close()
+	if e.source == nil || e.source.pages[e.pages[page].ID] == nil {
+		return Stamp{}, fmt.Errorf("signature appearance not found: %s/%s", path.Signature, path.ID)
+	}
+	reader := e.source.reader
 	doc, err := reader.Doc()
 	if err != nil {
 		return Stamp{}, err
 	}
-	if page < 0 || page >= len(doc.Pages.Page) {
-		return Stamp{}, fmt.Errorf("page index %d out of range", page)
+	if doc.Signatures == "" {
+		return Stamp{}, fmt.Errorf("signature appearance not found: %s/%s", path.Signature, path.ID)
 	}
-	stamps, err := reader.PageStamps(doc.Pages.Page[page].ID)
+	stamps, err := reader.PageStamps(e.pages[page].ID)
 	if err != nil {
 		return Stamp{}, err
 	}

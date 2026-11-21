@@ -44,6 +44,12 @@ const editorSnapshotArchiveLimit = 32 << 20
 // editorSnapshotChunkSize 指定快照压缩数据的分块大小
 const editorSnapshotChunkSize = 256 << 10
 
+// editorOwnedTemplatePrefix 标记新建文档中由内部托管的模板页资源前缀
+const editorOwnedTemplatePrefix = "TemplatePage|"
+
+// editorStreamPageBufferLimit 限制流式写出页面XML时复用的单页缓冲上限
+const editorStreamPageBufferLimit = 4 << 20
+
 // ErrSaveTarget 表示编辑器尚未绑定保存目标
 var ErrSaveTarget = errors.New("save target is not set")
 
@@ -1413,7 +1419,7 @@ func (e *Editor) writePlaintext(writer io.Writer) (int64, error) {
 		return 0, err
 	}
 	progress := editorProgress(e.OnWriteProgress)
-	fonts, err := e.subsetFonts(progress)
+	fonts, err := e.subsetFontsWithTemplates(progress)
 	if err != nil {
 		return 0, err
 	}
@@ -1426,6 +1432,9 @@ func (e *Editor) writePlaintext(writer io.Writer) (int64, error) {
 	output := &ofdCountingWriter{writer: writer}
 	archive := zip.NewWriter(output)
 	if e.output != nil && e.output.options.Mode != CompressionUnchanged {
+		if len(e.removedPages) == 0 && len(e.origins) == 0 {
+			return e.writeStreamingCompressed(ctx, archive, output, fonts, progress)
+		}
 		parts := make(map[string][]byte)
 		err := e.writeParts(ctx, func(name string, data []byte, _ bool) error {
 			if subset, ok := fonts[name]; ok {
@@ -1531,10 +1540,45 @@ func (e *Editor) readerWithOptions(ctx context.Context, progress editorProgress,
 		return nil, nil, err
 	}
 	for i, page := range r.doc.Pages.Page {
-		r.pageHeaderCache[r.ResPath(page.BaseLoc)] = PageContent{Area: e.pages[i].Area, Template: slices.Clone(e.pages[i].Template), PageRes: slices.Clone(e.pages[i].PageRes)}
+		name := r.ResPath(page.BaseLoc)
+		r.pageHeaders.put(name, PageContent{Area: e.pages[i].Area, Template: slices.Clone(e.pages[i].Template), PageRes: slices.Clone(e.pages[i].PageRes)}, r.files[name])
 	}
 	e.previewPages = pages
 	return r, nil, nil
+}
+
+// skeletonReader 为渐进PDF导入创建不含未就绪页面XML的常驻骨架阅读器
+// 入参: ctx 取消上下文
+// 返回: *Reader 骨架阅读器, error 构建或取消错误
+func (e *Editor) skeletonReader(ctx context.Context) (*Reader, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := e.validate(); err != nil {
+		return nil, err
+	}
+	if e.source != nil || len(e.origins) != 0 {
+		return e.readerContext(ctx, nil)
+	}
+	r := &Reader{files: make(map[string][]byte), encryption: e.encryption, resources: e.runtimeResources}
+	if err := e.writePartsWithPages(ctx, func(name string, data []byte, _ bool) error {
+		r.files[name] = data
+		return nil
+	}, nil, false, nil); err != nil {
+		return nil, err
+	}
+	if err := r.initRootContext(ctx); err != nil {
+		return nil, err
+	}
+	if _, err := r.docStructureContext(ctx); err != nil {
+		return nil, err
+	}
+	r.pdfDestinations = e.pdfDestinations.clone()
+	for i, page := range r.doc.Pages.Page {
+		name := r.ResPath(page.BaseLoc)
+		r.pageHeaders.put(name, PageContent{Area: e.pages[i].Area, Template: slices.Clone(e.pages[i].Template), PageRes: slices.Clone(e.pages[i].PageRes)}, nil)
+	}
+	return r, nil
 }
 
 // invalidatePreviewPages 失效受影响页面的预览编码，保留事务和历史快照的独立缓存
@@ -1617,6 +1661,13 @@ func (e *Editor) writeParts(ctx context.Context, write func(string, []byte, bool
 // 入参: ctx 取消上下文, write 条目写入方法, progress 保存进度回调, includePages 是否写出页面, previews 预览页面编码缓存
 // 返回: error 写入错误
 func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []byte, bool) error, progress editorProgress, includePages bool, previews map[string][]byte) error {
+	return e.writePartsWithOptions(ctx, write, progress, includePages, false, previews)
+}
+
+// writePartsWithOptions 统一生成包条目，支持跳过页面XML落地以便调用方按页流式写出ZIP
+// 入参: ctx 取消上下文, write 条目写入方法, progress 保存进度回调, includePages 是否包含页面语义, skipPageEntries 是否由调用方流式写出页面条目, previews 预览页面编码缓存
+// 返回: error 写入错误
+func (e *Editor) writePartsWithOptions(ctx context.Context, write func(string, []byte, bool) error, progress editorProgress, includePages, skipPageEntries bool, previews map[string][]byte) error {
 	progress = progress.withContext(ctx)
 	if len(e.removedPages) != 0 {
 		output := write
@@ -1643,6 +1694,7 @@ func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []b
 	if err != nil {
 		return err
 	}
+	templates, templateFiles := e.usedOwnedTemplates()
 	writeXML := func(name string, encode func(*ofdXML)) error {
 		data, err := encodeOFDXMLContext(ctx, encode)
 		if err != nil {
@@ -1710,6 +1762,13 @@ func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []b
 		for _, name := range slices.Sorted(maps.Keys(definitions)) {
 			x.text("DocumentRes", "/"+name)
 		}
+		for _, tpl := range templates {
+			attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: tpl.ID}, {Name: xml.Name{Local: "BaseLoc"}, Value: tpl.BaseLoc}}
+			attrs.add("Name", tpl.Name)
+			attrs.add("ZOrder", tpl.ZOrder)
+			x.start("TemplatePage", attrs)
+			x.end("TemplatePage")
+		}
 		x.end("CommonData")
 		x.start("Pages", nil)
 		for _, page := range e.pages {
@@ -1754,7 +1813,7 @@ func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []b
 			}
 		}
 	}
-	if includePages {
+	if includePages && !skipPageEntries {
 		for i, page := range e.pages {
 			if err := progress.report("pages", i, len(e.pages)); err != nil {
 				return err
@@ -1808,7 +1867,7 @@ func (e *Editor) writePartsWithPages(ctx context.Context, write func(string, []b
 		}
 	}
 	for _, resource := range e.resources {
-		if resource.definition() != "" && definitions[resource.name] || resource.colorProfileUsed(spaces) {
+		if resource.definition() != "" && definitions[resource.name] || resource.colorProfileUsed(spaces) || templateFiles[resource.name] {
 			if written[resource.name] {
 				continue
 			}
@@ -1857,31 +1916,25 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 		}
 		return id
 	}
-	editorPageRes := make(map[string][]*parsedRes, len(e.pages))
-	for _, p := range e.pages {
-		if len(p.pageResources) == 0 {
-			continue
-		}
-		key := normPageID(p.ID)
-		if _, exists := editorPageRes[key]; !exists {
-			editorPageRes[key] = p.pageResources
-		}
-	}
+	var editorPageRes map[string][]*parsedRes
 	var sourcePageRefs map[string]Page
-	if e.source != nil {
-		sourcePageRefs = make(map[string]Page, len(e.source.document.Pages.Page))
-		for _, p := range e.source.document.Pages.Page {
-			key := normPageID(p.ID)
-			if _, exists := sourcePageRefs[key]; !exists {
-				sourcePageRefs[key] = p
-			}
-		}
-	}
 	localResCache := make(map[string][]*parsedRes)
 	localResForPageID := func(pageID string) ([]*parsedRes, error) {
 		key := normPageID(pageID)
 		if cached, ok := localResCache[key]; ok {
 			return cached, nil
+		}
+		if editorPageRes == nil {
+			editorPageRes = make(map[string][]*parsedRes)
+			for _, p := range e.pages {
+				if len(p.pageResources) == 0 {
+					continue
+				}
+				pk := normPageID(p.ID)
+				if _, exists := editorPageRes[pk]; !exists {
+					editorPageRes[pk] = p.pageResources
+				}
+			}
 		}
 		if res, ok := editorPageRes[key]; ok {
 			localResCache[key] = res
@@ -1891,9 +1944,38 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 			localResCache[key] = nil
 			return nil, nil
 		}
-		if sp := e.source.pages[pageID]; sp != nil && sp.original != nil && len(sp.original.pageResources) > 0 {
-			localResCache[key] = sp.original.pageResources
-			return sp.original.pageResources, nil
+		if sp := e.source.pages[pageID]; sp != nil {
+			if sp.original != nil && len(sp.original.pageResources) > 0 {
+				localResCache[key] = sp.original.pageResources
+				return sp.original.pageResources, nil
+			}
+			hdr, hdrErr := e.source.reader.readPageHeaderContext(ctx, sp.ref)
+			if hdrErr != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				localResCache[key] = nil
+				return nil, nil
+			}
+			if len(hdr.PageRes) == 0 {
+				localResCache[key] = nil
+				return nil, nil
+			}
+			res, resErr := e.source.reader.collectPageResourcesContext(ctx, e.source.reader.ResPath(sp.ref.BaseLoc), &hdr)
+			if resErr != nil {
+				return nil, resErr
+			}
+			localResCache[key] = res
+			return res, nil
+		}
+		if sourcePageRefs == nil {
+			sourcePageRefs = make(map[string]Page, len(e.source.document.Pages.Page))
+			for _, p := range e.source.document.Pages.Page {
+				pk := normPageID(p.ID)
+				if _, exists := sourcePageRefs[pk]; !exists {
+					sourcePageRefs[pk] = p
+				}
+			}
 		}
 		if p, ok := sourcePageRefs[key]; ok {
 			hdr, hdrErr := e.source.reader.readPageHeaderContext(ctx, p)
@@ -1978,36 +2060,27 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 			maps.Copy(promoted, used)
 		}
 	}
-	for _, page := range e.pages {
-		if err := ctx.Err(); err != nil {
-			return nil, nil, nil, nil, nil, err
+	usedTemplates := make(map[string]bool)
+	for i, page := range e.pages {
+		if i&4095 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, nil, nil, nil, err
+			}
 		}
-		var localRes []*parsedRes
+		var srcPage *editorSourcePage
 		if e.source != nil {
-			localRes = page.pageResources
-			if len(localRes) == 0 {
-				var locErr error
-				localRes, locErr = localResForPageID(page.ID)
-				if locErr != nil {
-					return nil, nil, nil, nil, nil, locErr
-				}
+			srcPage = e.source.pages[page.ID]
+			if srcPage != nil && srcPage.original == nil {
+				continue
 			}
 		}
-		actionRefs := make(map[string]bool)
-		collectActionReferences(page.Actions, actionRefs)
-		maps.Copy(used, actionRefs)
-		if e.source != nil && len(actionRefs) > 0 {
-			srcPage := e.source.pages[page.ID]
-			if srcPage == nil || srcPage.original == nil || !reflect.DeepEqual(page.Actions, srcPage.original.Actions) {
-				normalizeResourceReferences(actionRefs)
-				for ref := range actionRefs {
-					if !slices.ContainsFunc(localRes, func(parsed *parsedRes) bool { return parsedHasResource(parsed, ref, "") }) {
-						promoted[ref] = true
-					}
-				}
+		for _, tpl := range page.Template {
+			if id := editorResourceID(tpl.TemplateID); id != "" {
+				usedTemplates[id] = true
 			}
 		}
-		if e.source != nil && sourcePageUntouched(page, e.source.pages[page.ID]) {
+		if e.source != nil && sourcePageUntouched(page, srcPage) {
+			collectActionReferences(page.Actions, used)
 			for _, layer := range page.Content.Layer {
 				if layer.DrawParam != "" {
 					used[layer.DrawParam] = true
@@ -2021,13 +2094,47 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 			}
 			continue
 		}
+		var localRes []*parsedRes
+		localResLoaded := false
+		getLocalRes := func() ([]*parsedRes, error) {
+			if !localResLoaded {
+				localResLoaded = true
+				if len(page.pageResources) > 0 {
+					localRes = page.pageResources
+				} else if e.source != nil {
+					var locErr error
+					localRes, locErr = localResForPageID(page.ID)
+					if locErr != nil {
+						return nil, locErr
+					}
+				}
+			}
+			return localRes, nil
+		}
+		actionRefs := make(map[string]bool)
+		collectActionReferences(page.Actions, actionRefs)
+		maps.Copy(used, actionRefs)
+		if e.source != nil && len(actionRefs) > 0 {
+			if srcPage == nil || srcPage.original == nil || !reflect.DeepEqual(page.Actions, srcPage.original.Actions) {
+				resList, locErr := getLocalRes()
+				if locErr != nil {
+					return nil, nil, nil, nil, nil, locErr
+				}
+				normalizeResourceReferences(actionRefs)
+				for ref := range actionRefs {
+					if !slices.ContainsFunc(resList, func(parsed *parsedRes) bool { return parsedHasResource(parsed, ref, "") }) {
+						promoted[ref] = true
+					}
+				}
+			}
+		}
 		var original map[string]GraphicObject
 		var originalLayers map[string]string
 		if e.source != nil {
 			original = make(map[string]GraphicObject)
 			originalLayers = make(map[string]string)
-			if source := e.source.pages[page.ID]; source != nil && source.original != nil {
-				for _, layer := range source.original.Content.Layer {
+			if srcPage != nil && srcPage.original != nil {
+				for _, layer := range srcPage.original.Content.Layer {
 					originalLayers[layer.ID] = layer.DrawParam
 					for _, object := range layer.Objects {
 						original[editorObjectID(object)] = object
@@ -2039,11 +2146,15 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 			if layer.DrawParam != "" {
 				used[layer.DrawParam] = true
 				if e.source != nil && originalLayers[layer.ID] != layer.DrawParam {
+					resList, locErr := getLocalRes()
+					if locErr != nil {
+						return nil, nil, nil, nil, nil, locErr
+					}
 					key := editorResourceID(layer.DrawParam)
 					if key == "" {
 						key = layer.DrawParam
 					}
-					if !slices.ContainsFunc(localRes, func(parsed *parsedRes) bool { return parsedHasResource(parsed, key, "") }) {
+					if !slices.ContainsFunc(resList, func(parsed *parsedRes) bool { return parsedHasResource(parsed, key, "") }) {
 						promoted[key] = true
 					}
 				}
@@ -2056,17 +2167,35 @@ func (e *Editor) usedResources(ctx context.Context) (fonts, images []editorResou
 				collectObjectReferences(object, used)
 				origin := e.objectOrigin(editorObjectID(object))
 				if e.source != nil && (!exists || !reflect.DeepEqual(before, object)) {
+					resList, locErr := getLocalRes()
+					if locErr != nil {
+						return nil, nil, nil, nil, nil, locErr
+					}
 					refs := make(map[string]bool)
 					collectObjectReferences(object, refs)
 					normalizeResourceReferences(refs)
 					for ref := range refs {
-						if !slices.ContainsFunc(localRes, func(parsed *parsedRes) bool { return parsedHasResource(parsed, ref, "") }) {
+						if !slices.ContainsFunc(resList, func(parsed *parsedRes) bool { return parsedHasResource(parsed, ref, "") }) {
 							promoted[ref] = true
 							if origin != nil && origin.page != nil && origin.page.original != nil && len(origin.page.original.pageResources) > 0 {
 								pageOrigins[ref] = origin.page.original.pageResources
 							}
 						}
 					}
+				}
+			}
+		}
+	}
+	for _, resource := range e.resources {
+		tpl, ok := parseOwnedTemplateResource(resource)
+		if !ok {
+			continue
+		}
+		if retainAll || usedTemplates[editorResourceID(tpl.ID)] {
+			for _, reference := range resource.references {
+				used[reference] = true
+				if e.source != nil {
+					promoted[reference] = true
 				}
 			}
 		}
@@ -2361,6 +2490,269 @@ func (e *Editor) encodeXML(encode func(*ofdXML)) ([]byte, error) {
 		ctx = e.output.ctx
 	}
 	return encodeOFDXMLContext(ctx, encode)
+}
+
+// writeConvertedPDF 为PDF导入文档提供低内存流式写出，跳过重复全页快照扫描
+// 入参: ctx 取消上下文, writer 输出流, options 输出压缩配置
+// 返回: int64 已写入字节数, error 写出或取消错误
+func (e *Editor) writeConvertedPDF(ctx context.Context, writer io.Writer, options CompressionOptions) (int64, error) {
+	if err := sameOutputFile(e.sourceFile, writer); err != nil {
+		return 0, err
+	}
+	ctx = e.runtimeResources.context(ctx)
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := options.Validate(); err != nil {
+		return 0, err
+	}
+	snapshot := *e
+	snapshot.OnWriteProgress = editorProgress(e.OnWriteProgress).withContext(ctx)
+	snapshot.output = &outputOptimization{ctx: ctx, options: options}
+	defer snapshot.output.release()
+	if options.Mode != CompressionUnchanged {
+		if err := snapshot.compressPatternPaints(); err != nil {
+			return 0, err
+		}
+	}
+	var count int64
+	return snapshot.WriteTo(convertWriter{ctx: ctx, writer: writer, count: &count})
+}
+
+// writeStreamingCompressed 按页流式编码直写ZIP并仅对非页面资源执行压缩去重，避免万页XML驻留内存
+// 入参: ctx 取消上下文, archive 目标ZIP写出器, output 字节计数包装器, fonts 字体子集表, progress 进度回调
+// 返回: int64 已写入字节数, error 编码或写入错误
+func (e *Editor) writeStreamingCompressed(ctx context.Context, archive *zip.Writer, output *ofdCountingWriter, fonts map[string][]byte, progress editorProgress) (int64, error) {
+	parts := make(map[string][]byte)
+	err := e.writePartsWithOptions(ctx, func(name string, data []byte, _ bool) error {
+		if subset, ok := fonts[name]; ok {
+			data = subset
+		}
+		parts[name] = data
+		return nil
+	}, progress, true, true, nil)
+	if err != nil {
+		return 0, err
+	}
+	generated := make(map[string]editorGeneratedReferences, len(e.pages))
+	progressCtx := progress.withContext(ctx)
+	var pageBuf bytes.Buffer
+	for i, page := range e.pages {
+		if err := progressCtx.report("pages", i, len(e.pages)); err != nil {
+			return output.count, err
+		}
+		name := packagePagePath(e.packageDirectory(), page.ID)
+		if pageBuf.Cap() > editorStreamPageBufferLimit {
+			pageBuf = bytes.Buffer{}
+		} else {
+			pageBuf.Reset()
+		}
+		scan := &editorReferenceScan{refs: &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}, name: name, safe: true}
+		x := newOFDXML(&pageBuf)
+		x.ctx = ctx
+		x.references = scan
+		x.page(page)
+		if err := x.finish(); err != nil {
+			return output.count, err
+		}
+		data := pageBuf.Bytes()
+		if scan.safe && scan.seen && len(scan.stack) == 0 {
+			if err := e.writeOutputEntry(archive, zip.FileHeader{Name: name, Method: zip.Deflate}, data); err != nil {
+				return output.count, err
+			}
+			parts[name] = nil
+			generated[name] = editorGeneratedReferences{refs: scan.refs}
+		} else {
+			parts[name] = bytes.Clone(data)
+		}
+	}
+	if err := progressCtx.report("pages", len(e.pages), len(e.pages)); err != nil {
+		return output.count, err
+	}
+	removed := make(map[string]bool)
+	if e.output != nil && !e.output.protected {
+		unused, err := e.compactResourceReferences(parts, nil, editorProgress(e.OnWriteProgress), generated, nil)
+		if err != nil {
+			return output.count, err
+		}
+		maps.Copy(removed, unused)
+	}
+	if err := e.compressResourceReferences(parts, nil, removed, generated); err != nil {
+		return output.count, err
+	}
+	for _, name := range slices.Sorted(maps.Keys(parts)) {
+		if removed[cleanPackagePath(name)] || parts[name] == nil {
+			continue
+		}
+		if err := e.writeOutputEntry(archive, zip.FileHeader{Name: name, Method: zip.Deflate}, parts[name]); err != nil {
+			return output.count, err
+		}
+	}
+	err = archive.Close()
+	return output.count, err
+}
+
+// subsetFontsWithTemplates 在裁剪新增字体时纳入托管模板页用字，避免模板字符被裁除
+// 入参: progress 写出进度回调
+// 返回: map[string][]byte 字体子集表, error 扫描或裁剪错误
+func (e *Editor) subsetFontsWithTemplates(progress editorProgress) (map[string][]byte, error) {
+	_, templateFiles := e.usedOwnedTemplates()
+	if len(templateFiles) == 0 {
+		return e.subsetFonts(progress)
+	}
+	subsetEditor := *e
+	subsetEditor.pages = slices.Clone(e.pages)
+	for _, resource := range e.resources {
+		if !templateFiles[resource.name] {
+			continue
+		}
+		var tplPage PageContent
+		if err := xml.Unmarshal(resource.data, &tplPage); err != nil {
+			return nil, err
+		}
+		subsetEditor.pages = append(subsetEditor.pages, tplPage)
+	}
+	return subsetEditor.subsetFonts(progress)
+}
+
+// addOwnedTemplatePage 将本库生成的对象注册为标准OFD模板页，同时兼容纯内存与源文档模式
+// 入参: ctx 取消上下文, area 模板页面区域, objects 模板图元对象, zOrder 模板层次, title 可选模板名称
+// 返回: string 模板标识, error 校验、编码或取消错误
+func (e *Editor) addOwnedTemplatePage(ctx context.Context, area PageArea, objects []GraphicObject, zOrder, title string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := e.prepareSourceIDsContext(ctx); err != nil {
+		return "", err
+	}
+	zOrder = editorTemplateOrder(zOrder)
+	validation := &editorValidation{Editor: e}
+	prepared := make([]GraphicObject, len(objects))
+	for i, object := range objects {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		item, err := validation.prepareObject(e.nextID(), object)
+		if err != nil {
+			return "", err
+		}
+		prepared[i] = item
+	}
+	tplID := e.nextID()
+	layerID := e.nextID()
+	tplPage := PageContent{
+		Area:    area,
+		Content: Content{Layer: []Layer{{ID: layerID, Type: "Body", Objects: prepared}}},
+	}
+	loc := e.packageName("Templates/Template_" + tplID + "/Content.xml")
+	scan := &editorReferenceScan{refs: &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}, objects: make(map[string]bool), name: loc, safe: true}
+	data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) {
+		x.references = scan
+		x.page(tplPage)
+	})
+	if err != nil {
+		return "", err
+	}
+	var refs []string
+	var usage *editorVectorUsage
+	if scan.safe && scan.seen && len(scan.stack) == 0 {
+		refs = slices.Sorted(maps.Keys(scan.objects))
+		usage = scan.vectorUsage(data)
+	} else {
+		refs, err = editorResourceReferences(data)
+		if err != nil {
+			return "", err
+		}
+	}
+	tag := editorOwnedTemplatePrefix + tplID + "|" + zOrder + "|" + title
+	e.resources = append(e.resources, editorResource{
+		name:       loc,
+		data:       data,
+		drawSource: tag,
+		references: refs,
+		usage:      usage,
+	})
+	if e.source != nil {
+		reader := e.source.reader
+		if reader.files == nil {
+			reader.files = make(map[string][]byte)
+		}
+		if reader.fileNames == nil {
+			reader.fileNames = make(map[string]bool)
+		}
+		reader.files[loc] = data
+		reader.fileNames[loc] = true
+		docData, err := reader.readFileViewContext(ctx, reader.documentRoot)
+		if err != nil {
+			return "", err
+		}
+		root, err := parseEditorXMLContext(ctx, docData)
+		if err != nil {
+			return "", err
+		}
+		common := root.child("CommonData")
+		if common == nil {
+			return "", fmt.Errorf("document has no CommonData")
+		}
+		attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: tplID}, {Name: xml.Name{Local: "BaseLoc"}, Value: "/" + loc}, {Name: xml.Name{Local: "ZOrder"}, Value: zOrder}}
+		attrs.add("Name", title)
+		fragment, err := common.containerXML("TemplatePage", attrs, nil)
+		if err != nil {
+			return "", err
+		}
+		at := common.close
+		if node := common.child("DefaultCS"); node != nil {
+			at = node.start
+		}
+		patched := editorPatchXML(docData, []editorXMLPatch{{at, at, fragment}})
+		reader.files[reader.documentRoot] = patched
+		reader.fileNames[reader.documentRoot] = true
+		e.source.recordAppendOnlyFiles(map[string][]byte{loc: data, reader.documentRoot: patched})
+		e.source.document.CommonData.TemplatePage = append(e.source.document.CommonData.TemplatePage, TemplatePage{ID: tplID, Name: title, BaseLoc: "/" + loc, ZOrder: zOrder})
+	}
+	return tplID, nil
+}
+
+// usedOwnedTemplates 返回当前文档页面实际引用的托管模板页定义与文件路径集合
+// 返回: []TemplatePage 模板定义清单, map[string]bool 模板文件路径集合
+func (e *Editor) usedOwnedTemplates() ([]TemplatePage, map[string]bool) {
+	usedIDs := make(map[string]bool)
+	for _, page := range e.pages {
+		for _, tpl := range page.Template {
+			if id := editorResourceID(tpl.TemplateID); id != "" {
+				usedIDs[id] = true
+			}
+		}
+	}
+	if len(usedIDs) == 0 {
+		return nil, nil
+	}
+	var list []TemplatePage
+	files := make(map[string]bool)
+	for _, resource := range e.resources {
+		tpl, ok := parseOwnedTemplateResource(resource)
+		if !ok || !usedIDs[editorResourceID(tpl.ID)] {
+			continue
+		}
+		list = append(list, tpl)
+		files[resource.name] = true
+	}
+	return list, files
+}
+
+// parseOwnedTemplateResource 解析托管模板页资源元数据
+// 入参: resource 编辑器资源条目
+// 返回: TemplatePage 模板定义, bool 是否为托管模板页
+func parseOwnedTemplateResource(resource editorResource) (TemplatePage, bool) {
+	if resource.draw != nil || !strings.HasPrefix(resource.drawSource, editorOwnedTemplatePrefix) {
+		return TemplatePage{}, false
+	}
+	rest := strings.TrimPrefix(resource.drawSource, editorOwnedTemplatePrefix)
+	parts := strings.SplitN(rest, "|", 3)
+	if len(parts) != 3 || parts[0] == "" {
+		return TemplatePage{}, false
+	}
+	return TemplatePage{ID: parts[0], ZOrder: parts[1], Name: parts[2], BaseLoc: "/" + resource.name}, true
 }
 
 // cleanupSnapshotBuffer 在最后一个持有快照归档的Reader回收后清理临时存储

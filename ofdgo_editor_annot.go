@@ -16,9 +16,11 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"maps"
+	"math"
 	"path"
 	"strings"
 	"time"
@@ -33,6 +35,85 @@ type AnnotationSelection struct {
 	pageScope []*parsedRes
 	states    map[string]map[string]editorCompositeState
 	richText  map[int]*richTextSnapshot
+}
+
+// ImageStampOptions 描述标准图片图章注解的构造参数
+// Box为页面毫米区域，Angle为顺时针旋转角度，Alpha为nil时使用不透明默认值
+type ImageStampOptions struct {
+	ResourceID string
+	Box        Box
+	Angle      float64
+	Alpha      *int
+	Creator    string
+	Remark     string
+}
+
+// AddAnnotations 批量向指定页面新增标准注解并单次提交，支持多页共用单个注解或按页一一对应
+// 同一页面可重复出现，返回的新注解标识与pages一一对应，一次批量操作计入一条撤销记录
+// 入参: pages 目标页面索引列表, annotations 单个或与页码等长的注解列表
+// 返回: []string 新注解标识列表, error 错误信息
+func (e *Editor) AddAnnotations(pages []int, annotations []Annotation) ([]string, error) {
+	return e.AddAnnotationsContext(context.Background(), pages, annotations)
+}
+
+// AddAnnotationsContext 批量向指定页面新增标准注解并单次提交，准备和提交阶段响应取消
+// 入参: ctx 取消上下文, pages 目标页面索引列表, annotations 单个或与页码等长的注解列表
+// 返回: []string 新注解标识列表, error 参数、校验或取消错误
+func (e *Editor) AddAnnotationsContext(ctx context.Context, pages []int, annotations []Annotation) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(pages) == 0 {
+		if len(annotations) <= 1 {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("annotation count %d does not match page count %d", len(annotations), len(pages))
+	}
+	if len(annotations) != 1 && len(annotations) != len(pages) {
+		return nil, fmt.Errorf("annotation count %d does not match page count %d", len(annotations), len(pages))
+	}
+	for _, page := range pages {
+		if page < 0 || page >= len(e.pages) {
+			return nil, fmt.Errorf("page index %d out of range", page)
+		}
+	}
+	var ids []string
+	err := e.Transaction(func(edit *Editor) error {
+		if err := edit.prepareSourceIDsContext(ctx); err != nil {
+			return err
+		}
+		ids = make([]string, len(pages))
+		uniquePages := make([]int, 0, len(pages))
+		grouped := make([][]byte, 0, len(pages))
+		positions := make(map[int]int, len(pages))
+		for i, page := range pages {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			annotation := annotations[0]
+			if len(annotations) > 1 {
+				annotation = annotations[i]
+			}
+			id, data, err := edit.prepareAnnotation(page, annotation)
+			if err != nil {
+				return err
+			}
+			ids[i] = id
+			fragment := bytes.TrimPrefix(data, []byte(xml.Header))
+			if pos, ok := positions[page]; ok {
+				grouped[pos] = append(grouped[pos], fragment...)
+			} else {
+				positions[page] = len(uniquePages)
+				uniquePages = append(uniquePages, page)
+				grouped = append(grouped, bytes.Clone(fragment))
+			}
+		}
+		return edit.appendPageAnnotations(ctx, uniquePages, grouped, true)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // Annotations 获取指定页面的注解信息，包含不可见注解，返回值与编辑器相互独立
@@ -401,6 +482,54 @@ func (e *Editor) ReplaceAnnotationText(page int, id, old, value string, style Te
 		return 0, err
 	}
 	return count, nil
+}
+
+// NewImageStampAnnotation 构造标准图片图章注解，统一计算外观Boundary、居中旋转CTM及透明度
+// 入参: options 图片图章参数
+// 返回: Annotation 可直接提交的图章注解, error 参数校验错误
+func NewImageStampAnnotation(options ImageStampOptions) (Annotation, error) {
+	if strings.TrimSpace(options.ResourceID) == "" {
+		return Annotation{}, fmt.Errorf("stamp requires an image resource ID")
+	}
+	if err := validateCreationBox(options.Box); err != nil {
+		return Annotation{}, err
+	}
+	if !finite(options.Angle) {
+		return Annotation{}, fmt.Errorf("stamp angle must be finite")
+	}
+	var alpha *int
+	if options.Alpha != nil {
+		if *options.Alpha < 0 || *options.Alpha > 255 {
+			return Annotation{}, fmt.Errorf("alpha must be between 0 and 255")
+		}
+		value := *options.Alpha
+		alpha = &value
+	}
+	ctm := Matrix{a: options.Box.W, d: options.Box.H}
+	if options.Angle != 0 {
+		rad := options.Angle * math.Pi / 180
+		cos, sin := math.Cos(rad), math.Sin(rad)
+		rot := Matrix{a: cos, b: sin, c: -sin, d: cos}
+		ctm = TranslationMatrix(options.Box.W/2, options.Box.H/2).Multiply(rot).Multiply(TranslationMatrix(-options.Box.W/2, -options.Box.H/2)).Multiply(ctm)
+	}
+	object := GraphicObject{
+		Type: "ImageObject",
+		ImageObject: ImageObject{
+			ResourceID: options.ResourceID,
+			Boundary:   editorBoxString(Box{W: options.Box.W, H: options.Box.H}),
+			CTM:        ctm.String(),
+			Alpha:      alpha,
+		},
+	}
+	return Annotation{
+		Type:    "Stamp",
+		Creator: options.Creator,
+		Remark:  options.Remark,
+		Appearance: Appearance{
+			Boundary: editorBoxString(options.Box),
+			Objects:  []GraphicObject{object},
+		},
+	}, nil
 }
 
 // editorAnnotationDate 更新注解修改日期，采用标准xs:date格式

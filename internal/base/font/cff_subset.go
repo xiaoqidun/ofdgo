@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"fmt"
 	"maps"
+	"slices"
 )
 
 // subsetCFFFont 裁剪CFF字体，保留组合组件和度量，按需重排字形并在保留编号时维护排版表
@@ -30,6 +31,13 @@ func subsetCFFFont(sfnt *SFNT, glyphs []uint16, preserve bool) ([]byte, error) {
 			return nil, fmt.Errorf("CFF glyph index out of range")
 		}
 		keep[gid] = true
+	}
+	if !preserve {
+		if compact, ids, err := compactCFFDirect(sfnt.Tables["CFF "], int(sfnt.NumGlyphs()), keep); err == nil {
+			if result, err := compactCFFTables(sfnt, compact, ids, nil, nil); err == nil {
+				return result, nil
+			}
+		}
 	}
 	retainLayout := false
 	if preserve {
@@ -82,38 +90,78 @@ func subsetCFFCharstrings(data []byte, keep map[uint16]bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return rebuildNamedCFF(data, font, chars, nil)
+	return rebuildNamedCFF(data, font, chars, nil, false)
 }
 
-// subsetType2Programs 按字形所属字典收集子程序依赖并清空未使用的轮廓
-// 入参: fonts 执行资源, selects 字形所属字典，单字典时可为空, keep 保留的字形
-// 返回: [][]byte 字形程序, error 执行或字宽错误
-func subsetType2Programs(fonts []*type2Font, selects []int, keep map[uint16]bool) ([][]byte, error) {
+// collectType2Dependencies 仅对保留字形及组合组件运行Type2虚拟机并收集子程序引用
+// 入参: fonts 执行资源, selects 字形所属字典，单字典时可为空, keep 保留字形集合，调用后包含组合组件
+// 返回: [][]bool 各字典局部子程序使用标记, []bool 全局子程序使用标记, error 执行或越界错误
+func collectType2Dependencies(fonts []*type2Font, selects []int, keep map[uint16]bool) ([][]bool, []bool, error) {
 	keep[0] = true
 	programs := fonts[0].chars
 	locals := make([][]bool, len(fonts))
-	empty := make([]map[float64][]byte, len(fonts))
 	for index, font := range fonts {
 		locals[index] = make([]bool, len(font.locals))
-		empty[index] = make(map[float64][]byte)
 	}
 	globals := make([]bool, len(fonts[0].globals))
-	var stack [48]float64
-	for gid := range keep {
-		if int(gid) >= len(programs) {
-			return nil, fmt.Errorf("CFF glyph index out of range")
+	visited := make(map[uint16]bool, len(keep))
+	queue := make([]uint16, 0, len(keep))
+	for gid, retained := range keep {
+		if retained {
+			queue = append(queue, gid)
 		}
+	}
+	slices.Sort(queue)
+	var stack [48]float64
+	for len(queue) > 0 {
+		gid := queue[0]
+		queue = queue[1:]
+		if visited[gid] {
+			continue
+		}
+		if int(gid) >= len(programs) {
+			return nil, nil, fmt.Errorf("CFF glyph index out of range")
+		}
+		visited[gid] = true
 		fd := 0
 		if selects != nil {
 			fd = selects[gid]
 		}
 		font := fonts[fd]
 		steps := 0
+		prevLen := len(keep)
 		state := type2State{font: font, args: stack[:0], width: font.def, seed: font.seed + uint64(gid), steps: &steps, dependencies: keep, localUsage: locals[fd], globalUsage: globals}
 		if _, err := state.run(font.chars[gid], 0); err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		if len(keep) > prevLen {
+			var added []uint16
+			for dep, retained := range keep {
+				if retained && !visited[dep] {
+					added = append(added, dep)
+				}
+			}
+			slices.Sort(added)
+			queue = append(queue, added...)
 		}
 	}
+	return locals, globals, nil
+}
+
+// subsetType2Programs 按字形所属字典收集子程序依赖并清空未使用的轮廓
+// 入参: fonts 执行资源, selects 字形所属字典，单字典时可为空, keep 保留的字形
+// 返回: [][]byte 字形程序, error 执行或字宽错误
+func subsetType2Programs(fonts []*type2Font, selects []int, keep map[uint16]bool) ([][]byte, error) {
+	locals, globals, err := collectType2Dependencies(fonts, selects, keep)
+	if err != nil {
+		return nil, err
+	}
+	programs := fonts[0].chars
+	empty := make([]map[float64][]byte, len(fonts))
+	for index := range fonts {
+		empty[index] = make(map[float64][]byte)
+	}
+	var stack [48]float64
 	chars := make([][]byte, len(programs))
 	for gid, program := range programs {
 		if keep[uint16(gid)] {
@@ -181,10 +229,10 @@ func subsetCFFSubroutines(programs [][]byte, used []bool) [][]byte {
 	return result
 }
 
-// rebuildNamedCFF 重建非CID的CFF偏移，保留字符集、编码和私有提示参数
-// 入参: data 原始CFF数据, font 执行资源, chars 替换后的字形程序, ids 字形重排顺序，nil时保留原编号
+// rebuildNamedCFF 重建非CID的CFF偏移，保留字符集、私有提示参数并按需保留编码
+// 入参: data 原始CFF数据, font 执行资源, chars 替换后的字形程序, ids 字形重排顺序，nil时保留原编号, dropEncoding 是否移除自定义编码表
 // 返回: []byte 重建的CFF数据, error 不支持的结构
-func rebuildNamedCFF(data []byte, font *type2Font, chars [][]byte, ids []uint16) ([]byte, error) {
+func rebuildNamedCFF(data []byte, font *type2Font, chars [][]byte, ids []uint16, dropEncoding bool) ([]byte, error) {
 	names, end, err := readType2Index(data, int(data[2]))
 	if err != nil {
 		return nil, err
@@ -212,9 +260,14 @@ func rebuildNamedCFF(data []byte, font *type2Font, chars [][]byte, ids []uint16)
 	if !ok {
 		return nil, fmt.Errorf("invalid CFF charset")
 	}
-	encoding, err := cffSubsetEncoding(data, dict)
-	if err != nil {
-		return nil, err
+	var encoding []byte
+	if dropEncoding {
+		delete(dict, 16)
+	} else {
+		encoding, err = cffSubsetEncoding(data, dict)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if ids != nil {
 		if encoding != nil {

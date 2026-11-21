@@ -15,7 +15,6 @@
 package font
 
 import (
-	"bytes"
 	"encoding/binary"
 	"io"
 	"unicode/utf16"
@@ -136,8 +135,16 @@ func fontNameValues(data []byte) ([]fontNameRecord, map[[4]uint16]string) {
 		return nil, nil
 	}
 	records := make([]fontNameRecord, count)
-	if err := binary.Read(bytes.NewReader(data[6:]), binary.BigEndian, records); err != nil {
-		return nil, nil
+	for i := range count {
+		off := 6 + i*12
+		records[i] = fontNameRecord{
+			Platform: binary.BigEndian.Uint16(data[off:]),
+			Encoding: binary.BigEndian.Uint16(data[off+2:]),
+			Language: binary.BigEndian.Uint16(data[off+4:]),
+			Name:     binary.BigEndian.Uint16(data[off+6:]),
+			Length:   binary.BigEndian.Uint16(data[off+8:]),
+			Offset:   binary.BigEndian.Uint16(data[off+10:]),
+		}
 	}
 	values := make(map[[4]uint16]string)
 	for _, record := range records {

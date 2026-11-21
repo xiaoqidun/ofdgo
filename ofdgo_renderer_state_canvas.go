@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"image"
 	"math"
 
 	"github.com/tdewolff/canvas"
@@ -66,6 +67,40 @@ type canvasStrokeKey struct {
 // canvasOutlineCacheKey 区分子渲染器共享的字体轮廓解析缓存
 type canvasOutlineCacheKey struct{}
 
+// canvasFontFamilyCacheKey 区分跨渲染器共享的已加载只读字体族缓存
+type canvasFontFamilyCacheKey struct{}
+
+// canvasTextGlyphCacheKey 区分跨渲染器共享的字形路径缓存
+type canvasTextGlyphCacheKey struct{}
+
+// canvasTemplateCommandsKey 区分跨渲染器共享的模板页光栅指令缓存
+type canvasTemplateCommandsKey struct{}
+
+// svgTemplateCacheKey 区分跨渲染器共享的模板页SVG片段缓存
+type svgTemplateCacheKey struct{}
+
+// stampImageCacheKey 区分跨渲染器共享的图像印章缓存
+type stampImageCacheKey struct{}
+
+// stampOFDCacheKey 区分跨渲染器共享的OFD印章解析缓存
+type stampOFDCacheKey struct{}
+
+// imageEffectCacheKey 区分跨渲染器共享的透明与蒙版图像缓存
+type imageEffectCacheKey struct{}
+
+// templateRasterCacheKey 按模板页面、视口与渲染模式区分共享光栅指令
+type templateRasterCacheKey struct {
+	template      *PageContent
+	width         float64
+	height        float64
+	offsetX       float64
+	offsetY       float64
+	dpi           float64
+	printing      bool
+	printContents string
+	decodeImages  bool
+}
+
 // canvasFillKey 保存完整几何摘要及填充规则
 type canvasFillKey struct {
 	digest [32]byte
@@ -78,32 +113,33 @@ type canvasPathKey struct {
 	epsilon float64
 }
 
-// canvasBackendState 保存Canvas字体与字形适配缓存
+// canvasBackendState 保存当前渲染器的Canvas快速查找缓存
 type canvasBackendState struct {
-	resources          *Resources
-	fontFamilies       map[canvasFontKey]*canvas.FontFamily
-	fontMap            map[canvasFontMapKey]*canvas.FontFamily
-	fontDigests        map[*canvas.Font][32]byte
-	svgFontCache       map[*canvas.Font]SVGFont
-	textGlyphPathCache renderCache[textGlyphPathCacheKey, textGlyphPathCacheValue]
-	fontOutlines       map[*canvas.Font]*basefont.Outliner
+	resources     *Resources
+	fontFamilies  map[canvasFontKey]*canvas.FontFamily
+	fontMap       map[canvasFontMapKey]*canvas.FontFamily
+	fontDigests   map[*canvas.Font][32]byte
+	svgFontCache  map[*canvas.Font]SVGFont
+	fontOutlines  map[*canvas.Font]*basefont.Outliner
+	stampSessions map[[32]byte]*cachedStampSession
 }
 
 // resetFonts 清除Canvas字体及字形缓存
 func (s *canvasBackendState) resetFonts() {
-	s.textGlyphPathCache.clear()
 	s.fontFamilies = make(map[canvasFontKey]*canvas.FontFamily)
 	s.fontMap = make(map[canvasFontMapKey]*canvas.FontFamily)
 	s.fontDigests = make(map[*canvas.Font][32]byte)
 	s.svgFontCache = make(map[*canvas.Font]SVGFont)
-	s.textGlyphPathCache = *resourceCache[textGlyphPathCacheKey, textGlyphPathCacheValue](s.resources, 16<<20)
 	s.fontOutlines = make(map[*canvas.Font]*basefont.Outliner)
+	s.stampSessions = make(map[[32]byte]*cachedStampSession)
 }
 
 // forkSharedState 将Canvas后端的线程安全共享缓存传递给Fork子渲染器
 // 入参: src 源渲染器, dst 目标子渲染器
 func (CanvasBackend) forkSharedState(src, dst *Renderer) {
 	dst.sharedBackendStates[CanvasBackend{}] = src.canvasFontData()
+	dst.sharedBackendStates[canvasFontFamilyCacheKey{}] = src.canvasFontFamilies()
+	dst.sharedBackendStates[canvasTextGlyphCacheKey{}] = src.canvasTextGlyphPaths()
 	dst.sharedBackendStates[canvasOutlineCacheKey{}] = src.canvasFontOutlines()
 	dst.sharedBackendStates[canvasClipUnionKey{}] = src.canvasClipUnions()
 	dst.sharedBackendStates[canvasPathCacheKey{}] = src.canvasParsedPaths()
@@ -111,8 +147,14 @@ func (CanvasBackend) forkSharedState(src, dst *Renderer) {
 	dst.sharedBackendStates[canvasFillCacheKey{}] = src.canvasSettledPaths()
 	dst.sharedBackendStates[canvasDrawClipCacheKey{}] = src.canvasDrawClips()
 	dst.sharedBackendStates[canvasStrokeCacheKey{}] = src.canvasStrokeClips()
+	dst.sharedBackendStates[canvasTemplateCommandsKey{}] = src.canvasTemplateCommands()
 	dst.sharedBackendStates[svgResourceCacheKey{}] = src.svgImageResources()
+	dst.sharedBackendStates[svgEncodedMetaCacheKey{}] = src.svgEncodedImageMeta()
 	dst.sharedBackendStates[svgFontCacheKey{}] = src.svgFontResources()
+	dst.sharedBackendStates[svgTemplateCacheKey{}] = src.svgTemplateFragments()
+	dst.sharedBackendStates[stampImageCacheKey{}] = src.stampImageCache()
+	dst.sharedBackendStates[stampOFDCacheKey{}] = src.stampOFDCache()
+	dst.sharedBackendStates[imageEffectCacheKey{}] = src.imageEffectCache()
 }
 
 // sharedCanvasCache 获取或初始化指定键名的线程安全Canvas共享缓存
@@ -249,6 +291,42 @@ func (r *Renderer) applyCachedClipPath(path, clip *canvas.Path) *canvas.Path {
 // 返回: *renderCache[[32]byte, *basefont.Outliner] 字体轮廓缓存
 func (r *Renderer) canvasFontOutlines() *renderCache[[32]byte, *basefont.Outliner] {
 	return sharedCanvasCache[[32]byte, *basefont.Outliner](r, canvasOutlineCacheKey{}, 32<<20)
+}
+
+// canvasFontFamilies 获取跨渲染器共享的只读字体族缓存
+// 返回: *renderCache[canvasFontKey, *canvas.FontFamily] 字体族缓存
+func (r *Renderer) canvasFontFamilies() *renderCache[canvasFontKey, *canvas.FontFamily] {
+	return sharedCanvasCache[canvasFontKey, *canvas.FontFamily](r, canvasFontFamilyCacheKey{}, 64<<20)
+}
+
+// canvasTextGlyphPaths 获取跨渲染器共享的字形轮廓路径缓存
+// 返回: *renderCache[textGlyphPathCacheKey, textGlyphPathCacheValue] 字形路径缓存
+func (r *Renderer) canvasTextGlyphPaths() *renderCache[textGlyphPathCacheKey, textGlyphPathCacheValue] {
+	return sharedCanvasCache[textGlyphPathCacheKey, textGlyphPathCacheValue](r, canvasTextGlyphCacheKey{}, 16<<20)
+}
+
+// canvasTemplateCommands 获取跨渲染器共享的模板页光栅指令缓存
+// 返回: *renderCache[templateRasterCacheKey, []RasterCommand] 模板光栅指令缓存
+func (r *Renderer) canvasTemplateCommands() *renderCache[templateRasterCacheKey, []RasterCommand] {
+	return sharedCanvasCache[templateRasterCacheKey, []RasterCommand](r, canvasTemplateCommandsKey{}, 32<<20)
+}
+
+// stampImageCache 获取跨渲染器共享的图像印章缓存
+// 返回: *renderCache[[32]byte, image.Image] 图像印章缓存
+func (r *Renderer) stampImageCache() *renderCache[[32]byte, image.Image] {
+	return sharedCanvasCache[[32]byte, image.Image](r, stampImageCacheKey{}, 32<<20)
+}
+
+// stampOFDCache 获取跨渲染器共享的OFD印章解析缓存
+// 返回: *renderCache[[32]byte, *cachedStampOFD] OFD印章缓存
+func (r *Renderer) stampOFDCache() *renderCache[[32]byte, *cachedStampOFD] {
+	return sharedCanvasCache[[32]byte, *cachedStampOFD](r, stampOFDCacheKey{}, 32<<20)
+}
+
+// imageEffectCache 获取跨渲染器共享的透明与蒙版图像合成缓存
+// 返回: *renderCache[imageEffectKey, image.Image] 效果图像缓存
+func (r *Renderer) imageEffectCache() *renderCache[imageEffectKey, image.Image] {
+	return sharedCanvasCache[imageEffectKey, image.Image](r, imageEffectCacheKey{}, 32<<20)
 }
 
 // canvasState 获取当前渲染器的Canvas私有缓存，按需创建且不向其他后端暴露

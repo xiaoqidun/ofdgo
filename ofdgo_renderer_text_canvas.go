@@ -252,7 +252,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			pdfOutput.text = append(pdfOutput.text, codecpdf.TextPage{})
 		}
 		firstBT := pdfOutput.text[len(pdfOutput.text)-1].Count
-		defer pdfOutput.preserveText(firstBT, r.pdfActualText(effectiveObj, fontID, face))
+		if r.pdfTextNeedsActualText(pdfOutput, effectiveObj, fontID, face, glyphTransforms) {
+			defer pdfOutput.preserveText(firstBT, r.pdfActualText(effectiveObj, fontID, face))
+		}
 		if pdfFauxBold {
 			boldScale := 1.0
 			if useTextMatrix {

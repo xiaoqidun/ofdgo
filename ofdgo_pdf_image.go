@@ -23,6 +23,7 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"sync"
 
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
@@ -65,6 +66,61 @@ func (c pdfImageContent) matches(source *pdfgo.Image) bool {
 	return codecpdf.SameImage(c.source, source)
 }
 
+// pdfSharedImageEntry 保存跨工作协程去重编码的单张图像结果
+type pdfSharedImageEntry struct {
+	space     pdfgo.Object
+	done      chan struct{}
+	data      []byte
+	optimized bool
+	err       error
+}
+
+// pdfSharedImageCache 在多核并发转换期间按流与参数去重编解码图像，避免重复工作
+type pdfSharedImageCache struct {
+	mu      sync.Mutex
+	entries map[pdfImageKey][]*pdfSharedImageEntry
+}
+
+// newPDFSharedImageCache 创建跨工作协程图像编码缓存
+// 返回: *pdfSharedImageCache 并发安全的图像编码缓存
+func newPDFSharedImageCache() *pdfSharedImageCache {
+	return &pdfSharedImageCache{entries: make(map[pdfImageKey][]*pdfSharedImageEntry)}
+}
+
+// acquire 获取或占位指定图像编码任务，由首位调用方执行实际编解码
+// 入参: key 图像流及采样键, space 有效颜色空间
+// 返回: *pdfSharedImageEntry 任务条目, bool 是否由当前协程执行编码
+func (c *pdfSharedImageCache) acquire(key pdfImageKey, space pdfgo.Object) (*pdfSharedImageEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, entry := range c.entries[key] {
+		if reflect.DeepEqual(entry.space, space) {
+			return entry, false
+		}
+	}
+	entry := &pdfSharedImageEntry{space: space, done: make(chan struct{})}
+	c.entries[key] = append(c.entries[key], entry)
+	return entry, true
+}
+
+// finish 写入图像编码结果并唤醒等待者，失败时移除占位以便后续重试
+// 入参: key 图像流及采样键, entry 占位条目, data 编码数据, optimized 是否已执行有损优化, err 编码错误
+func (c *pdfSharedImageCache) finish(key pdfImageKey, entry *pdfSharedImageEntry, data []byte, optimized bool, err error) {
+	entry.data, entry.optimized, entry.err = data, optimized, err
+	if err != nil {
+		c.mu.Lock()
+		list := c.entries[key]
+		for i, item := range list {
+			if item == entry {
+				c.entries[key] = append(list[:i], list[i+1:]...)
+				break
+			}
+		}
+		c.mu.Unlock()
+	}
+	close(entry.done)
+}
+
 // image 转换图像样本，不将整页或其他对象栅格化
 // 有损编码复用已解码像素，候选容量超限时沿用原编码路径
 // 入参: mark PDF图像绘制信息
@@ -96,6 +152,9 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		return &pdfgo.UnsupportedError{Feature: "image color separation overprint"}
 	}
 	source := mark.Image
+	if p.imageWorkers > 0 && source.Workers == 0 {
+		source.Workers = p.imageWorkers
+	}
 	key := pdfImageKey{stream: source.Stream, intent: source.Intent}
 	key.process, err = p.imageProcessModel(source)
 	if err != nil {
@@ -103,7 +162,8 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	}
 	if !source.ImageMask && p.compression.Mode == CompressionLossy {
 		m := p.matrix.Mul(mark.Matrix)
-		key.size = compressionImageSize(math.Hypot(m[0], m[1]), math.Hypot(m[2], m[3]), p.compression.ImageDPI())
+		scaleBoost := max(1.0, p.imageScaleBoost)
+		key.size = compressionImageSize(math.Hypot(m[0], m[1])*scaleBoost, math.Hypot(m[2], m[3])*scaleBoost, p.compression.ImageDPI())
 		if key.size.X >= source.Width || key.size.Y >= source.Height {
 			key.size = image.Point{}
 		}
@@ -153,73 +213,79 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	if id == "" {
 		var data []byte
 		var decoded image.Image
-		if key.process != "" {
-			decoded, err = p.imageProcess(source, key.process)
-			if err != nil {
-				return err
-			}
-			if key.size != (image.Point{}) {
-				decoded, err = pdfgo.ResizeImage(p.ctx, decoded, key.size)
-				if err != nil {
-					return err
-				}
-			}
-		} else {
-			data, err = source.JBIG2FileContext(p.ctx)
-			if err != nil {
-				return err
-			}
-			if len(data) == 0 {
-				data, err = source.JPEGFileContext(p.ctx)
-				if err != nil {
-					return err
-				}
-			}
-			if len(data) == 0 && !source.ImageMask && p.compression.Mode != CompressionLossy {
-				data, err = codecpdf.EncodeCMYKTIFF(p.ctx, source)
-				if err != nil {
-					return err
-				}
-			}
-			if len(data) == 0 && (source.ImageMask || key.size != (image.Point{})) {
-				decoded, err = source.DecodeImageSizeContext(p.ctx, key.size)
-				if err != nil {
-					return err
-				}
-			}
-		}
-		if source.ImageMask {
-			decoded = &codecpdf.StencilImage{Source: decoded, Fill: key.tint}
-		}
 		optimized := false
-		if len(data) == 0 && decoded != nil && !source.ImageMask && p.compression.Mode == CompressionLossy {
-			data, err = pdfgo.EncodeImageResource(p.ctx, decoded, p.compression)
-			if err != nil && !errors.Is(err, io.ErrShortBuffer) {
-				return err
+		var sharedEntry *pdfSharedImageEntry
+		sharedOwner := false
+		if p.sharedImages != nil && key.process == "" && source.Stream != nil {
+			sharedEntry, sharedOwner = p.sharedImages.acquire(key, source.ColorSpace)
+			if !sharedOwner {
+				select {
+				case <-sharedEntry.done:
+					if sharedEntry.err != nil {
+						return sharedEntry.err
+					}
+					data, optimized = sharedEntry.data, sharedEntry.optimized
+				case <-p.ctx.Done():
+					return p.ctx.Err()
+				}
 			}
-			optimized = err == nil
 		}
 		if len(data) == 0 {
-			var encoded bytes.Buffer
-			if decoded != nil {
-				err = pdfgo.EncodePNG(p.ctx, &encoded, decoded)
-			} else {
-				err = source.EncodePNGContext(p.ctx, &encoded)
-			}
-			if err != nil {
-				return err
-			}
-			data = encoded.Bytes()
-		}
-		if !source.ImageMask && p.compression.Mode == CompressionLossy {
-			if !optimized {
-				data, err = pdfgo.OptimizeImageResource(p.ctx, data, p.compression, key.size)
-				if err != nil {
-					return err
+			var encodeErr error
+			if key.process != "" {
+				decoded, encodeErr = p.imageProcess(source, key.process)
+				if encodeErr == nil && key.size != (image.Point{}) {
+					decoded, encodeErr = pdfgo.ResizeImage(p.ctx, decoded, key.size)
 				}
-				optimized = true
+			} else {
+				data, encodeErr = source.JBIG2FileContext(p.ctx)
+				if encodeErr == nil && len(data) == 0 {
+					data, encodeErr = source.JPEGFileContext(p.ctx)
+				}
+				if encodeErr == nil && len(data) == 0 && !source.ImageMask && p.compression.Mode != CompressionLossy {
+					data, encodeErr = codecpdf.EncodeCMYKTIFF(p.ctx, source)
+				}
+				if encodeErr == nil && len(data) == 0 && (source.ImageMask || key.size != (image.Point{}) || p.compression.Mode == CompressionLossy) {
+					decoded, encodeErr = source.DecodeImageSizeContext(p.ctx, key.size)
+				}
 			}
-			decoded = nil
+			if encodeErr == nil && source.ImageMask {
+				decoded = &codecpdf.StencilImage{Source: decoded, Fill: key.tint}
+			}
+			if encodeErr == nil && len(data) == 0 && decoded != nil && !source.ImageMask && p.compression.Mode == CompressionLossy {
+				data, encodeErr = pdfgo.EncodeImageResource(p.ctx, decoded, p.compression)
+				if encodeErr == nil {
+					optimized = true
+				} else if errors.Is(encodeErr, io.ErrShortBuffer) {
+					encodeErr = nil
+				}
+			}
+			if encodeErr == nil && len(data) == 0 {
+				var encoded bytes.Buffer
+				if decoded != nil {
+					encodeErr = pdfgo.EncodePNG(p.ctx, &encoded, decoded)
+				} else {
+					encodeErr = source.EncodePNGContext(p.ctx, &encoded)
+				}
+				if encodeErr == nil {
+					data = encoded.Bytes()
+				}
+			}
+			if encodeErr == nil && !source.ImageMask && p.compression.Mode == CompressionLossy {
+				if !optimized {
+					data, encodeErr = pdfgo.OptimizeImageResource(p.ctx, data, p.compression, key.size)
+					if encodeErr == nil {
+						optimized = true
+					}
+				}
+				decoded = nil
+			}
+			if sharedOwner {
+				p.sharedImages.finish(key, sharedEntry, data, optimized, encodeErr)
+			}
+			if encodeErr != nil {
+				return encodeErr
+			}
 		}
 		id, err = p.editor.addDecodedImageContext(p.ctx, data, decoded)
 		if err != nil {

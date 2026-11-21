@@ -45,6 +45,7 @@ type Renderer struct {
 	scopedComposites      map[string]*CompositeGraphicUnit
 	pageResources         []*parsedRes
 	templatePageCache     map[string]*PageContent
+	templatePages         *renderCache[string, *PageContent]
 	imageCache            *renderCache[string, image.Image]
 	fontDirs              []string
 	fontFS                []fs.FS
@@ -104,6 +105,8 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	next.printing = r.printing
 	next.printContents = r.printContents
 	next.imageCache = r.imageCache
+	next.templatePages = r.sharedTemplateCache()
+	maps.Copy(next.templatePageCache, r.templatePageCache)
 	next.fontDigests = r.fontDigests
 	next.fontPreparations = r.fontPreparations
 	next.fontMetrics = r.fontMetrics
@@ -129,9 +132,11 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 // ClearCache 释放派生字体、图片、模板与后端缓存，不改变文档和渲染配置
 func (r *Renderer) ClearCache() {
 	r.imageCache.clear()
+	r.templatePages.clear()
 	r.backendStates = make(map[any]any)
 	r.imageCache = resourceCache[string, image.Image](r.Reader.resources, imageCacheLimit)
 	r.templatePageCache = make(map[string]*PageContent)
+	r.templatePages = nil
 	r.resetFontCache()
 }
 
@@ -354,6 +359,9 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 	renderer := NewRenderer(reader, opts...)
 	renderer.rasterDisabled = r.rasterDisabled
 	renderer.printing = r.printing
+	if r.sharedBackendStates == nil {
+		r.sharedBackendStates = make(map[any]any)
+	}
 	renderer.sharedBackendStates = r.sharedBackendStates
 	renderer.fontPreparations = r.fontPreparations
 	renderer.fontDigests = r.fontDigests
@@ -366,7 +374,20 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 	return renderer
 }
 
-// loadTemplate 按标识数值加载模板页面，等价引用共用解析结果
+// sharedTemplateCache 获取跨派生渲染器共享的模板页解析缓存
+// 返回: *renderCache[string, *PageContent] 模板页缓存
+func (r *Renderer) sharedTemplateCache() *renderCache[string, *PageContent] {
+	if r.templatePages == nil {
+		var resources *Resources
+		if r.Reader != nil {
+			resources = r.Reader.resources
+		}
+		r.templatePages = resourceCache[string, *PageContent](resources, 16<<20)
+	}
+	return r.templatePages
+}
+
+// loadTemplate 按标识数值加载模板页面，等价引用共用解析结果并跨Fork共享
 // 入参: templateID 模板ID
 // 返回: *PageContent 模板页面
 func (r *Renderer) loadTemplate(templateID string) *PageContent {
@@ -383,18 +404,27 @@ func (r *Renderer) loadTemplate(templateID string) *PageContent {
 	if page := r.templatePageCache[templateID]; page != nil {
 		return page
 	}
-	for _, tpl := range r.Reader.doc.CommonData.TemplatePage {
-		if !sameResourceID(tpl.ID, templateID) {
-			continue
+	page, err := r.sharedTemplateCache().load(ctx, templateID, func() (*PageContent, int, error) {
+		for _, tpl := range r.Reader.doc.CommonData.TemplatePage {
+			if !sameResourceID(tpl.ID, templateID) {
+				continue
+			}
+			loaded, readErr := r.Reader.readPageContent(ctx, Page{BaseLoc: tpl.BaseLoc}, false, true)
+			if readErr != nil {
+				return nil, 0, readErr
+			}
+			return loaded, 4096 + len(loaded.Content.Layer)*512, nil
 		}
-		page, err := r.Reader.readPageContent(ctx, Page{BaseLoc: tpl.BaseLoc}, false, true)
-		if err != nil {
-			return nil
-		}
-		r.templatePageCache[templateID] = page
-		return page
+		return nil, 0, nil
+	})
+	if err != nil || page == nil {
+		return nil
 	}
-	return nil
+	if r.templatePageCache == nil {
+		r.templatePageCache = make(map[string]*PageContent)
+	}
+	r.templatePageCache[templateID] = page
+	return page
 }
 
 // templateOrder 获取页面模板引用的绘制顺序，省略时继承文档模板页声明并回退背景层

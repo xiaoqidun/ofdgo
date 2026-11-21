@@ -352,11 +352,17 @@ export class PrintDialog {
 			if (!this.current(sequence)) return;
 			this.prepared = true;
 			this.layout = layout;
-			if (this.isDevice()) this.el.Copies.max = Math.min(999, this.profile.maxCopies || 999, layout.copiesLimit > 0 ? layout.copiesLimit : 999);
+			if (this.isDevice()) this.el.Copies.max = Math.min(999, this.profile.maxCopies || 999);
 			await this.preview(Math.min(this.side, layout.sides.length - 1));
 			if (!this.current(sequence) || this.layout !== layout) return;
 			this.job = {deviceOptions, fingerprint:profile?.fingerprint, manual:this.manual(), sides:options.sides, backContent:layout.backContent};
-			this.status();
+			const permissions = context.permissions;
+			const permissionNotice = permissions?.declared && (!permissions.print || permissions.copies === 0)
+				? "文件声明禁止打印，仍可打印"
+				: permissions?.declared && permissions.copies > 0
+					? `文件声明限印 ${permissions.copies} 份，仍可自由设置`
+					: "";
+			this.status(permissionNotice);
 			if (layout.sides.some(side => side.placements.some(placement => placement.clipped))) this.status("内容超出可打印区域");
 			if (this.manual() && options.sides === "back" && !layout.backContent) this.status("背面为空白");
 		} catch (error) {

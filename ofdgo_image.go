@@ -50,6 +50,14 @@ func (r *Renderer) ImageResource(id string) (image.Image, error) {
 	return r.cachedImageResource(path)
 }
 
+// imageEffectKey 按源阅读器、图片路径、蒙版路径与透明度去重合成后的只读图像
+type imageEffectKey struct {
+	reader   *Reader
+	resPath  string
+	maskPath string
+	alpha    uint8
+}
+
 // resampledImageMask 按替换图尺寸读取已校验的二值蒙版，不分配缩放像素
 type resampledImageMask struct {
 	source   image.Image
@@ -99,35 +107,100 @@ func (s *resampledImageMask) RGBA64At(x, y int) color.RGBA64 {
 // 入参: object 图像对象
 // 返回: image.Image 图片资源, error 读取或解码错误
 func (r *Renderer) imageObjectResource(object ImageObject) (image.Image, error) {
+	img, _, err := r.imageObjectResourceWithPath(object)
+	return img, err
+}
+
+// imageObjectResourceWithPath 读取图像对象并返回实际选用的规范化包路径
+// 入参: object 图像对象
+// 返回: image.Image 图片资源, string 规范化资源路径, error 读取或解码错误
+func (r *Renderer) imageObjectResourceWithPath(object ImageObject) (image.Image, string, error) {
 	primary, fallback := object.ResourceID, object.Substitution
 	if object.Substitution != "" && !sameResourceID(object.Substitution, object.ResourceID) && (r.printing || r.DPI >= 300) {
 		primary, fallback = object.Substitution, object.ResourceID
 	}
 	hasFallback := fallback != "" && !sameResourceID(fallback, primary)
-	read := func(id string) (image.Image, error) {
+	read := func(id string) (image.Image, string, error) {
+		var cleanPath string
+		if r != nil && r.Reader != nil {
+			if resolved, ok := r.Reader.resolveResPathScoped(r.pageResources, id); ok {
+				cleanPath = cleanPackagePath(r.Reader.ResPath(resolved))
+			}
+		}
 		img, err := r.ImageResource(id)
 		if err == nil && r.decodeImages {
 			img, err = baseimage.PixelDataContext(r.pageContext, img)
 		} else if err == nil && hasFallback {
 			_, err = baseimage.DecodeTransientContext(r.pageContext, img)
 		}
-		return img, err
+		return img, cleanPath, err
 	}
-	img, err := read(primary)
+	img, path, err := read(primary)
 	if err == nil || !hasFallback {
-		return img, err
+		return img, path, err
 	}
 	if r.pageContext != nil && r.pageContext.Err() != nil {
-		return nil, r.pageContext.Err()
+		return nil, "", r.pageContext.Err()
 	}
 	if r.OutputContext != nil && r.OutputContext.Err() != nil {
-		return nil, r.OutputContext.Err()
+		return nil, "", r.OutputContext.Err()
 	}
-	img, fallbackErr := read(fallback)
+	img, fallbackPath, fallbackErr := read(fallback)
 	if fallbackErr != nil {
-		return nil, fmt.Errorf("image resource %q: %w; fallback %q: %w", primary, err, fallback, fallbackErr)
+		return nil, "", fmt.Errorf("image resource %q: %w; fallback %q: %w", primary, err, fallback, fallbackErr)
 	}
-	return img, nil
+	return img, fallbackPath, nil
+}
+
+// imageObjectWithEffects 读取图像对象并按路径、蒙版和透明度去重缓存合成结果
+// 入参: object 图像对象, alpha 对象透明度，可为空
+// 返回: image.Image 合成后图像, imageEffectKey 去重键, bool 是否具有稳定去重键, error 读取或合成错误
+func (r *Renderer) imageObjectWithEffects(object ImageObject, alpha *int) (image.Image, imageEffectKey, bool, error) {
+	img, resPath, err := r.imageObjectResourceWithPath(object)
+	if err != nil {
+		return nil, imageEffectKey{}, false, err
+	}
+	effAlpha := uint8(255)
+	if alpha != nil {
+		effAlpha = uint8(clampColor(*alpha))
+	}
+	if object.ImageMask == "" && effAlpha == 255 {
+		return img, imageEffectKey{}, false, nil
+	}
+	var maskPath string
+	if object.ImageMask != "" && r.Reader != nil {
+		if resolved, ok := r.Reader.resolveResPathScoped(r.pageResources, object.ImageMask); ok {
+			maskPath = cleanPackagePath(r.Reader.ResPath(resolved))
+		}
+	}
+	if resPath != "" && (object.ImageMask == "" || maskPath != "") && r.Reader != nil {
+		key := imageEffectKey{reader: r.Reader, resPath: resPath, maskPath: maskPath, alpha: effAlpha}
+		cache := r.imageEffectCache()
+		result, loadErr := cache.load(r.pageContext, key, func() (image.Image, int, error) {
+			mask, maskErr := r.imageObjectMask(object, img)
+			if maskErr != nil {
+				return nil, 0, maskErr
+			}
+			applied, effectErr := imageWithEffects(r.pageContext, img, mask, alpha)
+			if effectErr != nil {
+				return nil, 0, effectErr
+			}
+			return applied, baseimage.StorageCost(applied, cache.limit), nil
+		})
+		if loadErr != nil {
+			return nil, imageEffectKey{}, false, loadErr
+		}
+		return result, key, true, nil
+	}
+	mask, err := r.imageObjectMask(object, img)
+	if err != nil {
+		return nil, imageEffectKey{}, false, err
+	}
+	applied, err := imageWithEffects(r.pageContext, img, mask, alpha)
+	if err != nil {
+		return nil, imageEffectKey{}, false, err
+	}
+	return applied, imageEffectKey{}, false, nil
 }
 
 // imageObjectMask 校验原图蒙版，替换图分辨率不同时按像素中心进行最近邻采样

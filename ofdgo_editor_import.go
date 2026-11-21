@@ -100,7 +100,7 @@ func (e *Editor) ImportSelection(ctx context.Context, source *Reader, page int, 
 // ImportPages 将来源当前文档中的指定页面插入目标位置，保持输入顺序并作为一次撤销操作
 // 页面索引从0开始，at可等于当前页数；复制关联模板、注释、签章外观和实际引用的资源
 // 不导入来源元数据和目录，指向未选页面的跳转被移除；签名数据仅保留原始凭据，不代表合并后文档有效
-// 目标文档含版本列表时暂不支持导入带签章页面，返回错误且不修改目标
+// 目标文档含版本列表时隔离同步当前版本的签名索引与文件清单，不修改历史版本快照
 // 返回后可关闭来源Reader，目标原Reader的生命周期要求不变
 // 入参: source 来源阅读器, indexes 来源页面索引，不可重复, at 目标插入位置
 // 返回: []string 新页面标识, error 错误信息
@@ -1100,8 +1100,14 @@ func (m *editorPageImport) signatureID(source, kind, id string) (string, error) 
 		if err != nil {
 			return "", err
 		}
-		if doc.Signatures != "" {
-			name := m.target.ResPath(doc.Signatures)
+		sigLoc := doc.Signatures
+		if sigLoc == "" && m.target.OFD != nil && m.target.documentIndex >= 0 && m.target.documentIndex < len(m.target.OFD.DocBody) {
+			if bodySig := m.target.OFD.DocBody[m.target.documentIndex].Signatures; bodySig != "" {
+				sigLoc = "/" + resolveResourcePath("OFD.xml", "", bodySig)
+			}
+		}
+		if sigLoc != "" {
+			name := m.target.ResPath(sigLoc)
 			data, err := m.target.readFileViewContext(m.ctx, name)
 			if err != nil {
 				return "", err
@@ -1365,15 +1371,62 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 		}
 	}
 	files[name] = data
+	importedListPath := ""
+	replacedListFrom := ""
+	var importedSigFiles []string
 	if len(signatures) != 0 {
-		if base.reader.OFD.DocBody[base.reader.documentIndex].versioned {
-			return nil, fmt.Errorf("signature import into a versioned document is not supported")
+		bodySig := ""
+		if base.reader.OFD != nil && base.reader.documentIndex >= 0 && base.reader.documentIndex < len(base.reader.OFD.DocBody) {
+			bodySig = base.reader.OFD.DocBody[base.reader.documentIndex].Signatures
 		}
-		loc, err := mergeImportIndex(m.ctx, base.reader, files, base.document.Signatures, path.Join(m.directory, "Signs", "Signatures.xml"), "Signatures", signatures)
+		needUpdateOFD := bodySig == ""
+		var loc string
+		var err error
+		if bodySig != "" && base.reader.versionInfo != nil {
+			origListPath := cleanPackagePath(resolveResourcePath("OFD.xml", "", bodySig))
+			shared, shareErr := base.reader.versionSignatureListShared(m.ctx, origListPath)
+			if shareErr != nil {
+				return nil, shareErr
+			}
+			if shared {
+				newListPath := packageAvailableName(base.reader, files, origListPath)
+				origData, readErr := base.reader.readFileViewContext(m.ctx, origListPath)
+				if readErr != nil {
+					return nil, readErr
+				}
+				origRoot, parseErr := parseEditorXMLContext(m.ctx, origData)
+				if parseErr != nil {
+					return nil, parseErr
+				}
+				entries, genErr := editorXMLGenerated(signatures, origRoot.name.Space)
+				if genErr != nil {
+					return nil, genErr
+				}
+				var merged []byte
+				if origRoot.open == origRoot.end {
+					merged = editorPatchXML(origData, []editorXMLPatch{editorXMLContent(origData, origRoot, entries)})
+				} else {
+					merged = editorPatchXML(origData, []editorXMLPatch{{origRoot.close, origRoot.close, entries}})
+				}
+				files[newListPath] = merged
+				loc = "/" + newListPath
+				replacedListFrom = origListPath
+				needUpdateOFD = true
+			} else {
+				loc, err = mergeImportIndex(m.ctx, base.reader, files, "/"+origListPath, path.Join(m.directory, "Signs", "Signatures.xml"), "Signatures", signatures)
+			}
+		} else {
+			existingSig := base.document.Signatures
+			if existingSig == "" && bodySig != "" {
+				existingSig = "/" + resolveResourcePath("OFD.xml", "", bodySig)
+			}
+			loc, err = mergeImportIndex(m.ctx, base.reader, files, existingSig, path.Join(m.directory, "Signs", "Signatures.xml"), "Signatures", signatures)
+		}
 		if err != nil {
 			return nil, err
 		}
 		indexName := cleanPackagePath(loc)
+		importedListPath = indexName
 		indexData := files[indexName]
 		indexRoot, err := parseEditorXMLContext(m.ctx, indexData)
 		if err != nil {
@@ -1386,7 +1439,8 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 			patch = editorXMLPatch{node.start, node.end, value}
 		}
 		files[indexName] = editorPatchXML(indexData, []editorXMLPatch{patch})
-		if base.document.Signatures == "" {
+		importedSigFiles = collectImportedSignatureFiles(indexName, signatures, files)
+		if needUpdateOFD {
 			ofd, err := base.reader.readFileViewContext(m.ctx, "OFD.xml")
 			if err != nil {
 				return nil, err
@@ -1395,11 +1449,11 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 			if err != nil {
 				return nil, err
 			}
-			name := "OFD.xml"
-			if file, ok := base.reader.packageFile(name); ok {
-				name = cleanPackagePath(file.Name)
+			ofdName := "OFD.xml"
+			if file, ok := base.reader.packageFile(ofdName); ok {
+				ofdName = cleanPackagePath(file.Name)
 			}
-			files[name], err = editorXMLSetText(ofd, root.childAt("DocBody", base.reader.documentIndex), [][2]string{{"Signatures", loc}})
+			files[ofdName], err = editorXMLSetText(ofd, root.childAt("DocBody", base.reader.documentIndex), [][2]string{{"Signatures", loc}})
 			if err != nil {
 				return nil, err
 			}
@@ -1409,12 +1463,17 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 	if err != nil {
 		return nil, err
 	}
+	if importedListPath != "" && base.reader.versionInfo != nil {
+		if err := syncVersionSignatureManifest(m.ctx, base.reader, parts, replacedListFrom, importedListPath, importedSigFiles); err != nil {
+			return nil, err
+		}
+	}
 	files = maps.Clone(base.reader.files)
 	if files == nil {
 		files = make(map[string][]byte)
 	}
 	maps.Copy(files, parts)
-	reader := &Reader{Zip: base.reader.Zip, encrypted: base.reader.encryptedSource(), sourceFile: base.reader.sourceFile, files: files, encryption: base.reader.encryption, documentIndex: base.reader.documentIndex, selectedVersion: base.reader.selectedVersion}
+	reader := base.reader.deriveView(files, base.reader.documentIndex, base.reader.selectedVersion)
 	if err := reader.initRoot(); err != nil {
 		return nil, err
 	}
@@ -2052,4 +2111,78 @@ func mergeImportIndex(ctx context.Context, reader *Reader, files map[string][]by
 	}
 	files[name] = data
 	return "/" + name, nil
+}
+
+// collectImportedSignatureFiles 从导入的签名索引片段与新写入文件集合提取全部签章自有文件路径
+// 入参: listPath 目标签名列表路径, entries 新增Signature片段, files 新写入文件表
+// 返回: []string 规范化签章文件路径列表
+func collectImportedSignatureFiles(listPath string, entries []byte, files map[string][]byte) []string {
+	wrapped := append([]byte(`<Signatures xmlns="http://www.ofdspec.org/2016">`), entries...)
+	wrapped = append(wrapped, []byte(`</Signatures>`)...)
+	var list Signatures
+	if err := xml.Unmarshal(wrapped, &list); err != nil {
+		return nil
+	}
+	var out []string
+	seen := make(map[string]bool)
+	add := func(p string) {
+		clean := cleanPackagePath(p)
+		if validPackagePath(clean) && !seen[clean] {
+			seen[clean] = true
+			out = append(out, clean)
+		}
+	}
+	for _, entry := range list.List {
+		sigPath := signatureRefPath(listPath, entry.BaseLoc)
+		add(sigPath)
+		if data, ok := files[cleanPackagePath(sigPath)]; ok {
+			if sigFile, err := parseSignatureFile(data); err == nil {
+				if sigFile.SignedValue != "" {
+					add(signatureRefPath(sigPath, sigFile.SignedValue))
+				}
+				if sigFile.SignedInfo.Seal.BaseLoc != "" {
+					add(signatureRefPath(sigPath, sigFile.SignedInfo.Seal.BaseLoc))
+				}
+			}
+		}
+	}
+	return out
+}
+
+// syncVersionSignatureManifest 将导入的签章列表与签章文件同步登记到当前版本FileList
+// 入参: ctx 取消上下文, baseReader 原阅读器, parts 版本隔离后的修改集, replaceFrom 需替换的旧签名列表路径, listPath 目标签名列表路径, sigFiles 导入的签章文件列表
+// 返回: error 读取或编码错误
+func syncVersionSignatureManifest(ctx context.Context, baseReader *Reader, parts map[string][]byte, replaceFrom, listPath string, sigFiles []string) error {
+	verLoc := cleanPackagePath(baseReader.versionInfo.Location)
+	if ofdData, ok := parts["OFD.xml"]; ok {
+		if ofdRoot, err := parseEditorXMLContext(ctx, ofdData); err == nil {
+			if body := ofdRoot.childAt("DocBody", baseReader.documentIndex); body != nil {
+				if versions := body.child("Versions"); versions != nil {
+					for _, node := range versions.children {
+						if node.matchesOFD("Version") && strings.TrimSpace(node.attr("ID")) == baseReader.versionInfo.ID {
+							if loc, locErr := versionFileLocation("OFD.xml", node.attr("BaseLoc")); locErr == nil {
+								verLoc = cleanPackagePath(loc)
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	merged := maps.Clone(baseReader.files)
+	if merged == nil {
+		merged = make(map[string][]byte, len(parts))
+	}
+	maps.Copy(merged, parts)
+	view := baseReader.deriveView(merged, baseReader.documentIndex, baseReader.selectedVersion)
+	addFiles := append([]string{listPath}, sigFiles...)
+	_, updated, err := signatureUpdateVersionManifest(ctx, view, verLoc, replaceFrom, listPath, addFiles, nil)
+	if err != nil {
+		return err
+	}
+	if updated != nil {
+		parts[verLoc] = updated
+	}
+	return nil
 }

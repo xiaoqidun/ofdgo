@@ -23,6 +23,7 @@ import (
 	"image"
 	"image/gif"
 	"io"
+	"maps"
 	"math"
 
 	"github.com/xiaoqidun/j2kgo"
@@ -32,6 +33,9 @@ import (
 
 // compressionPatternImageLimit 限制底纹尺寸分析的变换组合数，超限时保留原图尺寸
 const compressionPatternImageLimit = 65536
+
+// outputImageNestedKey 标记当前图像优化处于外层并行池中，避免解码器嵌套并发
+type outputImageNestedKey struct{}
 
 // compressionImages 记录图片各处使用的最大像素需求
 type compressionImages struct {
@@ -272,7 +276,7 @@ func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOp
 	return r.compressionImagePlanProtected(ctx, options, nil, nil)
 }
 
-// compressionImagePlanProtected 按签名保护边界分文档合并图片需求，受保护文档和文件不参与有损降采样
+// compressionImagePlanProtected 按签名与全包历史版本保护边界分文档合并图片需求，受保护文档和文件不参与有损降采样
 // 入参: ctx 取消上下文, options 压缩配置, protectedDocs 受签名保护的文档索引, protectedFiles 受签名保护的文件路径
 // 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
 func (r *Reader) compressionImagePlanProtected(ctx context.Context, options CompressionOptions, protectedDocs map[int]bool, protectedFiles map[string]bool) (map[string]bool, map[string]image.Point, error) {
@@ -282,14 +286,31 @@ func (r *Reader) compressionImagePlanProtected(ctx context.Context, options Comp
 	images := make(map[string]bool)
 	sizes := make(map[string]image.Point)
 	blocked := make(map[string]bool)
-	isolated := r.OFD.DocBody[r.documentIndex].versioned
+	currentVersioned := r.currentVersioned()
+	var versionBlocked map[string]bool
+	if r.packageVersioned() {
+		versionBlocked = make(map[string]bool)
+		for index := range r.DocumentCount() {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
+			if !r.OFD.DocBody[index].versioned {
+				continue
+			}
+			files, err := r.documentNonCurrentVersionFiles(ctx, index)
+			if err != nil {
+				return nil, nil, err
+			}
+			maps.Copy(versionBlocked, files)
+		}
+	}
 	current := make(map[string]bool)
 	for offset := 0; offset < r.DocumentCount(); offset++ {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
 		index := offset
-		if isolated {
+		if currentVersioned {
 			index = (r.documentIndex + offset) % r.DocumentCount()
 		}
 		if protectedDocs[index] {
@@ -329,13 +350,13 @@ func (r *Reader) compressionImagePlanProtected(ctx context.Context, options Comp
 		}
 		for _, img := range catalog {
 			name := cleanPackagePath(img.Location)
-			if protectedFiles[name] {
+			if protectedFiles[name] || versionBlocked[name] && (!currentVersioned || index != r.documentIndex) {
 				images[name] = false
 				blocked[name] = true
 				delete(sizes, name)
 				continue
 			}
-			if isolated {
+			if currentVersioned {
 				if index == r.documentIndex {
 					current[name] = true
 				} else if current[name] {
@@ -629,7 +650,11 @@ func optimizeJP2Resource(ctx context.Context, data []byte, options CompressionOp
 	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width) > outputOptimizationBufferLimit/8/int64(cfg.Height) {
 		return data, ctx.Err()
 	}
-	pixels, err := j2kgo.DecodeContext(ctx, bytes.NewReader(data), nil)
+	workers := conversionWorkers(ctx)
+	if nested, _ := ctx.Value(outputImageNestedKey{}).(bool); nested {
+		workers = 1
+	}
+	pixels, err := j2kgo.DecodeContext(ctx, bytes.NewReader(data), &j2kgo.DecodeOptions{Workers: max(1, workers)})
 	if err != nil || pixels == nil {
 		return data, ctx.Err()
 	}

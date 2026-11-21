@@ -15,24 +15,43 @@
 package pdf
 
 import (
+	"bufio"
 	"bytes"
 	"cmp"
+	"compress/zlib"
 	"context"
 	"fmt"
 	"image"
 	"image/color"
 	"io"
+	"math"
 	"slices"
 	"strconv"
-	"strings"
-	"sync"
-	"sync/atomic"
 
-	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// TextPage 保存后端文字对象数量及待替换区段
+// PtPerMM 为毫米到PDF点的换算系数
+const PtPerMM = 72.0 / 25.4
+
+// PDF流式写出器的结构参数
+const (
+	pagesTreeDegree   = 64
+	objStmBatchSize   = 128
+	streamBufferBytes = 256 << 10
+)
+
+// PDF交叉引用流条目类型
+const (
+	xrefFree       uint8 = 0
+	xrefNormal     uint8 = 1
+	xrefCompressed uint8 = 2
+)
+
+// pdfFileHeader 为PDF 1.7二进制文件头
+var pdfFileHeader = []byte("%PDF-1.7\n%\xE2\xE3\xCF\xD3\n")
+
+// TextPage 保存单页文字对象计数及待替换区段
 type TextPage struct {
 	Count        int
 	Replacements []pdfgo.TextReplacement
@@ -57,296 +76,267 @@ type TextFauxBold struct {
 	Color     color.RGBA
 }
 
-// WriteOptions 保存PDF最终写出所需的元数据、像素、文字和导航修正
-// Images逐页记录绘制图像，nil图像表示不替换；Links保留全部链接位置，包括矩形区域的nil项
-// Placeholders按页和图像绘制顺序标记阶段1是否使用轻量占位图
-// RawImages按页和图像绘制顺序提供JPX或JBIG2原始流直通数据
-// ImageClips按页和图像绘制顺序提供单位方形坐标中的裁剪路径，空字符串表示不裁剪
-// TextFauxBold按页提供需要Tr=2伪粗体描边的BT区间
-// PrepareRewrite在页面引用确定后填充导航动作，不得提前写出PDF
-type WriteOptions struct {
-	Information    pdfgo.Dictionary
-	Images         [][]image.Image
-	Placeholders   [][]bool
-	RawImages      [][]*RawImage
-	ImageClips     [][]string
-	Text           []TextPage
-	TextFauxBold   [][]TextFauxBold
-	Links          map[int][]*pdfgo.LinkRegion
-	ExactImages    bool
-	ExactText      bool
-	Optimization   pdfgo.OptimizeOptions
-	PrepareRewrite func(context.Context, *pdfgo.Reader, []pdfgo.Reference, *pdfgo.RewriteOptions) error
+// StreamWriter 为PDF 1.7流式写出器，支持平衡页面树、对象流分批压缩及预测器交叉引用流
+type StreamWriter struct {
+	ctx           context.Context
+	out           *bufio.Writer
+	pos           int64
+	err           error
+	compress      bool
+	compressLevel int
+	xref          []xrefEntry
+	catalogRef    pdfgo.Reference
+	infoRef       pdfgo.Reference
+	pagesRootRef  pdfgo.Reference
+	pageCount     int
+	pageRefs      []pdfgo.Reference
+	pageParents   []pdfgo.Reference
+	pageTreeNodes []pageTreeNode
+	objStmNums    []int
+	objStmOffsets []int
+	objStmBody    bytes.Buffer
+	scratchBuf    bytes.Buffer
+	zlibBuf       bytes.Buffer
+	zlibWriter    *zlib.Writer
 }
 
-// Write 合并图像、文字、导航修正及压缩，直接写出最终PDF
-// 入参: ctx 取消上下文, data 后端PDF数据, writer 输出流, settings 写出配置
-// 返回: error 资源、压缩或写入错误
-func Write(ctx context.Context, data []byte, writer io.Writer, settings WriteOptions) error {
-	return WriteSource(ctx, bytes.NewReader(data), int64(len(data)), writer, settings)
+// NewStreamWriter 创建流式PDF写出器并预分配目录、平衡页面树与全部页面引用
+// 入参: ctx 取消上下文, writer 目标输出流, pageCount 总页数, compress 是否压缩流对象, level zlib压缩级别
+// 返回: *StreamWriter 流式写出器, error 写入或参数错误
+func NewStreamWriter(ctx context.Context, writer io.Writer, pageCount int, compress bool, level int) (*StreamWriter, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if pageCount <= 0 {
+		return nil, fmt.Errorf("PDF page count must be positive")
+	}
+	if level < zlib.NoCompression || level > zlib.BestCompression {
+		level = zlib.DefaultCompression
+	}
+	sw := &StreamWriter{
+		ctx:           ctx,
+		out:           bufio.NewWriterSize(writer, streamBufferBytes),
+		compress:      compress,
+		compressLevel: level,
+		xref:          []xrefEntry{{kind: xrefFree, field2: 0, field3: 65535}},
+		pageCount:     pageCount,
+		objStmNums:    make([]int, 0, objStmBatchSize),
+		objStmOffsets: make([]int, 0, objStmBatchSize),
+	}
+	sw.catalogRef = sw.AllocRef()
+	sw.infoRef = sw.AllocRef()
+	sw.pagesRootRef = sw.AllocRef()
+	sw.initPageTree(pageCount)
+	if err := sw.writeRaw(pdfFileHeader); err != nil {
+		return nil, err
+	}
+	return sw, nil
 }
 
-// WriteSource 从随机读取源完成资源修正及压缩，避免合并中间PDF缓冲
-// 入参: ctx 取消上下文, source 后端PDF, size 数据长度, writer 输出流, settings 写出配置
-// 返回: error 读取、资源、压缩或写入错误
-func WriteSource(ctx context.Context, source io.ReaderAt, size int64, writer io.Writer, settings WriteOptions) error {
-	nativeWrite := settings.PrepareRewrite != nil
-	hasRawImages := false
-	for _, pageRaws := range settings.RawImages {
-		for _, raw := range pageRaws {
-			if raw != nil {
-				hasRawImages = true
-				break
-			}
-		}
-		if hasRawImages {
-			break
-		}
+// CatalogRef 返回文档目录对象引用
+// 返回: pdfgo.Reference 目录引用
+func (w *StreamWriter) CatalogRef() pdfgo.Reference {
+	return w.catalogRef
+}
+
+// InfoRef 返回文档信息对象引用
+// 返回: pdfgo.Reference 信息引用
+func (w *StreamWriter) InfoRef() pdfgo.Reference {
+	return w.infoRef
+}
+
+// PageRef 返回指定零基页码的预分配页面对象引用
+// 入参: index 页面零基索引
+// 返回: pdfgo.Reference 页面引用
+func (w *StreamWriter) PageRef(index int) pdfgo.Reference {
+	return w.pageRefs[index]
+}
+
+// PageParent 返回指定零基页码在平衡页面树中的直接父节点引用
+// 入参: index 页面零基索引
+// 返回: pdfgo.Reference 父节点引用
+func (w *StreamWriter) PageParent(index int) pdfgo.Reference {
+	return w.pageParents[index]
+}
+
+// PageRefs 返回全部预分配页面对象引用切片
+// 返回: []pdfgo.Reference 页面引用列表
+func (w *StreamWriter) PageRefs() []pdfgo.Reference {
+	return w.pageRefs
+}
+
+// AllocRef 分配下一个PDF间接对象引用
+// 返回: pdfgo.Reference 新对象引用
+func (w *StreamWriter) AllocRef() pdfgo.Reference {
+	num := int64(len(w.xref))
+	w.xref = append(w.xref, xrefEntry{kind: xrefFree})
+	return pdfgo.Reference{Number: num}
+}
+
+// WriteObject 将非流间接对象打入对象流批次，满额时自动压缩写出并释放内存
+// 入参: ref 目标对象引用, obj PDF对象值
+// 返回: error 写入或取消错误
+func (w *StreamWriter) WriteObject(ref pdfgo.Reference, obj pdfgo.Object) error {
+	if w.err != nil {
+		return w.err
 	}
-	hasFauxBold := false
-	for _, pageBolds := range settings.TextFauxBold {
-		if len(pageBolds) != 0 {
-			hasFauxBold = true
-			break
-		}
-	}
-	needsImageWalk := settings.ExactImages || hasRawImages
-	if !needsImageWalk && !settings.ExactText && !hasFauxBold && len(settings.ImageClips) == 0 && !nativeWrite && len(settings.Information) == 0 && settings.Optimization.Compression.Mode == pdfgo.CompressionUnchanged {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		n, err := io.Copy(outputWriter{ctx: ctx, writer: writer}, io.NewSectionReader(source, 0, size))
-		if err == nil && n != size {
-			err = io.ErrUnexpectedEOF
-		}
+	if err := w.ctx.Err(); err != nil {
+		w.err = err
 		return err
 	}
-	reader, err := pdfgo.NewReader(source, size)
-	if err != nil {
+	if ref.Number <= 0 || int(ref.Number) >= len(w.xref) {
+		return fmt.Errorf("invalid PDF object reference %d", ref.Number)
+	}
+	if len(w.objStmNums) > 0 {
+		w.objStmBody.WriteByte('\n')
+	}
+	w.objStmOffsets = append(w.objStmOffsets, w.objStmBody.Len())
+	w.objStmNums = append(w.objStmNums, int(ref.Number))
+	appendPDFObject(&w.objStmBody, obj)
+	if len(w.objStmNums) >= objStmBatchSize {
+		return w.flushObjStm()
+	}
+	return nil
+}
+
+// WriteDirectObject 将非流间接对象直接写出到文件顶层，不进入对象流
+// 入参: ref 目标对象引用, obj PDF对象值
+// 返回: error 写入或取消错误
+func (w *StreamWriter) WriteDirectObject(ref pdfgo.Reference, obj pdfgo.Object) error {
+	if w.err != nil {
+		return w.err
+	}
+	if err := w.ctx.Err(); err != nil {
+		w.err = err
 		return err
 	}
-	defer reader.Close()
-	if !needsImageWalk && !settings.ExactText && !hasFauxBold && len(settings.ImageClips) == 0 && !nativeWrite {
-		if len(settings.Information) != 0 {
-			_, err := reader.RewriteTo(ctx, writer, pdfgo.RewriteOptions{Information: settings.Information, Optimization: settings.Optimization})
-			return err
-		}
-		_, err := reader.OptimizeTo(ctx, writer, settings.Optimization)
+	w.xref[ref.Number] = xrefEntry{kind: xrefNormal, field2: uint64(w.pos), field3: 0}
+	w.scratchBuf.Reset()
+	w.scratchBuf.WriteString(strconv.FormatInt(ref.Number, 10))
+	w.scratchBuf.WriteString(" 0 obj\n")
+	appendPDFObject(&w.scratchBuf, obj)
+	w.scratchBuf.WriteString("\nendobj\n")
+	return w.writeRaw(w.scratchBuf.Bytes())
+}
+
+// WriteStream 写出PDF流对象并在启用压缩且无既有过滤器时执行Flate压缩
+// 入参: ref 流对象引用, dict 流字典, data 原始流字节, allowCompress 是否允许Flate压缩
+// 返回: error 压缩或写入错误
+func (w *StreamWriter) WriteStream(ref pdfgo.Reference, dict pdfgo.Dictionary, data []byte, allowCompress bool) error {
+	if w.err != nil {
+		return w.err
+	}
+	if err := w.ctx.Err(); err != nil {
+		w.err = err
 		return err
 	}
-	images := make(map[pdfgo.Reference]image.Image)
-	rawImages := make(map[pdfgo.Reference]*RawImage)
-	links := make(map[pdfgo.AnnotationLocation]pdfgo.LinkRegion)
-	texts := make(map[pdfgo.Reference][]pdfgo.TextReplacement)
-	references := make([]pdfgo.Reference, len(settings.Images))
-	pages := 0
-	err = reader.WalkPages(ctx, func(index int, page *pdfgo.Page) error {
-		if index >= len(settings.Images) {
-			return fmt.Errorf("unexpected PDF output page")
-		}
-		pages++
-		references[index] = page.Reference
-		if nativeWrite {
-			annotations, err := page.AnnotationsContext(ctx)
-			if err != nil {
-				return err
-			}
-			expected := settings.Links[index]
-			if len(annotations) != len(expected) {
-				return fmt.Errorf("PDF output link count differs")
-			}
-			for i, link := range expected {
-				if annotations[i].Subtype != pdfgo.Name("Link") {
-					return fmt.Errorf("unexpected PDF output annotation")
-				}
-				if link != nil {
-					links[pdfgo.AnnotationLocation{Page: page.Reference, Index: i}] = *link
-				}
-			}
-		}
-		if !needsImageWalk && !settings.ExactText {
-			return nil
-		}
-		value, err := reader.Resolve(page.Resources["XObject"])
+	payload := data
+	useFlate := allowCompress && w.compress && dict["Filter"] == nil
+	if useFlate {
+		compressed, err := w.deflate(data)
 		if err != nil {
+			w.err = err
 			return err
 		}
-		resources, _ := value.(pdfgo.Dictionary)
-		var content bytes.Buffer
-		if _, err := page.WriteContent(ctx, &content); err != nil {
-			return err
-		}
-		position := 0
-		textCount := 0
-		if err := pdfgo.WalkOperations(ctx, content.Bytes(), func(operation pdfgo.Operation) error {
-			if operation.Operator == "BT" {
-				textCount++
-			}
-			if !needsImageWalk {
-				return nil
-			}
-			if operation.Operator != "Do" {
-				return nil
-			}
-			if len(operation.Operands) != 1 || position >= len(settings.Images[index]) {
-				return fmt.Errorf("unexpected PDF output image")
-			}
-			name, ok := operation.Operands[0].(pdfgo.Name)
-			if !ok {
-				return fmt.Errorf("invalid PDF output image name")
-			}
-			ref, ok := resources[name].(pdfgo.Reference)
-			if !ok {
-				return fmt.Errorf("invalid PDF output image reference")
-			}
-			original := settings.Images[index][position]
-			var raw *RawImage
-			if index < len(settings.RawImages) && position < len(settings.RawImages[index]) {
-				raw = settings.RawImages[index][position]
-			}
-			placeholder := index < len(settings.Placeholders) && position < len(settings.Placeholders[index]) && settings.Placeholders[index][position]
-			position++
-			if original == nil && raw == nil {
-				return nil
-			}
-			pdfImg, err := reader.ReadImage(ref)
-			if err != nil {
-				return err
-			}
-			if raw != nil {
-				if placeholder {
-					if pdfImg.Width <= 0 || pdfImg.Width > 2 || pdfImg.Height != 1 {
-						return fmt.Errorf("PDF output placeholder image dimensions differ")
-					}
-				} else if pdfImg.Width != raw.Width || pdfImg.Height != raw.Height {
-					return fmt.Errorf("PDF output image dimensions differ")
-				}
-				if previous := rawImages[ref]; previous != nil && previous.Key != raw.Key {
-					return fmt.Errorf("PDF output image reference conflicts")
-				}
-				if images[ref] != nil {
-					return fmt.Errorf("PDF output image reference conflicts")
-				}
-				rawImages[ref] = raw
-				return nil
-			}
-			if placeholder {
-				if pdfImg.Width <= 0 || pdfImg.Width > 2 || pdfImg.Height != 1 {
-					return fmt.Errorf("PDF output placeholder image dimensions differ")
-				}
-			} else if pdfImg.Width != original.Bounds().Dx() || pdfImg.Height != original.Bounds().Dy() {
-				return fmt.Errorf("PDF output image dimensions differ")
-			}
-			if previous := images[ref]; previous != nil && previous != original {
-				return fmt.Errorf("PDF output image reference conflicts")
-			}
-			if rawImages[ref] != nil {
-				return fmt.Errorf("PDF output image reference conflicts")
-			}
-			images[ref] = original
-			return nil
-		}); err != nil {
-			return err
-		}
-		if needsImageWalk && position != len(settings.Images[index]) {
-			return fmt.Errorf("PDF output image missing")
-		}
-		if settings.ExactText {
-			if index >= len(settings.Text) || textCount != settings.Text[index].Count {
-				return fmt.Errorf("PDF output text count differs")
-			}
-			if len(settings.Text[index].Replacements) != 0 {
-				texts[page.Reference] = settings.Text[index].Replacements
-			}
-		}
-		return nil
-	})
-	if err != nil {
+		payload = compressed
+	}
+	return w.writeStreamBytes(ref, dict, payload, useFlate)
+}
+
+// WritePreencodedStream 直接写出已完成压缩或编码的PDF流对象，避免二次压缩
+// 入参: ref 流对象引用, dict 已含Filter声明的流字典, data 已编码流字节
+// 返回: error 写入或取消错误
+func (w *StreamWriter) WritePreencodedStream(ref pdfgo.Reference, dict pdfgo.Dictionary, data []byte) error {
+	if w.err != nil {
+		return w.err
+	}
+	if err := w.ctx.Err(); err != nil {
+		w.err = err
 		return err
 	}
-	if pages != len(settings.Images) {
-		return fmt.Errorf("PDF output page missing")
+	return w.writeStreamBytes(ref, dict, data, false)
+}
+
+// Finish 写出平衡页面树、目录、信息字典、剩余对象流及预测器交叉引用流并刷盘
+// 入参: catalog 目录字典, info 信息字典，可为空
+// 返回: error 写入或刷新错误
+func (w *StreamWriter) Finish(catalog pdfgo.Dictionary, info pdfgo.Dictionary) error {
+	if w.err != nil {
+		return w.err
 	}
-	activeReader := reader
-	if len(rawImages) != 0 {
-		patchedSource, patchedSize, err := patchRawImagesIncremental(ctx, source, size, reader, rawImages)
-		if err != nil {
-			return err
+	for i := range w.pageTreeNodes {
+		node := &w.pageTreeNodes[i]
+		kids := make(pdfgo.Array, len(node.kids))
+		for j, kid := range node.kids {
+			kids[j] = kid
 		}
-		patchedReader, err := pdfgo.NewReader(patchedSource, patchedSize)
-		if err != nil {
-			return err
+		dict := pdfgo.Dictionary{
+			"Type":  pdfgo.Name("Pages"),
+			"Kids":  kids,
+			"Count": pdfgo.Integer(node.count),
 		}
-		defer patchedReader.Close()
-		activeReader = patchedReader
-	}
-	lossy := settings.Optimization.Compression.Mode == pdfgo.CompressionLossy
-	decoder := &exportImageDecoder{ctx: ctx, lossy: lossy}
-	defer decoder.clear()
-	options := pdfgo.RewriteOptions{Information: settings.Information, Images: images, ImageOptions: pdfgo.ImageWriteOptions{PreblendBinary: !lossy}, LinkRegions: links, TextReplacements: texts, Optimization: settings.Optimization}
-	pageClips := make(map[pdfgo.Reference][]string, len(references))
-	pageFauxBolds := make(map[pdfgo.Reference][]TextFauxBold, len(references))
-	for i, ref := range references {
-		if i < len(settings.ImageClips) {
-			pageClips[ref] = settings.ImageClips[i]
+		if node.parent.Number != 0 {
+			dict["Parent"] = node.parent
 		}
-		if i < len(settings.TextFauxBold) && len(settings.TextFauxBold[i]) != 0 {
-			pageFauxBolds[ref] = settings.TextFauxBold[i]
-		}
-	}
-	options.TransformContent = func(ctx context.Context, page *pdfgo.Page, data []byte) ([]byte, error) {
-		decoder.clear()
-		changed := false
-		clipped, err := clipPageImages(ctx, data, pageClips[page.Reference])
-		if err != nil {
-			return nil, err
-		}
-		if clipped != nil {
-			data = clipped
-			changed = true
-		}
-		if bolds := pageFauxBolds[page.Reference]; len(bolds) != 0 {
-			bolded, err := applyFauxBoldText(ctx, data, bolds)
-			if err != nil {
-				return nil, err
-			}
-			if bolded != nil {
-				data = bolded
-				changed = true
-			}
-		}
-		compact, err := pdfgo.CompactText(ctx, data)
-		if err != nil {
-			return nil, err
-		}
-		if compact != nil {
-			return compact, nil
-		}
-		if changed {
-			return data, nil
-		}
-		return nil, nil
-	}
-	if nativeWrite {
-		if err := settings.PrepareRewrite(ctx, activeReader, references, &options); err != nil {
+		if err := w.WriteObject(node.ref, dict); err != nil {
 			return err
 		}
 	}
-	for ref, original := range options.Images {
-		if err := ctx.Err(); err != nil {
+	if catalog == nil {
+		catalog = make(pdfgo.Dictionary)
+	}
+	catalog["Type"] = pdfgo.Name("Catalog")
+	catalog["Pages"] = w.pagesRootRef
+	if err := w.WriteObject(w.catalogRef, catalog); err != nil {
+		return err
+	}
+	hasInfo := len(info) != 0
+	if hasInfo {
+		if err := w.WriteObject(w.infoRef, info); err != nil {
 			return err
 		}
-		if original == nil {
-			return fmt.Errorf("PDF output image pixel bounds differ")
+	}
+	if err := w.flushObjStm(); err != nil {
+		return err
+	}
+	if err := w.writeXRefStream(hasInfo); err != nil {
+		return err
+	}
+	if err := w.out.Flush(); err != nil {
+		w.err = err
+		return err
+	}
+	return w.ctx.Err()
+}
+
+// CompressBytes 使用可复用zlib写入器压缩独立字节切片并返回新切片
+// 入参: zw 可选复用zlib写入器, buf 可选复用缓冲, level 压缩级别, data 原始数据
+// 返回: []byte 压缩副本, *zlib.Writer 复用后的写入器, error 压缩错误
+func CompressBytes(zw *zlib.Writer, buf *bytes.Buffer, level int, data []byte) ([]byte, *zlib.Writer, error) {
+	if buf == nil {
+		buf = &bytes.Buffer{}
+	} else {
+		buf.Reset()
+	}
+	if zw == nil {
+		var err error
+		zw, err = zlib.NewWriterLevel(buf, level)
+		if err != nil {
+			return nil, nil, err
 		}
-		options.Images[ref] = &lazyExportImage{decoder: decoder, source: original}
+	} else {
+		zw.Reset(buf)
 	}
-	_, err = activeReader.RewriteTo(ctx, writer, options)
-	decoder.clear()
-	if decodeErr := decoder.failure(); decodeErr != nil {
-		return decodeErr
+	if _, err := zw.Write(data); err != nil {
+		return nil, zw, err
 	}
-	return err
+	if err := zw.Close(); err != nil {
+		return nil, zw, err
+	}
+	return bytes.Clone(buf.Bytes()), zw, nil
 }
 
 // outputWriter 在分块输出前后检查取消，不改变底层写入错误
@@ -369,473 +359,451 @@ func (w outputWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
-// decoderSlot 保存当前驻留的单张已解码图像及其快速访问视图
-type decoderSlot struct {
-	target  *lazyExportImage
-	pixels  image.Image
-	rgba64  image.RGBA64Image
-	nrgba   *image.NRGBA
-	nrgba64 interface{ NRGBA64At(int, int) color.NRGBA64 }
+// xrefEntry 记录单个PDF间接对象的交叉引用定位信息
+type xrefEntry struct {
+	kind   uint8
+	field2 uint64
+	field3 uint32
 }
 
-// exportImageDecoder 控制PDF写出期间的单槽懒解码，确保同时最多驻留单张图像像素
-type exportImageDecoder struct {
-	mu    sync.Mutex
-	ctx   context.Context
-	lossy bool
-	slot  atomic.Pointer[decoderSlot]
-	err   error
+// pageTreeNode 描述平衡页面树中的单个内部节点
+type pageTreeNode struct {
+	ref    pdfgo.Reference
+	parent pdfgo.Reference
+	kids   []pdfgo.Reference
+	count  int
 }
 
-// load 按需解码目标图像并立即丢弃上一张图像的未压缩像素缓冲，热路径零加锁
-// 入参: target 待访问的懒加载图像代理
-// 返回: *decoderSlot 当前槽位快照，解码失败时返回nil
-func (d *exportImageDecoder) load(target *lazyExportImage) *decoderSlot {
-	if s := d.slot.Load(); s != nil && s.target == target {
-		return s
+// initPageTree 自底向上构建度为64的平衡页面树并预分配所有页面与内部节点引用
+// 入参: pageCount 总页数
+func (w *StreamWriter) initPageTree(pageCount int) {
+	w.pageRefs = make([]pdfgo.Reference, pageCount)
+	w.pageParents = make([]pdfgo.Reference, pageCount)
+	for i := range pageCount {
+		w.pageRefs[i] = w.AllocRef()
 	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.err != nil {
-		return nil
-	}
-	if s := d.slot.Load(); s != nil && s.target == target {
-		return s
-	}
-	d.slot.Store(nil)
-	pixels, err := decodeExportImage(d.ctx, target.source, d.lossy)
-	if err != nil {
-		d.err = err
-		return nil
-	}
-	s := &decoderSlot{target: target, pixels: pixels}
-	s.rgba64, _ = pixels.(image.RGBA64Image)
-	s.nrgba, _ = pixels.(*image.NRGBA)
-	s.nrgba64, _ = pixels.(interface{ NRGBA64At(int, int) color.NRGBA64 })
-	d.slot.Store(s)
-	return s
-}
-
-// clear 释放当前槽位驻留的未压缩图像像素引用
-func (d *exportImageDecoder) clear() {
-	d.mu.Lock()
-	d.slot.Store(nil)
-	d.mu.Unlock()
-}
-
-// failure 读取解码阶段记录的首个错误
-// 返回: error 解码错误
-func (d *exportImageDecoder) failure() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.err
-}
-
-// lazyExportImage 延迟解码待替换PDF图像，编码完成后随槽位切换自动释放
-type lazyExportImage struct {
-	decoder *exportImageDecoder
-	source  image.Image
-}
-
-// Unwrap 触发单次按需解码并返回底层原生图像，消除逐像素接口与锁开销
-// 返回: image.Image 底层原生图像，解码失败时返回nil
-func (l *lazyExportImage) Unwrap() image.Image {
-	s := l.decoder.load(l)
-	if s == nil {
-		return nil
-	}
-	pixels := s.pixels
-	for {
-		unwrapper, ok := pixels.(interface{ Unwrap() image.Image })
-		if !ok {
-			return pixels
+	if pageCount <= pagesTreeDegree {
+		for i := range pageCount {
+			w.pageParents[i] = w.pagesRootRef
 		}
-		next := unwrapper.Unwrap()
-		if next == nil || next == pixels {
-			return pixels
-		}
-		pixels = next
+		w.pageTreeNodes = []pageTreeNode{{
+			ref:   w.pagesRootRef,
+			kids:  w.pageRefs,
+			count: pageCount,
+		}}
+		return
 	}
-}
-
-// Bounds 触发单张按需解码并返回像素范围，解码失败时返回空范围以中断编码
-// 返回: image.Rectangle 图像像素范围
-func (l *lazyExportImage) Bounds() image.Rectangle {
-	s := l.decoder.load(l)
-	if s == nil {
-		return image.Rectangle{}
+	type levelItem struct {
+		ref   pdfgo.Reference
+		count int
+		node  int
 	}
-	return s.pixels.Bounds()
-}
-
-// ColorModel 返回当前已解码图像的颜色模型
-// 返回: color.Model 颜色模型
-func (l *lazyExportImage) ColorModel() color.Model {
-	s := l.decoder.load(l)
-	if s == nil {
-		return color.NRGBAModel
+	current := make([]levelItem, pageCount)
+	for i, ref := range w.pageRefs {
+		current[i] = levelItem{ref: ref, count: 1, node: -1}
 	}
-	return s.pixels.ColorModel()
-}
-
-// At 返回指定坐标处的原始颜色样本
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.Color 像素颜色
-func (l *lazyExportImage) At(x, y int) color.Color {
-	s := l.decoder.load(l)
-	if s == nil {
-		return color.Transparent
-	}
-	return s.pixels.At(x, y)
-}
-
-// RGBA64At 返回指定坐标处的十六位预乘颜色样本
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.RGBA64 十六位预乘颜色
-func (l *lazyExportImage) RGBA64At(x, y int) color.RGBA64 {
-	s := l.decoder.load(l)
-	if s == nil {
-		return color.RGBA64{}
-	}
-	if s.rgba64 != nil {
-		return s.rgba64.RGBA64At(x, y)
-	}
-	r, g, b, a := s.pixels.At(x, y).RGBA()
-	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
-}
-
-// NRGBA64At 返回指定坐标处的十六位非预乘颜色样本，常见像素切片走无装箱快路径
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.NRGBA64 十六位非预乘颜色
-func (l *lazyExportImage) NRGBA64At(x, y int) color.NRGBA64 {
-	s := l.decoder.load(l)
-	if s == nil {
-		return color.NRGBA64{}
-	}
-	if s.nrgba != nil {
-		if !(image.Point{X: x, Y: y}).In(s.nrgba.Rect) {
-			return color.NRGBA64{}
-		}
-		i := s.nrgba.PixOffset(x, y)
-		pix := s.nrgba.Pix[i : i+4 : i+4]
-		return color.NRGBA64{R: uint16(pix[0]) * 257, G: uint16(pix[1]) * 257, B: uint16(pix[2]) * 257, A: uint16(pix[3]) * 257}
-	}
-	if s.nrgba64 != nil {
-		return s.nrgba64.NRGBA64At(x, y)
-	}
-	return baseimage.NRGBA64At(s.pixels, x, y)
-}
-
-// multiReaderAt 零拷贝拼接原始PDF数据与尾部增量更新缓冲
-type multiReaderAt struct {
-	first     io.ReaderAt
-	firstSize int64
-	second    []byte
-}
-
-// ReadAt 按全局偏移读取拼接后的只读数据源
-// 入参: p 目标缓冲, off 读取偏移
-// 返回: int 实际读取字节数, error 读取错误
-func (m multiReaderAt) ReadAt(p []byte, off int64) (int, error) {
-	if off < 0 {
-		return 0, fmt.Errorf("negative offset")
-	}
-	total := m.firstSize + int64(len(m.second))
-	if off >= total {
-		return 0, io.EOF
-	}
-	read := 0
-	if off < m.firstSize {
-		n := len(p)
-		if int64(n) > m.firstSize-off {
-			n = int(m.firstSize - off)
-		}
-		got, err := m.first.ReadAt(p[:n], off)
-		read += got
-		if err != nil && err != io.EOF {
-			return read, err
-		}
-		if got < n {
-			return read, io.ErrUnexpectedEOF
-		}
-		off += int64(got)
-	}
-	if read < len(p) && off >= m.firstSize {
-		srcOff := int(off - m.firstSize)
-		copied := copy(p[read:], m.second[srcOff:])
-		read += copied
-	}
-	if read < len(p) {
-		return read, io.EOF
-	}
-	return read, nil
-}
-
-// applyFauxBoldText 为指定的文字对象区间注入Tr=2填充并细描边状态并隔离图形状态
-// 入参: ctx 取消上下文, data 页面指令, bolds 伪粗体文字区间列表
-// 返回: []byte 更新指令，未变化时为nil, error 解析或取消错误
-func applyFauxBoldText(ctx context.Context, data []byte, bolds []TextFauxBold) ([]byte, error) {
-	if len(bolds) == 0 {
-		return nil, ctx.Err()
-	}
-	byIndex := make(map[int]TextFauxBold)
-	for _, item := range bolds {
-		for k := 0; k < item.Count; k++ {
-			byIndex[item.First+k] = item
-		}
-	}
-	if len(byIndex) == 0 {
-		return nil, ctx.Err()
-	}
-	var output bytes.Buffer
-	position, btIndex := 0, 0
-	inBold := false
-	err := pdfgo.WalkOperations(ctx, data, func(op pdfgo.Operation) error {
-		start := int(op.Offset)
-		end := start + len(op.Operator)
-		if op.Operator == "BT" {
-			if item, ok := byIndex[btIndex]; ok {
-				output.Write(data[position:start])
-				output.WriteString(" q ")
-				output.WriteString(formatPDFNumber(item.LineWidth))
-				output.WriteString(" w 1 j 1 J ")
-				if item.Color.R == item.Color.G && item.Color.G == item.Color.B {
-					output.WriteString(formatPDFNumber(float64(item.Color.R) / 255))
-					output.WriteString(" G ")
+	for len(current) > 1 {
+		groups := (len(current) + pagesTreeDegree - 1) / pagesTreeDegree
+		next := make([]levelItem, 0, groups)
+		isRoot := groups == 1
+		for g := range groups {
+			start := g * pagesTreeDegree
+			end := min(start+pagesTreeDegree, len(current))
+			nodeRef := w.pagesRootRef
+			if !isRoot {
+				nodeRef = w.AllocRef()
+			}
+			kids := make([]pdfgo.Reference, end-start)
+			total := 0
+			for j := start; j < end; j++ {
+				kids[j-start] = current[j].ref
+				total += current[j].count
+				if current[j].node < 0 {
+					w.pageParents[j] = nodeRef
 				} else {
-					output.WriteString(formatPDFNumber(float64(item.Color.R) / 255))
-					output.WriteByte(' ')
-					output.WriteString(formatPDFNumber(float64(item.Color.G) / 255))
-					output.WriteByte(' ')
-					output.WriteString(formatPDFNumber(float64(item.Color.B) / 255))
-					output.WriteString(" RG ")
+					w.pageTreeNodes[current[j].node].parent = nodeRef
 				}
-				output.Write(data[start:end])
-				output.WriteString(" 2 Tr ")
-				position = end
-				inBold = true
 			}
-			btIndex++
-			return nil
+			idx := len(w.pageTreeNodes)
+			w.pageTreeNodes = append(w.pageTreeNodes, pageTreeNode{ref: nodeRef, kids: kids, count: total})
+			next = append(next, levelItem{ref: nodeRef, count: total, node: idx})
 		}
-		if op.Operator == "ET" && inBold {
-			output.Write(data[position:end])
-			output.WriteString(" Q ")
-			position = end
-			inBold = false
-		}
+		current = next
+	}
+}
+
+// flushObjStm 将当前累积的非流对象压缩为一个PDF对象流并释放临时缓冲
+// 返回: error 压缩或写入错误
+func (w *StreamWriter) flushObjStm() error {
+	count := len(w.objStmNums)
+	if count == 0 {
 		return nil
-	})
+	}
+	stmRef := w.AllocRef()
+	w.scratchBuf.Reset()
+	for i := range count {
+		if i > 0 {
+			w.scratchBuf.WriteByte(' ')
+		}
+		w.scratchBuf.WriteString(strconv.Itoa(w.objStmNums[i]))
+		w.scratchBuf.WriteByte(' ')
+		w.scratchBuf.WriteString(strconv.Itoa(w.objStmOffsets[i]))
+	}
+	w.scratchBuf.WriteByte('\n')
+	first := w.scratchBuf.Len()
+	w.scratchBuf.Write(w.objStmBody.Bytes())
+	compressed, err := w.deflate(w.scratchBuf.Bytes())
 	if err != nil {
-		return nil, err
+		w.err = err
+		return err
 	}
-	if position == 0 {
-		return nil, ctx.Err()
+	dict := pdfgo.Dictionary{
+		"Type":   pdfgo.Name("ObjStm"),
+		"N":      pdfgo.Integer(count),
+		"First":  pdfgo.Integer(first),
+		"Filter": pdfgo.Name("FlateDecode"),
 	}
-	output.Write(data[position:])
-	return output.Bytes(), ctx.Err()
+	if err := w.writeStreamBytes(stmRef, dict, compressed, false); err != nil {
+		return err
+	}
+	for i, objNum := range w.objStmNums {
+		w.xref[objNum] = xrefEntry{kind: xrefCompressed, field2: uint64(stmRef.Number), field3: uint32(i)}
+	}
+	w.objStmNums = w.objStmNums[:0]
+	w.objStmOffsets = w.objStmOffsets[:0]
+	w.objStmBody.Reset()
+	return nil
 }
 
-// formatPDFNumber 格式化PDF实数，避免科学计数法
-// 入参: v 实数值
-// 返回: string PDF数字文本
-func formatPDFNumber(v float64) string {
-	s := strconv.FormatFloat(v, 'f', 6, 64)
-	if strings.ContainsRune(s, '.') {
-		s = strings.TrimRight(s, "0")
-		s = strings.TrimRight(s, ".")
-	}
-	if s == "-0" || s == "" {
-		return "0"
-	}
-	return s
-}
-
-// patchRawImagesIncremental 通过标准PDF增量更新把占位图像对象替换为JPX或JBIG2原始流
-// 入参: ctx 取消上下文, source 原始中间PDF, size 原始长度, reader 已解析阅读器, rawImages 待替换流映射
-// 返回: io.ReaderAt 拼接后PDF源, int64 总长度, error 解析或写入错误
-func patchRawImagesIncremental(ctx context.Context, source io.ReaderAt, size int64, reader *pdfgo.Reader, rawImages map[pdfgo.Reference]*RawImage) (io.ReaderAt, int64, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, 0, err
-	}
-	tailSize := min(size, int64(1024))
-	tail := make([]byte, tailSize)
-	if _, err := source.ReadAt(tail, size-tailSize); err != nil && err != io.EOF {
-		return nil, 0, err
-	}
-	idx := bytes.LastIndex(tail, []byte("startxref"))
-	if idx < 0 {
-		return nil, 0, fmt.Errorf("missing startxref in intermediate PDF")
-	}
-	fields := strings.Fields(string(tail[idx+len("startxref"):]))
-	if len(fields) == 0 {
-		return nil, 0, fmt.Errorf("invalid startxref in intermediate PDF")
-	}
-	prevXref, err := strconv.ParseInt(fields[0], 10, 64)
-	if err != nil || prevXref < 0 {
-		return nil, 0, fmt.Errorf("invalid startxref offset")
-	}
-	trailerSize, ok := reader.Trailer["Size"].(pdfgo.Integer)
-	if !ok || trailerSize <= 0 {
-		return nil, 0, fmt.Errorf("invalid trailer Size in intermediate PDF")
-	}
-	rootRef, ok := reader.Trailer["Root"].(pdfgo.Reference)
-	if !ok {
-		return nil, 0, fmt.Errorf("invalid trailer Root in intermediate PDF")
-	}
-	refs := make([]pdfgo.Reference, 0, len(rawImages))
-	for ref := range rawImages {
-		refs = append(refs, ref)
-	}
-	slices.SortFunc(refs, func(a, b pdfgo.Reference) int {
-		if c := cmp.Compare(a.Number, b.Number); c != 0 {
-			return c
+// writeXRefStream 写出带PNG Up预测器的PDF 1.5+压缩交叉引用流与文件尾
+// 入参: hasInfo 是否包含有效文档信息对象
+// 返回: error 压缩或写入错误
+func (w *StreamWriter) writeXRefStream(hasInfo bool) error {
+	xrefRef := w.AllocRef()
+	xrefOffset := w.pos
+	w.xref[xrefRef.Number] = xrefEntry{kind: xrefNormal, field2: uint64(xrefOffset), field3: 0}
+	var maxF2 uint64
+	var maxF3 uint32
+	for i := 1; i < len(w.xref); i++ {
+		if w.xref[i].field2 > maxF2 {
+			maxF2 = w.xref[i].field2
 		}
-		return cmp.Compare(a.Generation, b.Generation)
-	})
-	var delta bytes.Buffer
-	delta.WriteByte('\n')
-	offsets := make([]int64, len(refs))
-	for i, ref := range refs {
-		if err := ctx.Err(); err != nil {
-			return nil, 0, err
+		if w.xref[i].field3 > maxF3 {
+			maxF3 = w.xref[i].field3
 		}
-		raw := rawImages[ref]
-		offsets[i] = size + int64(delta.Len())
-		fmt.Fprintf(&delta, "%d %d obj\n<< /Type /XObject /Subtype /Image /Width %d /Height %d", ref.Number, ref.Generation, raw.Width, raw.Height)
-		if raw.BitsPerComponent > 0 {
-			fmt.Fprintf(&delta, " /BitsPerComponent %d", raw.BitsPerComponent)
-		}
-		if raw.ColorSpace != "" {
-			fmt.Fprintf(&delta, " /ColorSpace /%s", raw.ColorSpace)
-		}
-		fmt.Fprintf(&delta, " /Filter /%s /Length %d >>\nstream\n", raw.Filter, len(raw.Data))
-		delta.Write(raw.Data)
-		delta.WriteString("\nendstream\nendobj\n")
 	}
-	xrefOffset := size + int64(delta.Len())
-	delta.WriteString("xref\n")
-	for i, ref := range refs {
-		fmt.Fprintf(&delta, "%d 1\n%010d %05d n \n", ref.Number, offsets[i], ref.Generation)
+	w2 := minByteWidth(maxF2)
+	w3 := minByteWidth(uint64(maxF3))
+	if w3 < 2 && w.xref[0].field3 > 255 {
+		w3 = 2
 	}
-	fmt.Fprintf(&delta, "trailer\n<< /Size %d /Root %d %d R /Prev %d >>\nstartxref\n%d\n%%%%EOF\n", trailerSize, rootRef.Number, rootRef.Generation, prevXref, xrefOffset)
-	data := delta.Bytes()
-	return multiReaderAt{first: source, firstSize: size, second: data}, size + int64(len(data)), nil
-}
-
-// clipPageImages 在图像局部坐标中应用独立裁剪，不解码或重新采样图像
-// 入参: ctx 取消上下文, data 页面指令, clips 各次图像绘制的局部裁剪路径
-// 返回: []byte 更新指令，未变化时为nil, error 解析或取消错误
-func clipPageImages(ctx context.Context, data []byte, clips []string) ([]byte, error) {
-	if len(clips) == 0 {
-		return nil, ctx.Err()
-	}
-	var output bytes.Buffer
-	position, previous, index := 0, 0, 0
-	err := pdfgo.WalkOperations(ctx, data, func(op pdfgo.Operation) error {
-		end := int(op.Offset) + len(op.Operator)
-		if op.Operator == "Do" {
-			if index < len(clips) && clips[index] != "" {
-				output.Write(data[position:previous])
-				output.WriteString(" q ")
-				output.WriteString(clips[index])
-				output.WriteString(" W n ")
-				output.Write(data[previous:end])
-				output.WriteString(" Q ")
-				position = end
-			}
-			index++
+	cols := 1 + w2 + w3
+	rowStride := 1 + cols
+	raw := make([]byte, len(w.xref)*rowStride)
+	prev := make([]byte, cols)
+	cur := make([]byte, cols)
+	for i, entry := range w.xref {
+		cur[0] = entry.kind
+		putBigEndian(cur[1:1+w2], entry.field2)
+		putBigEndian(cur[1+w2:cols], uint64(entry.field3))
+		dst := raw[i*rowStride:]
+		dst[0] = 2
+		for j := range cols {
+			dst[1+j] = cur[j] - prev[j]
 		}
-		previous = end
-		return nil
-	})
+		copy(prev, cur)
+	}
+	compressed, err := w.deflate(raw)
 	if err != nil {
-		return nil, err
+		w.err = err
+		return err
 	}
-	if position == 0 {
-		return nil, ctx.Err()
+	dict := pdfgo.Dictionary{
+		"Type":   pdfgo.Name("XRef"),
+		"Size":   pdfgo.Integer(len(w.xref)),
+		"Root":   w.catalogRef,
+		"W":      pdfgo.Array{pdfgo.Integer(1), pdfgo.Integer(w2), pdfgo.Integer(w3)},
+		"Filter": pdfgo.Name("FlateDecode"),
+		"DecodeParms": pdfgo.Dictionary{
+			"Predictor": pdfgo.Integer(12),
+			"Columns":   pdfgo.Integer(cols),
+		},
 	}
-	output.Write(data[position:])
-	return output.Bytes(), ctx.Err()
+	if hasInfo {
+		dict["Info"] = w.infoRef
+	}
+	if err := w.writeStreamBytes(xrefRef, dict, compressed, false); err != nil {
+		return err
+	}
+	w.scratchBuf.Reset()
+	w.scratchBuf.WriteString("startxref\n")
+	w.scratchBuf.WriteString(strconv.FormatInt(xrefOffset, 10))
+	w.scratchBuf.WriteString("\n%%EOF\n")
+	return w.writeRaw(w.scratchBuf.Bytes())
 }
 
-// decodeExportImage 单次临时解码单张待导出图像并校验范围，有损模式降至8位以启用下游压缩，不在源惰性对象上保留像素缓存
-// 入参: ctx 取消上下文, original 源图像或惰性图像, lossy 是否处于有损压缩模式
-// 返回: image.Image 解码像素, error 解码、范围或取消错误
-func decodeExportImage(ctx context.Context, original image.Image, lossy bool) (image.Image, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+// writeStreamBytes 写出流对象头、原始或压缩载荷与结束标记
+// 入参: ref 流对象引用, dict 流字典, payload 写出字节, addFlate 是否补写FlateDecode过滤器
+// 返回: error 写入错误
+func (w *StreamWriter) writeStreamBytes(ref pdfgo.Reference, dict pdfgo.Dictionary, payload []byte, addFlate bool) error {
+	w.xref[ref.Number] = xrefEntry{kind: xrefNormal, field2: uint64(w.pos), field3: 0}
+	w.scratchBuf.Reset()
+	w.scratchBuf.WriteString(strconv.FormatInt(ref.Number, 10))
+	w.scratchBuf.WriteString(" 0 obj\n")
+	appendPDFStreamDict(&w.scratchBuf, dict, len(payload), addFlate)
+	w.scratchBuf.WriteString("\nstream\n")
+	if err := w.writeRaw(w.scratchBuf.Bytes()); err != nil {
+		return err
 	}
-	pixels, err := baseimage.DecodeTransientContext(ctx, original)
-	if err != nil {
-		return nil, err
+	if len(payload) > 0 {
+		if err := w.writeRaw(payload); err != nil {
+			return err
+		}
 	}
-	if pixels == nil || pixels.Bounds() != original.Bounds() {
-		return nil, fmt.Errorf("PDF output image pixel bounds differ")
-	}
-	if lossy {
-		return normalizeLossyExportImage(ctx, pixels)
-	}
-	return pixels, nil
+	return w.writeRaw([]byte("\nendstream\nendobj\n"))
 }
 
-// normalizeLossyExportImage 将高精度或预乘图像规范化为8位非预乘格式，避免PDF写出阶段升级16位绕过有损压缩
-// 入参: ctx 取消上下文, pixels 已解码像素
-// 返回: image.Image 8位图像, error 取消错误
-func normalizeLossyExportImage(ctx context.Context, pixels image.Image) (image.Image, error) {
-	switch src := pixels.(type) {
-	case *image.NRGBA, *image.Gray, *image.YCbCr, *image.CMYK:
-		return pixels, ctx.Err()
-	case *image.Gray16:
-		b := src.Bounds()
-		w, h := b.Dx(), b.Dy()
-		dst := image.NewGray(image.Rect(0, 0, w, h))
-		for y := 0; y < h; y++ {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			srcRow := src.Pix[src.PixOffset(b.Min.X, b.Min.Y+y):]
-			dstRow := dst.Pix[y*dst.Stride:]
-			for x := 0; x < w; x++ {
-				dstRow[x] = srcRow[x*2]
-			}
-		}
-		return dst, ctx.Err()
-	case *image.NRGBA64:
-		b := src.Bounds()
-		w, h := b.Dx(), b.Dy()
-		dst := image.NewNRGBA(image.Rect(0, 0, w, h))
-		for y := 0; y < h; y++ {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			srcRow := src.Pix[src.PixOffset(b.Min.X, b.Min.Y+y):]
-			dstRow := dst.Pix[y*dst.Stride:]
-			for x := 0; x < w; x++ {
-				si, di := x*8, x*4
-				dstRow[di], dstRow[di+1], dstRow[di+2], dstRow[di+3] = srcRow[si], srcRow[si+2], srcRow[si+4], srcRow[si+6]
-			}
-		}
-		return dst, ctx.Err()
-	}
-	b := pixels.Bounds()
-	w, h := b.Dx(), b.Dy()
-	dst := image.NewNRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		if err := ctx.Err(); err != nil {
+// deflate 复用内部zlib写入器压缩字节切片，避免高频分配压缩字典
+// 入参: data 待压缩字节
+// 返回: []byte 压缩结果视图, error 压缩错误
+func (w *StreamWriter) deflate(data []byte) ([]byte, error) {
+	w.zlibBuf.Reset()
+	if w.zlibWriter == nil {
+		zw, err := zlib.NewWriterLevel(&w.zlibBuf, w.compressLevel)
+		if err != nil {
 			return nil, err
 		}
-		dstRow := dst.Pix[y*dst.Stride:]
-		for x := 0; x < w; x++ {
-			if x&4095 == 4095 {
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
+		w.zlibWriter = zw
+	} else {
+		w.zlibWriter.Reset(&w.zlibBuf)
+	}
+	if _, err := w.zlibWriter.Write(data); err != nil {
+		return nil, err
+	}
+	if err := w.zlibWriter.Close(); err != nil {
+		return nil, err
+	}
+	return w.zlibBuf.Bytes(), nil
+}
+
+// writeRaw 向底层缓冲输出字节并累加文件偏移
+// 入参: data 待写出字节
+// 返回: error 写入错误
+func (w *StreamWriter) writeRaw(data []byte) error {
+	n, err := w.out.Write(data)
+	w.pos += int64(n)
+	if err != nil {
+		w.err = err
+		return err
+	}
+	return nil
+}
+
+// appendPDFStreamDict 序列化流字典并写入Length与可选FlateDecode，不修改调用方字典
+// 入参: buf 目标缓冲, dict 原始流字典, length 载荷字节数, addFlate 是否补充FlateDecode
+func appendPDFStreamDict(buf *bytes.Buffer, dict pdfgo.Dictionary, length int, addFlate bool) {
+	keys := make([]pdfgo.Name, 0, len(dict)+2)
+	hasFilter := false
+	for k := range dict {
+		if k == "Length" {
+			continue
+		}
+		if k == "Filter" {
+			hasFilter = true
+		}
+		keys = append(keys, k)
+	}
+	slices.SortFunc(keys, func(a, b pdfgo.Name) int { return cmp.Compare(a, b) })
+	buf.WriteString("<<")
+	for _, k := range keys {
+		appendPDFName(buf, string(k))
+		v := dict[k]
+		if pdfObjectNeedsLeadingSpace(v) {
+			buf.WriteByte(' ')
+		}
+		appendPDFObject(buf, v)
+	}
+	if addFlate && !hasFilter {
+		buf.WriteString("/Filter/FlateDecode")
+	}
+	buf.WriteString("/Length ")
+	buf.WriteString(strconv.Itoa(length))
+	buf.WriteString(">>")
+}
+
+// appendPDFObject 按ISO 32000-1语法序列化任意PDF对象值
+// 入参: buf 目标缓冲, obj PDF对象
+func appendPDFObject(buf *bytes.Buffer, obj pdfgo.Object) {
+	switch v := obj.(type) {
+	case nil:
+		buf.WriteString("null")
+	case pdfgo.Boolean:
+		if v {
+			buf.WriteString("true")
+		} else {
+			buf.WriteString("false")
+		}
+	case pdfgo.Integer:
+		buf.WriteString(strconv.FormatInt(int64(v), 10))
+	case pdfgo.Real:
+		appendCompactFloat(buf, float64(v), 6)
+	case pdfgo.Name:
+		appendPDFName(buf, string(v))
+	case pdfgo.String:
+		appendPDFLiteralString(buf, []byte(v))
+	case pdfgo.Reference:
+		buf.WriteString(strconv.FormatInt(v.Number, 10))
+		buf.WriteByte(' ')
+		buf.WriteString(strconv.FormatInt(v.Generation, 10))
+		buf.WriteString(" R")
+	case pdfgo.Array:
+		buf.WriteByte('[')
+		for i, item := range v {
+			if i > 0 && pdfObjectNeedsLeadingSpace(item) {
+				buf.WriteByte(' ')
 			}
-			c := baseimage.NRGBAAt(pixels, b.Min.X+x, b.Min.Y+y)
-			di := x * 4
-			dstRow[di], dstRow[di+1], dstRow[di+2], dstRow[di+3] = c.R, c.G, c.B, c.A
+			appendPDFObject(buf, item)
+		}
+		buf.WriteByte(']')
+	case pdfgo.Dictionary:
+		keys := make([]pdfgo.Name, 0, len(v))
+		for k := range v {
+			keys = append(keys, k)
+		}
+		slices.SortFunc(keys, func(a, b pdfgo.Name) int { return cmp.Compare(a, b) })
+		buf.WriteString("<<")
+		for _, k := range keys {
+			appendPDFName(buf, string(k))
+			val := v[k]
+			if pdfObjectNeedsLeadingSpace(val) {
+				buf.WriteByte(' ')
+			}
+			appendPDFObject(buf, val)
+		}
+		buf.WriteString(">>")
+	default:
+		buf.WriteString("null")
+	}
+}
+
+// pdfObjectNeedsLeadingSpace 判断对象序列化在名称或前驱项之后是否需要空格分隔
+// 入参: obj PDF对象
+// 返回: bool 是否需要前置空格
+func pdfObjectNeedsLeadingSpace(obj pdfgo.Object) bool {
+	switch obj.(type) {
+	case pdfgo.Name, pdfgo.String, pdfgo.Array, pdfgo.Dictionary:
+		return false
+	default:
+		return true
+	}
+}
+
+// appendPDFName 按PDF名称转义规则序列化名称对象
+// 入参: buf 目标缓冲, name 名称文本
+func appendPDFName(buf *bytes.Buffer, name string) {
+	buf.WriteByte('/')
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c < 0x21 || c > 0x7E || c == '#' || c == '/' || c == '%' || c == '(' || c == ')' || c == '<' || c == '>' || c == '[' || c == ']' || c == '{' || c == '}' {
+			const hex = "0123456789ABCDEF"
+			buf.WriteByte('#')
+			buf.WriteByte(hex[c>>4])
+			buf.WriteByte(hex[c&0x0F])
+			continue
+		}
+		buf.WriteByte(c)
+	}
+}
+
+// appendPDFLiteralString 按PDF字面量字符串规则转义并写入字节串
+// 入参: buf 目标缓冲, data 原始字节
+func appendPDFLiteralString(buf *bytes.Buffer, data []byte) {
+	buf.WriteByte('(')
+	for _, c := range data {
+		switch c {
+		case '\\', '(', ')':
+			buf.WriteByte('\\')
+			buf.WriteByte(c)
+		case '\n':
+			buf.WriteString(`\n`)
+		case '\r':
+			buf.WriteString(`\r`)
+		case '\t':
+			buf.WriteString(`\t`)
+		case '\b':
+			buf.WriteString(`\b`)
+		case '\f':
+			buf.WriteString(`\f`)
+		default:
+			buf.WriteByte(c)
 		}
 	}
-	return dst, ctx.Err()
+	buf.WriteByte(')')
+}
+
+// appendCompactFloat 将有限浮点数格式化为紧凑PDF实数文本，省略尾随零与前导零
+// 入参: buf 目标缓冲, value 浮点值, prec 最大小数位数
+func appendCompactFloat(buf *bytes.Buffer, value float64, prec int) {
+	var scratch [48]byte
+	out := appendCompactFloatBytes(scratch[:0], value, prec)
+	buf.Write(out)
+}
+
+// appendCompactFloatBytes 向字节切片追加紧凑PDF实数，避免临时字符串分配
+// 入参: dst 目标切片, value 浮点值, prec 最大小数位数
+// 返回: []byte 追加后的切片
+func appendCompactFloatBytes(dst []byte, value float64, prec int) []byte {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return append(dst, '0')
+	}
+	if value == 0 {
+		return append(dst, '0')
+	}
+	start := len(dst)
+	dst = strconv.AppendFloat(dst, value, 'f', prec, 64)
+	dot := bytes.IndexByte(dst[start:], '.')
+	if dot >= 0 {
+		end := len(dst)
+		for end > start+dot+1 && dst[end-1] == '0' {
+			end--
+		}
+		if end == start+dot+1 {
+			end--
+		}
+		dst = dst[:end]
+	}
+	s := dst[start:]
+	if len(s) == 2 && s[0] == '-' && s[1] == '0' {
+		return append(dst[:start], '0')
+	}
+	if len(s) > 2 && s[0] == '0' && s[1] == '.' {
+		copy(dst[start:], s[1:])
+		return dst[:len(dst)-1]
+	}
+	if len(s) > 3 && s[0] == '-' && s[1] == '0' && s[2] == '.' {
+		dst[start+1] = '.'
+		copy(dst[start+2:], s[3:])
+		return dst[:len(dst)-1]
+	}
+	return dst
+}
+
+// minByteWidth 计算无符号整数大端编码所需的最小字节宽度
+// 入参: v 无符号整数
+// 返回: int 最小字节数
+func minByteWidth(v uint64) int {
+	w := 1
+	for v >>= 8; v != 0; v >>= 8 {
+		w++
+	}
+	return w
+}
+
+// putBigEndian 按指定宽度以大端序写入无符号整数
+// 入参: dst 目标切片, v 无符号整数
+func putBigEndian(dst []byte, v uint64) {
+	for i := len(dst) - 1; i >= 0; i-- {
+		dst[i] = byte(v)
+		v >>= 8
+	}
 }

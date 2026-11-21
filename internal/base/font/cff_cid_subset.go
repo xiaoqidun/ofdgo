@@ -30,6 +30,7 @@ type cidSubsetFont struct {
 	private []cffDict
 	fonts   []*type2Font
 	selects []int
+	cids    []int
 	charset []byte
 }
 
@@ -37,6 +38,9 @@ type cidSubsetFont struct {
 // 入参: chars 裁剪后的字形程序
 // 返回: []byte CFF数据, error 偏移或字典错误
 func (f *cidSubsetFont) write(chars [][]byte) ([]byte, error) {
+	if f.charset == nil {
+		f.charset = encodeCFFSubsetCharset(f.cids)
+	}
 	suffix := append(encodeCFFIndex(f.strings), encodeCFFIndex(f.fonts[0].globals)...)
 	selects := encodeCFFSubsetFDSelect(f.selects)
 	programs := encodeCFFIndex(chars)
@@ -179,7 +183,7 @@ func readCIDSubsetFont(data []byte) (*cidSubsetFont, error) {
 	}
 	font := &cidSubsetFont{
 		prefix:  append(bytes.Clone(data[:int(data[2])]), encodeCFFIndex(names)...),
-		strings: strings, top: top, selects: selects, charset: encodeCFFSubsetCharset(cids),
+		strings: strings, top: top, selects: selects, cids: cids,
 		dicts: make([]cffDict, len(fds)), private: make([]cffDict, len(fds)), fonts: make([]*type2Font, len(fds)),
 	}
 	for index, fd := range fds {

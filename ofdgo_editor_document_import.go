@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -131,19 +132,65 @@ func (e *Editor) ImportDocumentsContext(ctx context.Context, source *Reader, ind
 		if err != nil {
 			return 0, err
 		}
-		reserved := maps.Clone(occupied)
-		for name := range migration.kinds {
-			reserved[name] = nil
+		occupiedTop := documentImportTopDirs(reader, occupied)
+		sourceTops, hasRootDoc := documentImportSourceTopDirs(data, root, indexes, migration)
+		topRemap := make(map[string]string, len(sourceTops))
+		for _, top := range sourceTops {
+			key := strings.ToLower(top)
+			if occupiedTop[key] {
+				mapped := nextDocumentImportTopDir(occupiedTop)
+				topRemap[top] = mapped
+				occupiedTop[strings.ToLower(mapped)] = true
+			} else {
+				occupiedTop[key] = true
+			}
 		}
-		for _, name := range slices.Sorted(maps.Keys(migration.kinds)) {
+		rootRemap := ""
+		if hasRootDoc {
+			for name := range migration.kinds {
+				if _, exists := occupied[name]; exists || reader.hasPackageFile(name) {
+					rootRemap = nextDocumentImportTopDir(occupiedTop)
+					occupiedTop[strings.ToLower(rootRemap)] = true
+					break
+				}
+			}
+		}
+		sortedNames := slices.Sorted(maps.Keys(migration.kinds))
+		proposed := make(map[string]string, len(sortedNames))
+		reserved := maps.Clone(occupied)
+		var conflicts []string
+		for _, name := range sortedNames {
 			if err := ctx.Err(); err != nil {
 				return 0, err
 			}
-			candidate := packageAvailableName(reader, occupied, name)
-			if candidate != name {
-				candidate = packageAvailableName(reader, reserved, name)
-				paths[name] = candidate
+			candidate := name
+			if top, rest, ok := strings.Cut(name, "/"); ok {
+				if mapped := topRemap[top]; mapped != "" {
+					candidate = mapped + "/" + rest
+				} else if rootRemap != "" && !slices.Contains(sourceTops, top) {
+					candidate = rootRemap + "/" + name
+				}
+			} else if rootRemap != "" {
+				candidate = rootRemap + "/" + name
+			}
+			proposed[name] = candidate
+			if _, inRes := reserved[candidate]; !inRes && !reader.hasPackageFile(candidate) {
 				reserved[candidate] = nil
+				if candidate != name {
+					paths[name] = candidate
+				}
+			} else {
+				conflicts = append(conflicts, name)
+			}
+		}
+		for _, name := range conflicts {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+			candidate := packageAvailableName(reader, reserved, proposed[name])
+			reserved[candidate] = nil
+			if candidate != name {
+				paths[name] = candidate
 			}
 		}
 		for _, name := range slices.Sorted(maps.Keys(migration.files)) {
@@ -369,4 +416,92 @@ func documentImportOccupied(ctx context.Context, reader *Reader, data []byte, ro
 		occupied[name] = nil
 	}
 	return occupied, nil
+}
+
+// documentImportTopDirs 收集目标包已占用的顶层目录与根级条目名称（小写规范化）
+// 入参: reader 目标阅读器, occupied 目标文档已声明路径
+// 返回: map[string]bool 已占用的顶层名称集合
+func documentImportTopDirs(reader *Reader, occupied map[string][]byte) map[string]bool {
+	used := make(map[string]bool)
+	record := func(raw string) {
+		clean := cleanPackagePath(raw)
+		if clean == "" || clean == "." || clean == "OFD.xml" {
+			return
+		}
+		top, _, _ := strings.Cut(clean, "/")
+		if top != "" {
+			used[strings.ToLower(top)] = true
+		}
+	}
+	for name := range occupied {
+		record(name)
+	}
+	for name := range reader.fileNames {
+		record(name)
+	}
+	for name := range reader.files {
+		record(name)
+	}
+	return used
+}
+
+// documentImportSourceTopDirs 提取待导入文档集合使用的独立顶层目录列表及是否存在根级文档入口
+// 入参: ofdData 来源OFD.xml原文, root 来源OFD根节点, indexes 待导入文档索引, migration 已收集的依赖迁移状态
+// 返回: []string 有序去重的顶层目录名, bool 是否存在包根目录文档
+func documentImportSourceTopDirs(ofdData []byte, root *editorXML, indexes []int, migration *editorDocumentImport) ([]string, bool) {
+	var tops []string
+	seen := make(map[string]bool)
+	hasRootDoc := false
+	addPath := func(loc string) {
+		clean := cleanPackagePath(loc)
+		if clean == "" || clean == "." {
+			return
+		}
+		if top, _, ok := strings.Cut(clean, "/"); ok {
+			if !seen[top] {
+				seen[top] = true
+				tops = append(tops, top)
+			}
+		} else {
+			hasRootDoc = true
+		}
+	}
+	for _, index := range indexes {
+		body := root.childAt("DocBody", index)
+		if body == nil {
+			continue
+		}
+		if docRoot := body.child("DocRoot"); docRoot != nil {
+			addPath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, docRoot)))
+		}
+		if versions := body.child("Versions"); versions != nil {
+			for _, ver := range versions.children {
+				if !ver.matchesOFD("Version") {
+					continue
+				}
+				verLoc := resolveResourcePath("OFD.xml", "", ver.attr("BaseLoc"))
+				addPath(verLoc)
+				if vf := migration.files[verLoc]; vf != nil {
+					for _, link := range vf.links {
+						if link.attribute == "" && link.node != nil && link.node.matchesOFD("DocRoot") {
+							addPath(link.target)
+						}
+					}
+				}
+			}
+		}
+	}
+	return tops, hasRootDoc
+}
+
+// nextDocumentImportTopDir 按Doc_N命名序列分配尚未被占用的顶层目录名
+// 入参: used 已占用的顶层名称集合（小写键）
+// 返回: string 新的独立顶层目录名
+func nextDocumentImportTopDir(used map[string]bool) string {
+	for n := 0; ; n++ {
+		candidate := "Doc_" + strconv.Itoa(n)
+		if !used[strings.ToLower(candidate)] {
+			return candidate
+		}
+	}
 }

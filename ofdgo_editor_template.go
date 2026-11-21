@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"path"
@@ -46,22 +47,54 @@ func (e *Editor) Templates() ([]TemplatePage, error) {
 // 入参: page 零基页面索引
 // 返回: []Template 独立引用清单, error 页面读取错误
 func (e *Editor) PageTemplates(page int) ([]Template, error) {
-	p, err := e.page(page)
-	if err != nil {
-		return nil, err
+	if page < 0 || page >= len(e.pages) {
+		return nil, fmt.Errorf("page index %d out of range", page)
 	}
-	return append([]Template{}, p.Template...), nil
+	if e.source != nil {
+		if src := e.source.pages[e.pages[page].ID]; src != nil && src.original == nil {
+			header, err := e.source.reader.readPageHeaderContext(context.Background(), src.ref)
+			if err != nil {
+				return nil, err
+			}
+			return append([]Template{}, header.Template...), nil
+		}
+	}
+	return append([]Template{}, e.pages[page].Template...), nil
 }
 
 // TemplateReferences 返回当前文档及所选版本全部普通页面的模板引用副本，不包含模板页自身引用
 // 清单按页面索引及页内引用文件顺序排列，无引用时返回空切片，读取失败时不返回部分结果
 // 返回: []TemplateReference 引用定位及绑定层次清单, error 页面读取错误
 func (e *Editor) TemplateReferences() ([]TemplateReference, error) {
+	ctx := context.Background()
+	if e.source != nil {
+		pending := make([]Page, 0)
+		for i := range e.pages {
+			if src := e.source.pages[e.pages[i].ID]; src != nil && src.original == nil {
+				pending = append(pending, src.ref)
+			}
+		}
+		if len(pending) != 0 {
+			if err := e.source.reader.preloadPageHeadersContext(ctx, pending); err != nil {
+				return nil, err
+			}
+		}
+	}
 	result := []TemplateReference{}
 	for i := range e.pages {
-		refs, err := e.PageTemplates(i)
-		if err != nil {
-			return nil, err
+		var refs []Template
+		if e.source != nil {
+			if src := e.source.pages[e.pages[i].ID]; src != nil && src.original == nil {
+				header, err := e.source.reader.readPageHeaderContext(ctx, src.ref)
+				if err != nil {
+					return nil, err
+				}
+				refs = header.Template
+			} else {
+				refs = e.pages[i].Template
+			}
+		} else {
+			refs = e.pages[i].Template
 		}
 		for _, ref := range refs {
 			result = append(result, TemplateReference{PageIndex: i, PageID: e.pages[i].ID, Template: ref})
@@ -352,12 +385,16 @@ func (e *Editor) ReplaceTemplateFromPage(id string, page int) error {
 // 返回: error 标识、被引用或结构错误
 func (e *Editor) DeleteTemplate(id string) error {
 	return e.editTemplateDefinition(id, func(r *Reader, data []byte, node *editorXML) ([]byte, error) {
+		ctx := context.Background()
 		doc, err := r.Doc()
 		if err != nil {
 			return nil, err
 		}
-		for i := range doc.Pages.Page {
-			page, err := r.PageContentByIndex(i)
+		if err := r.preloadPageHeadersContext(ctx, doc.Pages.Page); err != nil {
+			return nil, err
+		}
+		for i, item := range doc.Pages.Page {
+			page, err := r.readPageHeaderContext(ctx, item)
 			if err != nil {
 				return nil, err
 			}
@@ -389,13 +426,17 @@ func (r *Reader) Templates() ([]TemplatePage, error) {
 // 返回独立副本，按页面索引及页内引用文件顺序排列；无引用时返回空切片，读取失败时不返回部分结果
 // 返回: []TemplateReference 引用定位及绑定层次清单, error 文档或页面读取错误
 func (r *Reader) TemplateReferences() ([]TemplateReference, error) {
+	ctx := context.Background()
 	doc, err := r.Doc()
 	if err != nil {
 		return nil, err
 	}
+	if err := r.preloadPageHeadersContext(ctx, doc.Pages.Page); err != nil {
+		return nil, err
+	}
 	result := []TemplateReference{}
 	for i, item := range doc.Pages.Page {
-		page, err := r.PageContentByIndex(i)
+		page, err := r.readPageHeaderContext(ctx, item)
 		if err != nil {
 			return nil, err
 		}

@@ -19,18 +19,17 @@ import (
 	"bytes"
 	"compress/zlib"
 	"context"
+	"crypto/sha256"
 	"encoding/ascii85"
 	"fmt"
 	"image"
 	"image/jpeg"
 	"io"
 	"math"
-	"runtime"
-	"strconv"
 	"sync"
+	"time"
 
 	"github.com/tdewolff/canvas"
-	"github.com/tdewolff/canvas/renderers/pdf"
 	"github.com/tdewolff/canvas/renderers/ps"
 	"github.com/tdewolff/canvas/renderers/svg"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
@@ -49,15 +48,17 @@ func (CanvasBackend) RenderSVG(r *Renderer, page *PageContent, writer io.Writer,
 	case SVGObjects:
 		return r.renderSVGResources(page, writer, true, true)
 	case SVGEmbedded:
-		c, err := r.renderCanvasPage(page)
+		box, err := r.GetPageBox(page)
 		if err != nil {
 			return SVGResources{}, err
 		}
 		buffer := bufio.NewWriter(writer)
-		renderer := &svgResourceRenderer{SVG: svg.New(buffer, c.W, c.H, nil), renderer: r, writer: buffer, embeddedFonts: true}
+		renderer := &svgResourceRenderer{SVG: svg.New(buffer, box.W, box.H, nil), renderer: r, writer: buffer, seen: make(map[string]bool), embeddedFonts: true}
 		io.WriteString(buffer, svgCreatorMetadata)
 		io.WriteString(buffer, `<g style="image-orientation:none">`)
-		c.RenderTo(renderer)
+		if err := r.renderCanvasPageToContext(canvas.NewContext(renderer), page, !r.TransparentBackground); err != nil {
+			return SVGResources{}, err
+		}
 		if renderer.err != nil {
 			return SVGResources{}, renderer.err
 		}
@@ -98,7 +99,7 @@ func (CanvasBackend) RenderEPS(r *Renderer, page *PageContent, writer io.Writer)
 	return buffer.Flush()
 }
 
-// RenderPDF 使用canvas输出PDF，保留导航与文字并分块保存中间输出
+// RenderPDF 使用原生流式PDF写出器单遍多核并发导出PDF，支持Form复用、内容流去重与恒定内存写出
 // 入参: r 渲染器, pages 页面列表, writer 输出流, progress 页面处理进度
 // 返回: error 错误信息
 func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer io.Writer, progress func(int, int) error) error {
@@ -106,10 +107,6 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	view := *r
-	view.pageContext = ctx
-	view.compactStrokes = true
-	r = &view
 	if len(pages) == 0 {
 		return fmt.Errorf("no pages found")
 	}
@@ -118,6 +115,10 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 			return fmt.Errorf("invalid PDF page %d size: %g x %g", i+1, page.Box.W, page.Box.H)
 		}
 	}
+	view := *r
+	view.pageContext = ctx
+	view.compactStrokes = true
+	r = &view
 	doc := r.Reader.doc
 	navigation := &pdfNavigation{}
 	if !r.printing {
@@ -127,123 +128,85 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 			return err
 		}
 	}
-	var buf editorSnapshotBuffer
-	defer func() { _ = buf.Close() }()
-	settings := pdf.DefaultOptions
-	settings.Compress = r.Compression.Mode == CompressionUnchanged
-	p := pdf.New(&buf, pages[0].Box.W, pages[0].Box.H, &settings)
-	renderer := &pdfRenderer{PDF: p, glyphPaths: *resourceCache[*canvas.Path, *canvas.Path](r.Reader.resources, 16<<20), images: make([][]image.Image, 1), text: make([]codecpdf.TextPage, 1), navigation: navigation}
-	var info DocInfo
-	if docInfo, err := r.Reader.DocInfo(); err == nil {
-		info = *docInfo
+	compressLevel := zlib.DefaultCompression
+	if r.Compression.Mode != CompressionUnchanged {
+		compressLevel = zlib.BestCompression
 	}
-	renderer.information = make(pdfgo.Dictionary)
-	for _, field := range []struct {
-		key   pdfgo.Name
-		value string
-	}{{"Title", info.Title}, {"Subject", info.Subject}, {"Author", info.Author}, {"Creator", ofdCreator}} {
-		if field.value == "" {
-			continue
+	sw, err := codecpdf.NewStreamWriter(ctx, writer, len(pages), true, compressLevel)
+	if err != nil {
+		return err
+	}
+	session := newPDFStreamSession(sw, r.Compression)
+	navWriter := codecpdf.NewNavWriter(sw)
+	pageGroupRef := session.allocRef()
+	if err := sw.WriteObject(pageGroupRef, pdfgo.Dictionary{
+		"Type": pdfgo.Name("Group"),
+		"S":    pdfgo.Name("Transparency"),
+		"I":    pdfgo.Boolean(true),
+		"CS":   pdfgo.Name("DeviceRGB"),
+	}); err != nil {
+		return err
+	}
+	info, err := buildPDFInfoDict(r)
+	if err != nil {
+		return err
+	}
+	workers := 1
+	if len(pages) > 2 && r.OnPageText == nil && r.Reader != nil {
+		w := conversionWorkers(r.Reader.resources.context(ctx))
+		if w > 1 {
+			workers = min(len(pages)-1, min(w, 8))
 		}
-		encoded, err := pdfgo.EncodeTextString(field.value)
-		if err != nil {
+	}
+	baseLocCache := make(map[pdfPageBaseLocKey]pdfSharedPageRef)
+	var deferredPages []pdfDeferredPage
+	pageRefs := sw.PageRefs()
+	writeSinglePage := func(i int, contentRef, resRef pdfgo.Reference, contentForNav *PageContent) error {
+		if err := session.flushPending(); err != nil {
 			return err
 		}
-		renderer.information[field.key] = encoded
-	}
-	type pdfPrefetchResult struct {
-		content *PageContent
-		err     error
-	}
-	prefetchCtx, prefetchCancel := context.WithCancel(ctx)
-	var prefetchWG sync.WaitGroup
-	var prefetchJobs chan int
-	var prefetchSlots []chan pdfPrefetchResult
-	prefetchNext := 1
-	prefetchWindow := 0
-	stopPrefetch := func() {
-		prefetchCancel()
-		if prefetchJobs != nil {
-			close(prefetchJobs)
-			prefetchJobs = nil
-		}
-		prefetchWG.Wait()
-	}
-	defer stopPrefetch()
-	for i, page := range pages {
-		var content *PageContent
-		var err error
-		if i == 0 || prefetchSlots == nil {
-			content, err = page.ReadContent(ctx, r.Reader)
-			if i == 0 && err == nil && len(pages) > 1 && r.Reader != nil {
-				workers := min(len(pages)-1, min(max(1, runtime.GOMAXPROCS(0)), 4))
-				if workers > 1 {
-					forks := make([]*Reader, 0, workers)
-					for range workers {
-						fork, forkErr := r.Reader.Fork(prefetchCtx)
-						if forkErr != nil {
-							if ctx.Err() != nil {
-								return ctx.Err()
-							}
-							forks = nil
-							break
-						}
-						forks = append(forks, fork)
-					}
-					if len(forks) > 0 {
-						prefetchWindow = min(len(pages)-1, len(forks)*2)
-						prefetchJobs = make(chan int, prefetchWindow)
-						prefetchSlots = make([]chan pdfPrefetchResult, len(pages))
-						for k := 1; k < len(pages); k++ {
-							prefetchSlots[k] = make(chan pdfPrefetchResult, 1)
-						}
-						for _, fork := range forks {
-							prefetchWG.Add(1)
-							go func(reader *Reader) {
-								defer prefetchWG.Done()
-								for idx := range prefetchJobs {
-									c, e := pages[idx].ReadContent(prefetchCtx, reader)
-									prefetchSlots[idx] <- pdfPrefetchResult{content: c, err: e}
-								}
-							}(fork)
-						}
-						for prefetchNext < len(pages) && prefetchNext <= prefetchWindow {
-							prefetchJobs <- prefetchNext
-							prefetchNext++
-						}
-					}
-				}
-			}
-		} else {
-			res := <-prefetchSlots[i]
-			prefetchSlots[i] = nil
-			content, err = res.content, res.err
-			if prefetchJobs != nil && prefetchNext < len(pages) {
-				prefetchJobs <- prefetchNext
-				prefetchNext++
-			}
-		}
-		if err != nil {
-			return fmt.Errorf("failed to read page %d: %w", i+1, err)
-		}
-		if !r.printing {
-			if err := navigation.addPage(r, i, content, pages); err != nil {
+		if !r.printing && contentForNav != nil {
+			if err := navigation.addPage(r, i, contentForNav, pages); err != nil {
 				return fmt.Errorf("failed to read page %d navigation: %w", i+1, err)
 			}
 		}
-		if i > 0 {
-			p.NewPage(page.Box.W, page.Box.H)
-			renderer.images = append(renderer.images, nil)
-			renderer.text = append(renderer.text, codecpdf.TextPage{})
+		pageDict := pdfgo.Dictionary{
+			"Type":      pdfgo.Name("Page"),
+			"Parent":    sw.PageParent(i),
+			"MediaBox":  pdfgo.Array{pdfgo.Integer(0), pdfgo.Integer(0), pdfgo.Real(pages[i].Box.W * codecpdf.PtPerMM), pdfgo.Real(pages[i].Box.H * codecpdf.PtPerMM)},
+			"Resources": resRef,
+			"Group":     pageGroupRef,
+			"Contents":  contentRef,
 		}
-		if !r.printing {
-			navigation.apply(p, i)
-		}
-		if err := r.renderCanvasPageToContext(canvas.NewContext(renderer), content, !r.TransparentBackground); err != nil {
-			return fmt.Errorf("failed to render page %d: %w", i+1, err)
-		}
-		if renderer.imageError != nil {
-			return fmt.Errorf("failed to render page %d: %w", i+1, renderer.imageError)
+		deferThis := !r.printing && (i == 0 || navigation.hasDeferredMedia())
+		if deferThis {
+			deferredPages = append(deferredPages, pdfDeferredPage{index: i, dict: pageDict})
+		} else {
+			if !r.printing {
+				if links := navigation.pageNavLinks(i, pageRefs); len(links) > 0 {
+					annots, err := navWriter.WritePageLinks(ctx, links)
+					if err != nil {
+						return err
+					}
+					if len(annots) > 0 {
+						pageDict["Annots"] = annots
+					}
+					delete(navigation.Link, i)
+				}
+				if actions := navigation.PageOpen[i]; len(actions) > 0 {
+					act, err := navWriter.BuildActionChain(ctx, pdfNavigationValues(actions, pageRefs))
+					if err != nil {
+						return err
+					}
+					if act != nil {
+						pageDict["AA"] = pdfgo.Dictionary{"O": act}
+					}
+					delete(navigation.PageOpen, i)
+				}
+			}
+			if err := sw.WriteObject(pageRefs[i], pageDict); err != nil {
+				return err
+			}
 		}
 		pages[i].Content = nil
 		if err := ctx.Err(); err != nil {
@@ -254,29 +217,280 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 				return err
 			}
 		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+		return ctx.Err()
 	}
-	stopPrefetch()
-	if doc != nil && !r.printing {
-		if err := navigation.addOutlines(doc.Outlines.OutlineElem, 0, navigation.bookmarks, navigation.pageIndex, pages); err != nil {
-			return err
-		}
+	var zw *zlib.Writer
+	var zbuf bytes.Buffer
+	firstRes, nextZW := compilePDFPage(ctx, r, session, pages[0], !r.printing, zw, &zbuf)
+	zw = nextZW
+	if firstRes.err != nil {
+		return fmt.Errorf("failed to render page 1: %w", firstRes.err)
 	}
-	for index, outline := range navigation.Outline {
-		p.AddOutline(strconv.Itoa(index), outline.Level, 0)
-	}
-	if err := p.Close(); err != nil {
+	firstContentRef, firstResRef, err := commitCompiledPDFPage(sw, session, firstRes)
+	if err != nil {
 		return err
 	}
-	options := pdfgo.OptimizeOptions{Compression: r.Compression}
-	if r.Compression.Mode != CompressionUnchanged && progress != nil {
-		options.OnProgress = func(_ string, _, _ int) error {
-			return progress(len(pages), len(pages))
+	if firstRes.contentForNav == nil && pages[0].Source.BaseLoc != "" && canReusePDFBaseLoc(r, pages[0]) {
+		baseLocCache[pdfPageBaseLocKey{baseLoc: pages[0].Source.BaseLoc, box: pages[0].Box}] = pdfSharedPageRef{contentRef: firstContentRef, resourcesRef: firstResRef}
+	}
+	if err := writeSinglePage(0, firstContentRef, firstResRef, firstRes.contentForNav); err != nil {
+		return err
+	}
+	var forkedRenderers []*Renderer
+	if workers > 1 && len(pages) > 1 {
+		workerCtx, cancelWorkers := context.WithCancel(ctx)
+		defer cancelWorkers()
+		forkedRenderers = make([]*Renderer, 0, workers)
+		for range workers {
+			forked, forkErr := r.Fork(workerCtx)
+			if forkErr != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				forkedRenderers = nil
+				break
+			}
+			forked.compactStrokes = true
+			forkedRenderers = append(forkedRenderers, forked)
+		}
+		if len(forkedRenderers) == 0 {
+			workers = 1
 		}
 	}
-	return renderer.writePDF(r.outputContext(), &buf, buf.size, writer, options)
+	if len(pages) > 1 && workers == 1 {
+		for i := 1; i < len(pages); i++ {
+			page := pages[i]
+			locKey := pdfPageBaseLocKey{baseLoc: page.Source.BaseLoc, box: page.Box}
+			if canReusePDFBaseLoc(r, page) {
+				if shared, ok := baseLocCache[locKey]; ok {
+					session.contentHits.Add(1)
+					if err := writeSinglePage(i, shared.contentRef, shared.resourcesRef, nil); err != nil {
+						return err
+					}
+					continue
+				}
+			}
+			res, nextZW := compilePDFPage(ctx, r, session, page, !r.printing, zw, &zbuf)
+			zw = nextZW
+			if res.err != nil {
+				return fmt.Errorf("failed to render page %d: %w", i+1, res.err)
+			}
+			contentRef, resRef, err := commitCompiledPDFPage(sw, session, res)
+			if err != nil {
+				return err
+			}
+			if res.contentForNav == nil && page.Source.BaseLoc != "" && canReusePDFBaseLoc(r, page) {
+				baseLocCache[locKey] = pdfSharedPageRef{contentRef: contentRef, resourcesRef: resRef}
+			}
+			if err := writeSinglePage(i, contentRef, resRef, res.contentForNav); err != nil {
+				return err
+			}
+		}
+	} else if len(pages) > 1 {
+		workerCtx, cancelWorkers := context.WithCancel(ctx)
+		remaining := len(pages) - 1
+		window := min(remaining, len(forkedRenderers)*2)
+		jobs := make(chan int, window)
+		slots := make([]chan pdfCompiledPage, window)
+		for k := range window {
+			slots[k] = make(chan pdfCompiledPage, 1)
+		}
+		var wg sync.WaitGroup
+		for _, forked := range forkedRenderers {
+			wg.Add(1)
+			go func(workerRenderer *Renderer) {
+				defer wg.Done()
+				var workerZW *zlib.Writer
+				var workerZBuf bytes.Buffer
+				for idx := range jobs {
+					if workerCtx.Err() != nil {
+						slots[(idx-1)%window] <- pdfCompiledPage{err: workerCtx.Err()}
+						continue
+					}
+					res, nextZW := compilePDFPage(workerCtx, workerRenderer, session, pages[idx], !r.printing, workerZW, &workerZBuf)
+					workerZW = nextZW
+					slots[(idx-1)%window] <- res
+				}
+			}(forked)
+		}
+		nextSend := 1
+		for nextSend <= window {
+			jobs <- nextSend
+			nextSend++
+		}
+		stopWorkers := func() {
+			cancelWorkers()
+			close(jobs)
+			wg.Wait()
+		}
+		var loopErr error
+		for i := 1; i < len(pages); i++ {
+			res := <-slots[(i-1)%window]
+			if nextSend < len(pages) && loopErr == nil {
+				jobs <- nextSend
+				nextSend++
+			}
+			if loopErr != nil {
+				continue
+			}
+			if res.err != nil {
+				loopErr = fmt.Errorf("failed to render page %d: %w", i+1, res.err)
+				cancelWorkers()
+				continue
+			}
+			contentRef, resRef, err := commitCompiledPDFPage(sw, session, res)
+			if err != nil {
+				loopErr = err
+				cancelWorkers()
+				continue
+			}
+			if err := writeSinglePage(i, contentRef, resRef, res.contentForNav); err != nil {
+				loopErr = err
+				cancelWorkers()
+				continue
+			}
+		}
+		stopWorkers()
+		if loopErr != nil {
+			return loopErr
+		}
+	}
+	if err := session.flushPending(); err != nil {
+		return err
+	}
+	fontWorkers := 1
+	if r.Reader != nil {
+		fontWorkers = max(1, conversionWorkers(r.Reader.resources.context(ctx)))
+	}
+	if err := session.fonts.WriteAll(ctx, sw, fontWorkers); err != nil {
+		return err
+	}
+	catalog := make(pdfgo.Dictionary)
+	if !r.printing {
+		if doc != nil {
+			if err := navigation.addOutlines(doc.Outlines.OutlineElem, 0, navigation.bookmarks, navigation.pageIndex, pages); err != nil {
+				return err
+			}
+		}
+		var navOpts pdfgo.RewriteOptions
+		if err := navigation.writeAttachments(ctx, &navOpts); err != nil {
+			return err
+		}
+		if err := navigation.loadAudio(ctx); err != nil {
+			return err
+		}
+		if err := navigation.writeVideo(ctx, pageRefs, &navOpts); err != nil {
+			return err
+		}
+		if len(navOpts.Attachments) > 0 {
+			efTree, err := navWriter.WriteAttachments(ctx, navOpts.Attachments)
+			if err != nil {
+				return err
+			}
+			if len(efTree) > 0 {
+				catalog["Names"] = pdfgo.Dictionary{"EmbeddedFiles": efTree}
+			}
+		}
+		screensByPage := make(map[int][]*pdfgo.ScreenAnnotation)
+		if len(navOpts.ScreenAnnotations) > 0 {
+			refToIdx := make(map[pdfgo.Reference]int, len(pageRefs))
+			for idx, ref := range pageRefs {
+				refToIdx[ref] = idx
+			}
+			for ref, list := range navOpts.ScreenAnnotations {
+				if idx, ok := refToIdx[ref]; ok {
+					screensByPage[idx] = list
+				}
+			}
+			navWriter.ReserveScreenAnnotations(screensByPage)
+		}
+		for _, dp := range deferredPages {
+			var annots pdfgo.Array
+			if links := navigation.pageNavLinks(dp.index, pageRefs); len(links) > 0 {
+				linkRefs, err := navWriter.WritePageLinks(ctx, links)
+				if err != nil {
+					return err
+				}
+				annots = append(annots, linkRefs...)
+			}
+			if screens := screensByPage[dp.index]; len(screens) > 0 {
+				screenRefs, err := navWriter.WriteScreenAnnotations(ctx, pageRefs[dp.index], screens)
+				if err != nil {
+					return err
+				}
+				annots = append(annots, screenRefs...)
+			}
+			if len(annots) > 0 {
+				dp.dict["Annots"] = annots
+			}
+			if actions := navigation.PageOpen[dp.index]; len(actions) > 0 {
+				act, err := navWriter.BuildActionChain(ctx, pdfNavigationValues(actions, pageRefs))
+				if err != nil {
+					return err
+				}
+				if act != nil {
+					dp.dict["AA"] = pdfgo.Dictionary{"O": act}
+				}
+			}
+			if err := sw.WriteObject(pageRefs[dp.index], dp.dict); err != nil {
+				return err
+			}
+		}
+		if len(navigation.Outline) > 0 {
+			outlines := make([]codecpdf.NavOutline, len(navigation.Outline))
+			for i, item := range navigation.Outline {
+				outlines[i] = codecpdf.NavOutline{
+					Title:   item.Name,
+					Level:   item.Level,
+					Actions: pdfNavigationValues(item.Actions, pageRefs),
+				}
+			}
+			outlineRef, ok, err := navWriter.WriteOutlines(ctx, outlines)
+			if err != nil {
+				return err
+			}
+			if ok {
+				catalog["Outlines"] = outlineRef
+			}
+		}
+		if len(navigation.Open) > 0 {
+			act, err := navWriter.BuildActionChain(ctx, pdfNavigationValues(navigation.Open, pageRefs))
+			if err != nil {
+				return err
+			}
+			if act != nil {
+				catalog["OpenAction"] = act
+			}
+		}
+	}
+	return sw.Finish(catalog, info)
+}
+
+// pdfPageBaseLocKey 按页内容包路径与物理尺寸复用相同静态页面
+type pdfPageBaseLocKey struct {
+	baseLoc string
+	box     Box
+}
+
+// pdfSharedPageRef 记录可跨页直接复用的PDF内容流与资源字典引用
+type pdfSharedPageRef struct {
+	contentRef   pdfgo.Reference
+	resourcesRef pdfgo.Reference
+}
+
+// pdfCompiledPage 保存单页并发渲染与预压缩后的轻量输出结果
+type pdfCompiledPage struct {
+	digest        [32]byte
+	compressed    []byte
+	resources     *codecpdf.ContentResources
+	contentForNav *PageContent
+	err           error
+}
+
+// pdfDeferredPage 保存因含跨页视频或延迟音频需在文档末尾写出的页面字典骨架
+type pdfDeferredPage struct {
+	index int
+	dict  pdfgo.Dictionary
 }
 
 // canvasEPSWriter 在EPS头部写入本库制作软件，不改动绘图内容
@@ -402,4 +616,159 @@ func (r *epsImageRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 		return
 	}
 	_, r.err = io.WriteString(r.writer, "~>\n grestore")
+}
+
+// buildPDFInfoDict 构造符合PDF标准的文档信息字典
+// 入参: r 渲染器
+// 返回: pdfgo.Dictionary 文档信息字典, error 文本编码错误
+func buildPDFInfoDict(r *Renderer) (pdfgo.Dictionary, error) {
+	var info DocInfo
+	if r.Reader != nil {
+		if docInfo, err := r.Reader.DocInfo(); err == nil && docInfo != nil {
+			info = *docInfo
+		}
+	}
+	dict := make(pdfgo.Dictionary)
+	for _, field := range []struct {
+		key   pdfgo.Name
+		value string
+	}{{"Title", info.Title}, {"Subject", info.Subject}, {"Author", info.Author}, {"Creator", ofdCreator}} {
+		if field.value == "" {
+			continue
+		}
+		encoded, err := pdfgo.EncodeTextString(field.value)
+		if err != nil {
+			return nil, err
+		}
+		dict[field.key] = encoded
+	}
+	dict["Producer"] = pdfgo.String(ofdCreator)
+	dict["CreationDate"] = pdfgo.String(time.Now().UTC().Format("D:20060102150405Z"))
+	return dict, nil
+}
+
+// compilePDFPage 在独立协程或主协程中完成单页内容读取、单遍内容流生成与Flate预压缩
+// 入参: ctx 取消上下文, r 当前工作渲染器, session 共享PDF会话, page 页面描述, checkNav 是否检查页面导航, zw 复用zlib压缩器, zbuf 复用压缩缓冲
+// 返回: pdfCompiledPage 编译结果, *zlib.Writer 复用压缩器
+func compilePDFPage(ctx context.Context, r *Renderer, session *pdfStreamSession, page RenderDocumentPage, checkNav bool, zw *zlib.Writer, zbuf *bytes.Buffer) (pdfCompiledPage, *zlib.Writer) {
+	content, err := page.ReadContent(ctx, r.Reader)
+	if err != nil {
+		return pdfCompiledPage{err: fmt.Errorf("failed to read page: %w", err)}, zw
+	}
+	var resources *Resources
+	if r.Reader != nil {
+		resources = r.Reader.resources
+	}
+	pdfOut := newPDFPageRenderer(session, ctx, page.Box.W, page.Box.H, resources)
+	pageRenderer := *r
+	pageRenderer.pageContext = context.WithValue(ctx, pdfRendererCtxKey{}, pdfOut)
+	pageRenderer.renderError = nil
+	if err := pageRenderer.renderCanvasPageToContext(canvas.NewContext(pdfOut), content, !pageRenderer.TransparentBackground); err != nil {
+		return pdfCompiledPage{err: err}, zw
+	}
+	if pdfOut.imageError != nil {
+		return pdfCompiledPage{err: pdfOut.imageError}, zw
+	}
+	raw := pdfOut.content.Bytes()
+	digest := sha256.Sum256(raw)
+	compressed, zw, err := codecpdf.CompressBytes(zw, zbuf, session.compressLevel, raw)
+	if err != nil {
+		return pdfCompiledPage{err: err}, zw
+	}
+	var navContent *PageContent
+	if checkNav && pageNeedsPDFNavigation(r, content) {
+		navContent = content
+	}
+	return pdfCompiledPage{
+		digest:        digest,
+		compressed:    compressed,
+		resources:     pdfOut.content.Resources(),
+		contentForNav: navContent,
+	}, zw
+}
+
+// commitCompiledPDFPage 按内容摘要与资源签名去重并流式写出单页内容流与资源字典
+// 入参: sw 流式PDF写出器, session 共享PDF会话, res 已编译页面数据
+// 返回: pdfgo.Reference 内容流引用, pdfgo.Reference 资源字典引用, error 写入错误
+func commitCompiledPDFPage(sw *codecpdf.StreamWriter, session *pdfStreamSession, res pdfCompiledPage) (pdfgo.Reference, pdfgo.Reference, error) {
+	contentRef, exists := session.contentRefs[res.digest]
+	if exists {
+		session.contentHits.Add(1)
+	} else {
+		contentRef = session.allocRef()
+		if err := sw.WritePreencodedStream(contentRef, pdfgo.Dictionary{"Filter": pdfgo.Name("FlateDecode")}, res.compressed); err != nil {
+			return pdfgo.Reference{}, pdfgo.Reference{}, err
+		}
+		session.contentRefs[res.digest] = contentRef
+	}
+	resRef, err := session.graphics.ResourceDictRef(sw, res.resources)
+	if err != nil {
+		return pdfgo.Reference{}, pdfgo.Reference{}, err
+	}
+	return contentRef, resRef, nil
+}
+
+// pageNeedsPDFNavigation 快速判断页面是否存在动作、带动作模板或页面注释，避免无导航页滞留内存
+// 入参: r 渲染器, page 页面内容
+// 返回: bool 是否需要执行导航收集
+func pageNeedsPDFNavigation(r *Renderer, page *PageContent) bool {
+	if page == nil {
+		return false
+	}
+	if len(page.Actions) > 0 {
+		return true
+	}
+	if len(r.pageActionSources(page)) > 0 {
+		return true
+	}
+	if len(r.pageOpenActionSources(page)) > 0 {
+		return true
+	}
+	if r.RenderAnnotations && r.Reader != nil {
+		ctx := r.outputContext()
+		if r.Reader.doc != nil || r.Reader.OFD != nil {
+			if err := r.Reader.ensureAnnotationIndexContext(ctx); err != nil {
+				return true
+			}
+		}
+		if readerMayHavePageAnnotations(r.Reader, page.ID) {
+			if annots, err := r.Reader.pageAnnotationsContext(ctx, page.ID); err == nil && len(annots) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// canReusePDFBaseLoc 判断页面是否不含专属注解与签章，允许按BaseLoc直接跳过读取与渲染
+// 入参: r 渲染器, page 页面描述
+// 返回: bool 是否允许BaseLoc快速复用
+func canReusePDFBaseLoc(r *Renderer, page RenderDocumentPage) bool {
+	if r.OnPageText != nil || page.Source.BaseLoc == "" || page.Content != nil || r.Reader == nil {
+		return false
+	}
+	ctx := r.outputContext()
+	pageID := page.Source.ID
+	if r.RenderAnnotations {
+		if r.Reader.doc != nil || r.Reader.OFD != nil {
+			if err := r.Reader.ensureAnnotationIndexContext(ctx); err != nil {
+				return false
+			}
+		}
+		if readerMayHavePageAnnotations(r.Reader, pageID) {
+			if annots, err := r.Reader.pageAnnotationsContext(ctx, pageID); err != nil || len(annots) > 0 {
+				return false
+			}
+		}
+	}
+	if err := r.Reader.ensureSignatureIndexContext(ctx); err != nil {
+		return false
+	}
+	if readerMayHavePageStamps(r.Reader, pageID) {
+		if err := r.Reader.ensurePageStampsContext(ctx, pageID); err != nil {
+			return false
+		}
+		return len(r.Reader.Stamps[r.Reader.resolveStampPageID(pageID)]) == 0
+	}
+	return true
 }

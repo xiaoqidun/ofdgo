@@ -21,9 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -61,13 +61,18 @@ type ConvertProgress struct {
 // Fonts仅用于OFD输出，按字体处理全包引用，未处理原因通过报告返回
 // PageOutput仅用于逐页格式，同步调用export写出一页并自行处理提交或回滚；此时output可为nil
 // 未提供PageOutput时，逐页格式打包ZIP；所有回调返回错误均会停止转换
-// DocumentIndex指定多文档OFD的目标文档索引，从0开始；VersionID指定历史版本标识，空字符串使用默认入口
+// DocumentIndex指定多文档OFD的目标文档索引，从0开始；VersionID指定历史版本标识，空字符串按默认入口打开
+// PrimaryVersion显式打开目标文档主入口DocRoot，与VersionID互斥
+// ExtractDocument仅用于OFD输出，显式提取目标文档为独立单文档OFD并保留附件、书签、标引与元数据
+// 未设置ExtractDocument、VersionID、PrimaryVersion及选页时，OFD输出按整包写出
 type ConvertOptions struct {
 	Resources       *Resources
 	Input           string
 	Format          string
 	DocumentIndex   int
 	VersionID       string
+	PrimaryVersion  bool
+	ExtractDocument bool
 	Pages           []int
 	PageRange       string
 	SkipUnchanged   bool
@@ -168,6 +173,9 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 	if options.DocumentIndex < 0 {
 		return report, fmt.Errorf("document index %d out of range", options.DocumentIndex)
 	}
+	if options.PrimaryVersion && options.VersionID != "" {
+		return report, fmt.Errorf("conflicting version selections")
+	}
 	if options.Pages != nil && len(options.Pages) == 0 {
 		return report, fmt.Errorf("no pages selected")
 	}
@@ -212,8 +220,8 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 	if report.Input != "pdf" && report.Input != "ofd" {
 		return report, fmt.Errorf("unsupported input format")
 	}
-	selectedDoc := options.DocumentIndex != 0 || options.VersionID != ""
-	if options.SkipUnchanged && !selectedDoc && options.Fonts == FontKeep && options.Compression.Mode == CompressionUnchanged && report.Input == format && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
+	extractDoc := options.ExtractDocument || options.VersionID != "" || options.PrimaryVersion
+	if options.SkipUnchanged && !extractDoc && options.DocumentIndex == 0 && options.Fonts == FontKeep && options.Compression.Mode == CompressionUnchanged && report.Input == format && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
 		report.Unchanged = true
 		return report, nil
 	}
@@ -221,7 +229,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 		return report, fmt.Errorf("missing output writer")
 	}
 	if report.Input == "pdf" && format == "pdf" && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
-		pdfReader, openErr := pdfgo.NewReaderWithOptions(operationInput, size, pdfgo.ReaderOptions{Password: options.PDF.Password, PasswordUTF8: options.PDF.PasswordUTF8})
+		pdfReader, openErr := pdfgo.NewReaderWithOptions(operationInput, size, pdfgo.ReaderOptions{Password: options.PDF.Password, PasswordUTF8: options.PDF.PasswordUTF8, Workers: conversionWorkers(ctx)})
 		if openErr != nil {
 			return report, openErr
 		}
@@ -267,6 +275,8 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 		}
 		if options.VersionID != "" {
 			readerOpts = append(readerOpts, WithVersion(options.VersionID))
+		} else if options.PrimaryVersion {
+			readerOpts = append(readerOpts, WithVersion(""))
 		}
 		reader, err = NewReader(operationInput, readerOpts...)
 		if err != nil {
@@ -291,7 +301,11 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 	report.Pages = len(indices)
 	writer := convertWriter{ctx: ctx, writer: output, count: &report.Bytes}
 	if format == "ofd" {
-		if !selectedDoc && options.Pages == nil && editor == nil && options.Fonts == FontKeep && options.Compression.Mode == CompressionUnchanged {
+		if !extractDoc && options.Pages == nil && editor == nil && options.Fonts == FontKeep && options.Compression.Mode == CompressionUnchanged {
+			if options.SkipUnchanged {
+				report.Unchanged = true
+				return report, nil
+			}
 			if err = progress("write", 0, 0); err != nil {
 				return report, err
 			}
@@ -300,14 +314,14 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 			return report, err
 		}
 		if editor == nil {
-			if options.VersionID != "" {
-				extracted, extractErr := reader.ExtractVersionContext(ctx, options.VersionID)
+			if extractDoc || options.Pages != nil {
+				extracted, extractErr := extractConvertDocument(ctx, reader, options)
 				if extractErr != nil {
 					return report, extractErr
 				}
-				editor, err = extracted.Editor()
+				editor, err = extracted.EditorContext(ctx)
 			} else {
-				editor, err = reader.Editor()
+				editor, err = reader.EditorContext(ctx)
 			}
 			if err != nil {
 				return report, err
@@ -334,7 +348,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 			if err != nil {
 				return report, err
 			}
-			if !selectedDoc && report.Input == "ofd" && options.Pages == nil && options.Compression.Mode == CompressionUnchanged && !slices.ContainsFunc(report.Fonts, func(change FontChange) bool { return change.Changed }) {
+			if !extractDoc && report.Input == "ofd" && options.Pages == nil && options.Compression.Mode == CompressionUnchanged && !slices.ContainsFunc(report.Fonts, func(change FontChange) bool { return change.Changed }) {
 				if err = progress("write", 0, 0); err != nil {
 					return report, err
 				}
@@ -343,7 +357,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 				return report, err
 			}
 		}
-		if options.Pages == nil && (options.DocumentIndex == 0 || options.VersionID != "") {
+		if options.Pages == nil {
 			_, err = editor.WriteToWithOptions(ctx, writer, WriteOptions{Compression: options.Compression})
 		} else {
 			_, err = editor.WritePagesTo(ctx, writer, indices, WriteOptions{Compression: options.Compression})
@@ -375,7 +389,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 	case "txt":
 		err = renderer.RenderToMultiPageText(writer, indices...)
 	default:
-		err = convertPagedOutput(ctx, renderer, count, indices, format, writer, &report, options.PageOutput, progress)
+		err = convertPagedOutput(ctx, renderer, indices, format, writer, &report, options.PageOutput, progress)
 	}
 	return report, err
 }
@@ -560,15 +574,15 @@ func (w convertWriter) WriteString(data string) (int, error) {
 type conversionPoolKey struct{}
 
 // convertPagedOutput 按页序执行逐页图像或矢量导出，多页时使用ConversionPool与Reader.Fork多核并发渲染
-// 入参: ctx 取消上下文, renderer 渲染器, totalPages 文档总页数, indices 导出页索引, format 输出格式, writer ZIP输出流, report 转换报告, pageOutput 逐页回调, progress 进度回调
+// 入参: ctx 取消上下文, renderer 渲染器, indices 导出页索引, format 输出格式, writer ZIP输出流, report 转换报告, pageOutput 逐页回调, progress 进度回调
 // 返回: error 导出或取消错误
-func convertPagedOutput(ctx context.Context, renderer *Renderer, totalPages int, indices []int, format string, writer io.Writer, report *ConvertReport, pageOutput func(int, func(io.Writer) error) error, progress func(string, int, int) error) error {
+func convertPagedOutput(ctx context.Context, renderer *Renderer, indices []int, format string, writer io.Writer, report *ConvertReport, pageOutput func(int, func(io.Writer) error) error, progress func(string, int, int) error) error {
+	if pageOutput == nil {
+		report.Format = OutputFormat{Value: "zip", Label: "ZIP", Extension: "zip", MIME: "application/zip"}
+		return renderer.RenderToZIP(writer, format, indices...)
+	}
 	workers := min(len(indices), conversionWorkers(ctx))
 	if workers <= 1 {
-		if pageOutput == nil {
-			report.Format = OutputFormat{Value: "zip", Label: "ZIP", Extension: "zip", MIME: "application/zip"}
-			return renderer.RenderToZIP(writer, format, indices...)
-		}
 		for i, index := range indices {
 			if err := progress("export", i, len(indices)); err != nil {
 				return err
@@ -614,23 +628,26 @@ func convertPagedOutput(ctx context.Context, renderer *Renderer, totalPages int,
 					close(task.done)
 					continue
 				}
+				page, readErr := r.Reader.PageContentByIndex(task.index)
+				if readErr != nil {
+					task.err = readErr
+					close(task.done)
+					continue
+				}
+				var estimated int64
 				acquired := false
 				if pool != nil && raster {
-					if err := pool.acquire(runCtx, true, 0); err != nil {
+					estimated = estimateRasterPageBytes(r, page)
+					if err := pool.acquire(runCtx, true, estimated); err != nil {
 						task.err = err
 						close(task.done)
 						continue
 					}
 					acquired = true
 				}
-				page, readErr := r.Reader.PageContentByIndex(task.index)
-				if readErr != nil {
-					task.err = readErr
-				} else {
-					task.err = r.RenderTo(page, &task.buf, format)
-				}
+				task.err = r.RenderTo(page, &task.buf, format)
 				if acquired {
-					pool.release(true, 0)
+					pool.release(true, estimated)
 				}
 				close(task.done)
 			}
@@ -663,54 +680,6 @@ func convertPagedOutput(ctx context.Context, renderer *Renderer, totalPages int,
 		producerWG.Wait()
 		wg.Wait()
 	}
-	if pageOutput == nil {
-		report.Format = OutputFormat{Value: "zip", Label: "ZIP", Extension: "zip", MIME: "application/zip"}
-		archive := zip.NewWriter(writer)
-		configureArchive(archive, renderer.Compression)
-		method := zip.Deflate
-		if format == "png" || format == "jpg" {
-			method = zip.Store
-		}
-		width := len(strconv.Itoa(totalPages))
-		if err := progress("export", 0, len(indices)); err != nil {
-			finish()
-			return err
-		}
-		for i := range indices {
-			task, ok := <-inflight
-			if !ok {
-				finish()
-				return runCtx.Err()
-			}
-			<-task.done
-			if task.err != nil {
-				finish()
-				return fmt.Errorf("failed to export page %d: %w", task.index+1, task.err)
-			}
-			entry, err := archive.CreateHeader(&zip.FileHeader{
-				Name:   fmt.Sprintf("%0*d.%s", width, task.index+1, format),
-				Method: method,
-			})
-			if err != nil {
-				finish()
-				return err
-			}
-			if _, err := io.Copy(entry, bytes.NewReader(task.buf.Bytes())); err != nil {
-				finish()
-				return err
-			}
-			task.buf.Reset()
-			if err := progress("export", i+1, len(indices)); err != nil {
-				finish()
-				return err
-			}
-		}
-		finish()
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		return archive.Close()
-	}
 	for i := range indices {
 		if err := progress("export", i, len(indices)); err != nil {
 			finish()
@@ -721,7 +690,12 @@ func convertPagedOutput(ctx context.Context, renderer *Renderer, totalPages int,
 			finish()
 			return runCtx.Err()
 		}
-		<-task.done
+		select {
+		case <-task.done:
+		case <-ctx.Done():
+			finish()
+			return ctx.Err()
+		}
 		if task.err != nil {
 			finish()
 			return fmt.Errorf("export page %d: %w", task.index+1, task.err)
@@ -834,4 +808,119 @@ func conversionWorkers(ctx context.Context) int {
 	active := p.active
 	p.mu.Unlock()
 	return max(1, p.options.Parallelism/max(1, active))
+}
+
+// estimateRasterPageBytes 按页面物理区域与渲染DPI估算单页RGBA光栅缓冲字节数
+// 入参: r 渲染器, page 页面内容
+// 返回: int64 估算字节数
+func estimateRasterPageBytes(r *Renderer, page *PageContent) int64 {
+	if r == nil || page == nil {
+		return 0
+	}
+	box, err := r.GetPageBox(page)
+	if err != nil {
+		return 0
+	}
+	w, h, err := (&RasterPage{Width: box.W, Height: box.H, DPI: r.DPI}).PixelSize()
+	if err != nil {
+		return 0
+	}
+	return int64(w) * int64(h) * 4
+}
+
+// extractConvertDocument 按转换选项抽取目标文档及指定版本为独立单文档阅读器
+// 保留附件、书签、标引、元数据及封面，移除其余文档与版本列表
+// 入参: ctx 取消上下文, reader 源包阅读器, options 转换选项
+// 返回: *Reader 独立单文档阅读器, error 读取、提取或取消错误
+func extractConvertDocument(ctx context.Context, reader *Reader, options ConvertOptions) (*Reader, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if options.VersionID != "" {
+		return reader.ExtractVersionContext(ctx, options.VersionID)
+	}
+	entry, err := reader.DocumentRootContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if reader.versionInfo != nil {
+		return reader.ExtractVersionContext(ctx, reader.versionInfo.ID)
+	}
+	files, err := reader.versionFileDependencies(ctx, entry, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	ofdData, err := reader.readFileViewContext(ctx, "OFD.xml")
+	if err != nil {
+		return nil, err
+	}
+	ofdRoot, err := parseEditorXMLContext(ctx, ofdData)
+	if err != nil {
+		return nil, err
+	}
+	body := ofdRoot.childAt("DocBody", reader.documentIndex)
+	if body == nil {
+		return nil, fmt.Errorf("document entry not found: %d", reader.documentIndex)
+	}
+	if info := body.child("DocInfo"); info != nil {
+		if cover := info.child("Cover"); cover != nil {
+			coverPath := cleanPackagePath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, cover)))
+			if coverPath != "" && reader.fileNames[coverPath] {
+				files[coverPath] = true
+			}
+		}
+	}
+	if sigNode := body.child("Signatures"); sigNode != nil {
+		sigPath := cleanPackagePath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, sigNode)))
+		if sigPath != "" && reader.fileNames[sigPath] {
+			if sigDeps, sigErr := reader.versionFileDependencies(ctx, sigPath, nil, nil); sigErr == nil {
+				maps.Copy(files, sigDeps)
+			} else if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+		}
+	}
+	root, err := reader.extractedVersionRoot(ctx, DocumentVersionInfo{DocRoot: entry}, files)
+	if err != nil {
+		return nil, err
+	}
+	next := &Reader{Path: reader.Path, sourceFile: reader.sourceFile, files: map[string][]byte{"OFD.xml": root}, encryption: reader.encryption, resources: reader.resources}
+	for name := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if name != "OFD.xml" {
+			if data, ok := reader.files[name]; ok {
+				next.files[name] = data
+			}
+		}
+	}
+	if reader.Zip != nil {
+		next.Zip = &zip.Reader{Comment: reader.Zip.Comment}
+		for _, file := range reader.Zip.File {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			name := cleanPackagePath(file.Name)
+			if name != "OFD.xml" && files[name] && !file.FileInfo().IsDir() {
+				next.Zip.File = append(next.Zip.File, file)
+			}
+		}
+	}
+	if src := reader.encryptedSource(); src != nil {
+		keep := make(map[string]bool, len(files))
+		for name := range files {
+			if name != "OFD.xml" {
+				keep[name] = true
+			}
+		}
+		next.setEncryptedSource(src.filter(keep))
+	}
+	if err := next.initRootContext(ctx); err != nil {
+		return nil, err
+	}
+	if _, err := next.docStructureContext(ctx); err != nil {
+		return nil, err
+	}
+	return next, nil
 }

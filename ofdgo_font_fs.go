@@ -19,6 +19,7 @@ import (
 	"io"
 	"io/fs"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ import (
 var (
 	_ fs.FS          = (*FontFS)(nil)
 	_ fs.ReadDirFS   = (*FontFS)(nil)
+	_ fs.ReadFileFS  = (*FontFS)(nil)
 	_ fs.GlobFS      = (*FontFS)(nil)
 	_ fs.File        = (*fontMemFile)(nil)
 	_ fs.ReadDirFile = (*fontDir)(nil)
@@ -55,25 +57,14 @@ type FontFS struct {
 // 入参: fonts 字体文件列表
 // 返回: *FontFS 内存字体文件系统
 func NewFontFS(fonts []FontFile) *FontFS {
-	fsys := &FontFS{
-		files: make(map[string][]byte),
-	}
-	for _, font := range fonts {
-		name := cleanFontName(font.Name)
-		if name == "." || len(font.Data) == 0 {
-			continue
-		}
-		if _, ok := fsys.files[name]; !ok {
-			fsys.names = append(fsys.names, name)
-		}
-		fsys.files[name] = append([]byte(nil), font.Data...)
-	}
-	sort.Strings(fsys.names)
-	fsys.candidates = basefont.FileCandidates(fsys.names, path.Base)
-	for i, file := range fsys.candidates {
-		fsys.candidates = basefont.AppendFileNames(fsys.candidates, i, basefont.FileNames(bytes.NewReader(fsys.files[file.Name])))
-	}
-	return fsys
+	return buildFontFS(fonts, true)
+}
+
+// NewSharedFontFS 创建零拷贝共享的内存字体文件系统，调用方不得修改已传入的字体字节
+// 入参: fonts 只读字体文件列表
+// 返回: *FontFS 只读字体文件系统
+func NewSharedFontFS(fonts []FontFile) *FontFS {
+	return buildFontFS(fonts, false)
 }
 
 // NewLazyFontFS 创建按需读取的字体文件系统，按文件名匹配，不预读字体内容
@@ -121,11 +112,12 @@ func (fsys *FontFS) Open(name string) (fs.File, error) {
 	if name == "." {
 		return &fontDir{entries: fsys.entries()}, nil
 	}
-	data, ok := fsys.files[strings.ToLower(name)]
+	lower := strings.ToLower(name)
+	data, ok := fsys.files[lower]
 	if !ok {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 	}
-	if load := fsys.loaders[strings.ToLower(name)]; load != nil {
+	if load := fsys.loaders[lower]; load != nil {
 		var err error
 		data, err = load()
 		if err != nil {
@@ -135,10 +127,32 @@ func (fsys *FontFS) Open(name string) (fs.File, error) {
 	return &fontMemFile{
 		Reader: bytes.NewReader(data),
 		info: fontFileInfo{
-			name: strings.ToLower(name),
+			name: lower,
 			size: int64(len(data)),
 		},
 	}, nil
+}
+
+// ReadFile 零拷贝返回只读字体字节，避免流式读取产生整文件复制
+// 入参: name 字体文件名
+// 返回: []byte 只读字体数据, error 错误信息
+func (fsys *FontFS) ReadFile(name string) ([]byte, error) {
+	if !fs.ValidPath(name) || name == "." {
+		return nil, &fs.PathError{Op: "read", Path: name, Err: fs.ErrInvalid}
+	}
+	lower := strings.ToLower(name)
+	data, ok := fsys.files[lower]
+	if !ok {
+		return nil, &fs.PathError{Op: "read", Path: name, Err: fs.ErrNotExist}
+	}
+	if load := fsys.loaders[lower]; load != nil {
+		var err error
+		data, err = load()
+		if err != nil {
+			return nil, &fs.PathError{Op: "read", Path: name, Err: err}
+		}
+	}
+	return slices.Clip(data), nil
 }
 
 // ReadDir 读取字体目录
@@ -385,6 +399,35 @@ func (fsys *FontFS) entries() []fs.DirEntry {
 		}})
 	}
 	return entries
+}
+
+// buildFontFS 构建内存字体文件系统，按需决定是否复制原始字体切片
+// 入参: fonts 字体文件列表, clone 是否复制字体字节
+// 返回: *FontFS 字体文件系统
+func buildFontFS(fonts []FontFile, clone bool) *FontFS {
+	fsys := &FontFS{
+		files: make(map[string][]byte, len(fonts)),
+	}
+	for _, font := range fonts {
+		name := cleanFontName(font.Name)
+		if name == "." || len(font.Data) == 0 {
+			continue
+		}
+		if _, ok := fsys.files[name]; !ok {
+			fsys.names = append(fsys.names, name)
+		}
+		if clone {
+			fsys.files[name] = bytes.Clone(font.Data)
+		} else {
+			fsys.files[name] = slices.Clip(font.Data)
+		}
+	}
+	sort.Strings(fsys.names)
+	fsys.candidates = basefont.FileCandidates(fsys.names, path.Base)
+	for i, file := range fsys.candidates {
+		fsys.candidates = basefont.AppendFileNames(fsys.candidates, i, basefont.FileNames(bytes.NewReader(fsys.files[file.Name])))
+	}
+	return fsys
 }
 
 // cleanFontName 清理字体文件名

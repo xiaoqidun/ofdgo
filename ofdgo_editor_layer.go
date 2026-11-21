@@ -19,6 +19,8 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"maps"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -55,7 +57,7 @@ func (e *Editor) AddLayer(page int, layerType, drawParam string) (string, error)
 		return "", fmt.Errorf("invalid layer type %q", layerType)
 	}
 	var id string
-	err := e.editLayerPage(page, func(r *Reader, data []byte, root *editorXML) ([]byte, error) {
+	err := e.editLayerPageMode(page, true, func(r *Reader, data []byte, root *editorXML) ([]byte, error) {
 		if err := e.validateLayerDrawParam(page, drawParam); err != nil {
 			return nil, err
 		}
@@ -100,7 +102,7 @@ func (e *Editor) SetLayerType(page int, id, layerType string) error {
 	if !validEditorLayerType(layerType) {
 		return fmt.Errorf("invalid layer type %q", layerType)
 	}
-	return e.editLayerPage(page, func(_ *Reader, data []byte, root *editorXML) ([]byte, error) {
+	return e.editLayerPageMode(page, true, func(_ *Reader, data []byte, root *editorXML) ([]byte, error) {
 		node, err := editorFindStructureID(root.child("Content"), "Layer", "ID", id)
 		if err != nil {
 			return nil, err
@@ -135,7 +137,7 @@ func (e *Editor) SetLayerDrawParam(page int, id, drawParam string) error {
 // 入参: page 页面索引, id 图层标识, order 同类型目标顺序
 // 返回: error 标识、顺序或结构错误
 func (e *Editor) MoveLayer(page int, id string, order int) error {
-	return e.editLayerPage(page, func(_ *Reader, data []byte, root *editorXML) ([]byte, error) {
+	return e.editLayerPageMode(page, true, func(_ *Reader, data []byte, root *editorXML) ([]byte, error) {
 		node, err := editorFindStructureID(root.child("Content"), "Layer", "ID", id)
 		if err != nil {
 			return nil, err
@@ -321,6 +323,9 @@ func (e *Editor) validateLayerDrawParam(page int, id string) error {
 	if _, err := e.page(page); err != nil {
 		return err
 	}
+	if id == "" {
+		return nil
+	}
 	defer e.bindPageIndex(page)()
 	_, err := e.editorDrawParam(id, make(map[string]bool))
 	return err
@@ -330,16 +335,34 @@ func (e *Editor) validateLayerDrawParam(page int, id string) error {
 // 入参: page 页面索引, edit 页面原文修改回调
 // 返回: error 读取、修改或提交错误
 func (e *Editor) editLayerPage(page int, edit func(*Reader, []byte, *editorXML) ([]byte, error)) error {
+	return e.editLayerPageMode(page, false, edit)
+}
+
+// editLayerPageMode 按追加或常规语义在包快照上编辑单页原文，优先直接读取未改原始页并增量提交
+// 入参: page 页面索引, appendOnly 是否为不缩减原包引用的操作, edit 页面原文修改回调
+// 返回: error 读取、修改或提交错误
+func (e *Editor) editLayerPageMode(page int, appendOnly bool, edit func(*Reader, []byte, *editorXML) ([]byte, error)) error {
 	return e.Transaction(func(_ *Editor) error {
 		if _, err := e.page(page); err != nil {
 			return err
 		}
-		r, err := e.reader(nil)
-		if err != nil {
-			return err
+		var r *Reader
+		direct := false
+		if e.source != nil && len(e.resources) == 0 && e.outlines == nil && reflect.DeepEqual(e.Info, e.source.info) && len(e.pages) == len(e.source.document.Pages.Page) && e.source.document.Pages.Page[page].ID == e.pages[page].ID {
+			if srcPage := e.source.pages[e.pages[page].ID]; srcPage != nil && (srcPage.original == nil || sourcePageUntouched(e.pages[page], srcPage)) {
+				r = e.source.reader
+				direct = true
+			}
 		}
-		defer r.Close()
-		doc, err := r.Doc()
+		if r == nil {
+			var err error
+			r, err = e.reader(nil)
+			if err != nil {
+				return err
+			}
+			defer r.Close()
+		}
+		doc, err := r.DocStructure()
 		if err != nil {
 			return err
 		}
@@ -357,9 +380,15 @@ func (e *Editor) editLayerPage(page int, edit func(*Reader, []byte, *editorXML) 
 			return err
 		}
 		parts := map[string][]byte{name: next}
-		shared := slices.ContainsFunc(doc.CommonData.TemplatePage, func(ref TemplatePage) bool { return r.ResPath(ref.BaseLoc) == name })
-		for i, ref := range doc.Pages.Page {
-			shared = shared || i != page && r.ResPath(ref.BaseLoc) == name
+		rootDir := strings.TrimPrefix(strings.ReplaceAll(r.RootDir, "\\", "/"), "/")
+		shared := slices.ContainsFunc(doc.CommonData.TemplatePage, func(ref TemplatePage) bool { return resPathFast(r, rootDir, ref.BaseLoc) == name })
+		if !shared {
+			for i, ref := range doc.Pages.Page {
+				if i != page && resPathFast(r, rootDir, ref.BaseLoc) == name {
+					shared = true
+					break
+				}
+			}
 		}
 		if shared {
 			private := packageAvailableName(r, parts, name)
@@ -379,7 +408,10 @@ func (e *Editor) editLayerPage(page int, edit func(*Reader, []byte, *editorXML) 
 				return err
 			}
 		}
-		return e.commitLayerTemplateParts(r, parts)
+		if direct {
+			return e.commitLayerTemplatePartsMode(r, parts, appendOnly)
+		}
+		return e.commitLayerTemplatePartsMode(r, parts, false)
 	})
 }
 
@@ -470,7 +502,20 @@ func editorMoveStructure(data []byte, nodes []*editorXML, node *editorXML, order
 // 入参: reader 当前独立包快照, parts 文件修改集
 // 返回: error 资源、隔离或提交错误
 func (e *Editor) commitLayerTemplateParts(reader *Reader, parts map[string][]byte) error {
+	return e.commitLayerTemplatePartsMode(reader, parts, false)
+}
+
+// commitLayerTemplatePartsMode 持久化图层与模板修改，满足条件时仅增量提交并精准重载受影响单页
+// 入参: reader 当前独立包快照, parts 文件修改集, appendOnly 是否为不缩减原包引用的操作
+// 返回: error 资源、隔离或提交错误
+func (e *Editor) commitLayerTemplatePartsMode(reader *Reader, parts map[string][]byte, appendOnly bool) error {
 	ctx := context.Background()
+	if e.maxID > maxUnitID {
+		return fmt.Errorf("MaxUnitID %d exceeds uint32 range", e.maxID)
+	}
+	if e.canCommitLayerPartsIncremental(parts) {
+		return e.commitLayerPartsIncremental(ctx, reader, parts, appendOnly)
+	}
 	data := parts[reader.documentRoot]
 	var err error
 	if data == nil {
@@ -531,9 +576,6 @@ func (e *Editor) commitLayerTemplateParts(reader *Reader, parts map[string][]byt
 			definitions = append(definitions, common.textXML("DocumentRes", "/"+name)...)
 		}
 	}
-	if e.maxID > maxUnitID {
-		return fmt.Errorf("MaxUnitID %d exceeds uint32 range", e.maxID)
-	}
 	var patches []editorXMLPatch
 	if maximum := common.child("MaxUnitID"); maximum != nil {
 		value, _ := strconv.ParseUint(strings.TrimSpace(editorImportText(data, maximum)), 10, 32)
@@ -593,4 +635,241 @@ func (e *Editor) commitLayerTemplateParts(reader *Reader, parts map[string][]byt
 		}
 	}
 	return nil
+}
+
+// canCommitLayerPartsIncremental 判断图层与模板改动是否可走增量提交而不重建全文档页面索引
+// 入参: parts 待提交文件修改集
+// 返回: bool 是否允许走增量提交路径
+func (e *Editor) canCommitLayerPartsIncremental(parts map[string][]byte) bool {
+	if e.source == nil || len(e.resources) != 0 || e.outlines != nil || !reflect.DeepEqual(e.Info, e.source.info) {
+		return false
+	}
+	doc := e.source.document
+	if doc == nil || len(e.pages) != len(doc.Pages.Page) {
+		return false
+	}
+	if !canCommitIncrementalParts(e.source, parts) {
+		return false
+	}
+	for i, page := range e.pages {
+		if page.ID != doc.Pages.Page[i].ID {
+			return false
+		}
+	}
+	return true
+}
+
+// commitLayerPartsIncremental 增量提交图层与模板修改，仅精准失效并重载受影响的页面
+// 入参: ctx 取消上下文, reader 当前快照阅读器, parts 待提交文件修改集, appendOnly 是否为不缩减原包引用的操作
+// 返回: error 解析、提交或重载错误
+func (e *Editor) commitLayerPartsIncremental(ctx context.Context, reader *Reader, parts map[string][]byte, appendOnly bool) error {
+	base := e.source
+	baseReader := base.reader
+	docRoot := cleanPackagePath(baseReader.documentRoot)
+	nextParts := maps.Clone(parts)
+	if nextParts == nil {
+		nextParts = make(map[string][]byte)
+	}
+	docData := nextParts[docRoot]
+	needMaxID := e.maxID > uint64(base.document.CommonData.MaxUnitID)
+	if docData != nil || needMaxID {
+		if docData == nil {
+			var err error
+			docData, err = baseReader.readFileViewContext(ctx, docRoot)
+			if err != nil {
+				return err
+			}
+		}
+		if patched, ok := patchFastMaxUnitID(docData, e.maxID); ok {
+			if !bytes.Equal(patched, docData) {
+				nextParts[docRoot] = patched
+			}
+		} else {
+			root, err := parseEditorXMLContext(ctx, docData)
+			if err != nil {
+				return err
+			}
+			common := root.child("CommonData")
+			if common == nil {
+				return fmt.Errorf("document has no CommonData")
+			}
+			var patches []editorXMLPatch
+			if maximum := common.child("MaxUnitID"); maximum != nil {
+				value, _ := strconv.ParseUint(strings.TrimSpace(editorImportText(docData, maximum)), 10, 32)
+				if e.maxID > value {
+					patches = append(patches, editorXMLPatch{maximum.start, maximum.end, maximum.textXML("MaxUnitID", formatUnitID(e.maxID))})
+				}
+			} else {
+				patches = append(patches, editorXMLPatch{common.open, common.open, common.textXML("MaxUnitID", formatUnitID(e.maxID))})
+			}
+			if len(patches) != 0 {
+				nextParts[docRoot] = editorPatchXML(docData, patches)
+			}
+		}
+	}
+	oldDoc := base.document
+	dirtyPaths := make(map[string]bool, len(nextParts))
+	for name := range nextParts {
+		clean := cleanPackagePath(name)
+		if file, ok := baseReader.packageFile(name); ok {
+			clean = cleanPackagePath(file.Name)
+		}
+		if clean != docRoot {
+			dirtyPaths[clean] = true
+		}
+	}
+	if err := e.commitAnnotationPartsModeContext(ctx, base, nextParts, appendOnly); err != nil {
+		return err
+	}
+	newDoc := e.source.document
+	newReader := e.source.reader
+	dirtyTemplates := make(map[string]bool)
+	oldTemplates := make(map[string]TemplatePage, len(oldDoc.CommonData.TemplatePage))
+	for _, tpl := range oldDoc.CommonData.TemplatePage {
+		id := editorResourceID(tpl.ID)
+		if id == "" {
+			id = tpl.ID
+		}
+		oldTemplates[id] = tpl
+		if dirtyPaths[cleanPackagePath(baseReader.ResPath(tpl.BaseLoc))] {
+			dirtyTemplates[id] = true
+		}
+	}
+	newTemplates := make(map[string]TemplatePage, len(newDoc.CommonData.TemplatePage))
+	for _, tpl := range newDoc.CommonData.TemplatePage {
+		id := editorResourceID(tpl.ID)
+		if id == "" {
+			id = tpl.ID
+		}
+		newTemplates[id] = tpl
+		if prev, ok := oldTemplates[id]; !ok || prev != tpl || dirtyPaths[cleanPackagePath(newReader.ResPath(tpl.BaseLoc))] {
+			dirtyTemplates[id] = true
+		}
+	}
+	for id := range oldTemplates {
+		if _, ok := newTemplates[id]; !ok {
+			dirtyTemplates[id] = true
+		}
+	}
+	rootDir := strings.TrimPrefix(strings.ReplaceAll(newReader.RootDir, "\\", "/"), "/")
+	var dirtyPages []int
+	for i := range e.pages {
+		pageID := e.pages[i].ID
+		srcPage := e.source.pages[pageID]
+		if srcPage == nil {
+			continue
+		}
+		newRef := newDoc.Pages.Page[i]
+		changed := srcPage.ref.BaseLoc != newRef.BaseLoc
+		if !changed && len(dirtyPaths) != 0 {
+			if dirtyPaths[resPathFast(newReader, rootDir, srcPage.ref.BaseLoc)] {
+				changed = true
+			}
+		}
+		if !changed && srcPage.original != nil && len(dirtyTemplates) != 0 {
+			for _, tpl := range e.pages[i].Template {
+				id := editorResourceID(tpl.TemplateID)
+				if id == "" {
+					id = tpl.TemplateID
+				}
+				if dirtyTemplates[id] {
+					changed = true
+					break
+				}
+			}
+		}
+		if changed {
+			dirtyPages = append(dirtyPages, i)
+		}
+	}
+	if len(dirtyPages) == 0 {
+		return nil
+	}
+	if e.transactionChanges == nil {
+		e.source.pages = maps.Clone(e.source.pages)
+		e.source.origins = maps.Clone(e.source.origins)
+	}
+	for _, idx := range dirtyPages {
+		pageID := e.pages[idx].ID
+		oldSource := e.source.pages[pageID]
+		wasLoaded := oldSource != nil && oldSource.original != nil
+		var states map[string]GraphicObject
+		if len(e.pages[idx].Content.Layer) != 0 {
+			states = make(map[string]GraphicObject)
+			for _, layer := range e.pages[idx].Content.Layer {
+				for _, object := range layer.Objects {
+					states[editorObjectID(object)] = object
+				}
+			}
+		}
+		if oldSource != nil {
+			for id := range oldSource.nodes {
+				if origin := e.source.origins[id]; origin != nil && origin.page == oldSource {
+					delete(e.source.origins, id)
+				}
+			}
+		}
+		e.source.pages[pageID] = &editorSourcePage{ref: newDoc.Pages.Page[idx]}
+		if wasLoaded {
+			if err := e.loadSourcePageContext(ctx, idx); err != nil {
+				return err
+			}
+			if len(states) != 0 {
+				page := &e.pages[idx]
+				for j := range page.Content.Layer {
+					for k := range page.Content.Layer[j].Objects {
+						object := &page.Content.Layer[j].Objects[k]
+						if old, ok := states[editorObjectID(*object)]; ok {
+							object.state = old.state
+							object.TextObject.layout = old.TextObject.layout
+							object.CompositeGraphicUnit.states = old.CompositeGraphicUnit.states
+						}
+					}
+				}
+			}
+		} else {
+			e.pages[idx] = PageContent{ID: pageID}
+		}
+	}
+	return nil
+}
+
+// patchFastMaxUnitID 在标准Document头部快速替换MaxUnitID，遇非标准结构回退完整XML解析
+// 入参: data 文档XML原文, maxID 目标最大标识
+// 返回: []byte 更新后的XML原文, bool 是否命中快路径
+func patchFastMaxUnitID(data []byte, maxID uint64) ([]byte, bool) {
+	limit := min(len(data), 8192)
+	head := data[:limit]
+	if bytes.Contains(head, []byte("<!--")) || bytes.Contains(head, []byte("<![CDATA[")) {
+		return nil, false
+	}
+	for _, tags := range [][2][]byte{
+		{[]byte("<ofd:MaxUnitID>"), []byte("</ofd:MaxUnitID>")},
+		{[]byte("<MaxUnitID>"), []byte("</MaxUnitID>")},
+	} {
+		start := bytes.Index(head, tags[0])
+		if start < 0 {
+			continue
+		}
+		valStart := start + len(tags[0])
+		relEnd := bytes.Index(head[valStart:], tags[1])
+		if relEnd < 0 {
+			return nil, false
+		}
+		valEnd := valStart + relEnd
+		current, ok := parseFastUint32(head[valStart:valEnd])
+		if !ok {
+			return nil, false
+		}
+		if maxID <= current {
+			return data, true
+		}
+		encoded := []byte(formatUnitID(maxID))
+		out := make([]byte, 0, len(data)-(valEnd-valStart)+len(encoded))
+		out = append(out, data[:valStart]...)
+		out = append(out, encoded...)
+		out = append(out, data[valEnd:]...)
+		return out, true
+	}
+	return nil, false
 }

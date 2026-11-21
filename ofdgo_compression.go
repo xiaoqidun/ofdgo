@@ -30,6 +30,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/xiaoqidun/pdfgo"
@@ -38,8 +39,13 @@ import (
 // outputOptimizationBufferLimit 限制压缩时的单个输出缓冲，单位为字节
 const outputOptimizationBufferLimit = 64 << 20
 
-// outputDeflaters 有界复用已完成输出的压缩器，不保留输出流引用
-var outputDeflaters = make(chan *flate.Writer, 2)
+// outputDeflaterPool 复用最高压缩等级编码器，不保留输出流引用
+var outputDeflaterPool = sync.Pool{
+	New: func() any {
+		writer, _ := flate.NewWriter(io.Discard, flate.BestCompression)
+		return writer
+	},
+}
 
 // CompressionMode 选择原始、无损或有损输出策略
 type CompressionMode = pdfgo.CompressionMode
@@ -165,27 +171,19 @@ type outputOptimization struct {
 // 返回: *flate.Writer 压缩器
 func (o *outputOptimization) compressor(writer io.Writer) *flate.Writer {
 	if o.deflater == nil {
-		select {
-		case o.deflater = <-outputDeflaters:
-		default:
-			o.deflater, _ = flate.NewWriter(writer, flate.BestCompression)
-			return o.deflater
-		}
+		o.deflater = acquireOutputDeflater(writer)
+		return o.deflater
 	}
 	o.deflater.Reset(writer)
 	return o.deflater
 }
 
-// release 释放输出目标并归还压缩器，池满时由运行时回收
+// release 释放输出目标并归还压缩器，由对象池按需复用或回收
 func (o *outputOptimization) release() {
 	if o.deflater == nil {
 		return
 	}
-	o.deflater.Reset(io.Discard)
-	select {
-	case outputDeflaters <- o.deflater:
-	default:
-	}
+	releaseOutputDeflater(o.deflater)
 	o.deflater = nil
 }
 
@@ -205,6 +203,379 @@ func (b *outputCompressionBuffer) Write(data []byte) (int, error) {
 		return 0, io.ErrShortBuffer
 	}
 	return b.buffer.Write(data)
+}
+
+// zipPreparedKind 标识并行预压缩条目的最终写出方式
+type zipPreparedKind uint8
+
+// 并行预压缩条目的写出方式枚举
+const (
+	zipPreparedBytes zipPreparedKind = iota
+	zipPreparedRawFile
+	zipPreparedStoreFile
+	zipPreparedDir
+	zipPreparedStaged
+	zipPreparedLargeEntry
+)
+
+// zipPreparedEntry 保存单个ZIP条目的预压缩输入、结果与同步信号
+type zipPreparedEntry struct {
+	kind     zipPreparedKind
+	header   zip.FileHeader
+	data     []byte
+	payload  []byte
+	file     *zip.File
+	staged   *editorStagedPage
+	estBytes int64
+	err      error
+	done     chan struct{}
+}
+
+// zipParallelWriter 在有界滑动窗口与内存预算内并行预压缩ZIP条目，主线程按确定顺序写出
+type zipParallelWriter struct {
+	editor   *Editor
+	archive  *zip.Writer
+	ctx      context.Context
+	cancel   context.CancelFunc
+	jobs     chan *zipPreparedEntry
+	pending  []*zipPreparedEntry
+	window   int
+	maxBytes int64
+	inFlight int64
+	copyBuf  []byte
+	group    sync.WaitGroup
+	closed   bool
+}
+
+// newZipParallelWriter 在压缩写包且具备多核预算时创建有界并行预压缩流水线
+// 入参: editor 编辑器快照, archive 输出归档, ctx 取消上下文
+// 返回: *zipParallelWriter 并行预压缩流水线，无需并行时返回nil
+func newZipParallelWriter(editor *Editor, archive *zip.Writer, ctx context.Context) *zipParallelWriter {
+	if editor.output == nil || editor.output.options.Mode == CompressionUnchanged {
+		return nil
+	}
+	workers := conversionWorkers(ctx)
+	if workers <= 1 {
+		return nil
+	}
+	window := min(workers*2, 32)
+	maxBytes := int64(min(int64(workers)*(8<<20), 64<<20))
+	if pool, _ := ctx.Value(conversionPoolKey{}).(*ConversionPool); pool != nil {
+		if available := pool.memoryLimit(); available > 0 {
+			maxBytes = max(int64(8<<20), min(maxBytes, available/2))
+		}
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	writer := &zipParallelWriter{
+		editor:   editor,
+		archive:  archive,
+		ctx:      runCtx,
+		cancel:   cancel,
+		jobs:     make(chan *zipPreparedEntry, window),
+		pending:  make([]*zipPreparedEntry, 0, window),
+		window:   window,
+		maxBytes: maxBytes,
+		copyBuf:  make([]byte, 32*1024),
+	}
+	for range workers {
+		writer.group.Go(writer.workerLoop)
+	}
+	return writer
+}
+
+// workerLoop 复用压缩器与读取缓冲并行处理预压缩任务
+func (w *zipParallelWriter) workerLoop() {
+	deflater := acquireOutputDeflater(io.Discard)
+	defer releaseOutputDeflater(deflater)
+	buffer := make([]byte, 32*1024)
+	for entry := range w.jobs {
+		if err := w.ctx.Err(); err != nil {
+			entry.err = err
+			close(entry.done)
+			continue
+		}
+		w.prepareEntry(entry, deflater, buffer)
+		close(entry.done)
+	}
+}
+
+// prepareEntry 执行单个内存或原ZIP条目的预压缩与校验和计算
+// 入参: entry 任务条目, deflater 复用压缩器, buffer 读取缓冲
+func (w *zipParallelWriter) prepareEntry(entry *zipPreparedEntry, deflater *flate.Writer, buffer []byte) {
+	if entry.file != nil {
+		file := entry.file
+		entry.header.Extra = outputZIPExtra(entry.header.Extra)
+		limit := min(file.CompressedSize64, file.UncompressedSize64)
+		compressed, err := compressOutputFileWithDeflater(w.ctx, deflater, file, buffer, int(limit))
+		if err != nil {
+			entry.err = err
+			return
+		}
+		if compressed != nil {
+			prepareOutputHeader(&entry.header, zip.Deflate, file.UncompressedSize64, uint64(len(compressed)), file.CRC32)
+			entry.kind = zipPreparedBytes
+			entry.payload = compressed
+			entry.file = nil
+		} else if file.UncompressedSize64 < file.CompressedSize64 {
+			entry.kind = zipPreparedStoreFile
+		} else {
+			entry.kind = zipPreparedRawFile
+		}
+		return
+	}
+	data := entry.data
+	payload := data
+	method := uint16(zip.Store)
+	if !isPrecompressedOutputExt(entry.header.Name) {
+		compressed, err := compressOutputBytesWithDeflater(w.ctx, deflater, data, len(data))
+		if err != nil {
+			entry.err = err
+			return
+		}
+		if compressed != nil {
+			payload = compressed
+			method = zip.Deflate
+		}
+	}
+	prepareOutputHeader(&entry.header, method, uint64(len(data)), uint64(len(payload)), crc32.ChecksumIEEE(data))
+	entry.kind = zipPreparedBytes
+	entry.payload = payload
+	entry.data = nil
+}
+
+// drainReady 非阻塞写出队列头部所有已就绪条目并释放内存
+// 返回: error 写出或取消错误
+func (w *zipParallelWriter) drainReady() error {
+	for len(w.pending) > 0 {
+		head := w.pending[0]
+		if head.done != nil {
+			select {
+			case <-head.done:
+			default:
+				return nil
+			}
+		}
+		if err := w.writeHead(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// waitCapacity 按滑动窗口与在途字节预算等待队首写出，避免无界排队与内存膨胀
+// 入参: estBytes 新任务估算字节数
+// 返回: error 写出或取消错误
+func (w *zipParallelWriter) waitCapacity(estBytes int64) error {
+	if err := w.drainReady(); err != nil {
+		return err
+	}
+	for len(w.pending) >= w.window || len(w.pending) > 0 && w.inFlight+estBytes > w.maxBytes {
+		if err := w.writeHead(); err != nil {
+			return err
+		}
+		if err := w.drainReady(); err != nil {
+			return err
+		}
+	}
+	return w.ctx.Err()
+}
+
+// writeHead 等待队首条目完成并按原序写入归档
+// 返回: error 写出或取消错误
+func (w *zipParallelWriter) writeHead() error {
+	entry := w.pending[0]
+	w.pending[0] = nil
+	w.pending = w.pending[1:]
+	if entry.done != nil {
+		<-entry.done
+	}
+	w.inFlight -= entry.estBytes
+	if entry.err != nil {
+		return entry.err
+	}
+	if err := w.editor.output.ctx.Err(); err != nil {
+		return err
+	}
+	switch entry.kind {
+	case zipPreparedDir:
+		_, err := w.archive.CreateHeader(&entry.header)
+		return err
+	case zipPreparedStaged:
+		return w.editor.writeStagedPage(w.archive, entry.header, entry.staged)
+	case zipPreparedLargeEntry:
+		out, err := w.archive.CreateHeader(&entry.header)
+		if err != nil {
+			return err
+		}
+		err = w.editor.writeOutputBytes(out, entry.data)
+		entry.data = nil
+		return err
+	case zipPreparedBytes:
+		if err := editorProgress(w.editor.OnWriteProgress).report("compress", w.editor.output.completed, 0); err != nil {
+			return err
+		}
+		out, err := w.archive.CreateRaw(&entry.header)
+		if err != nil {
+			return err
+		}
+		err = w.editor.writeOutputBytes(out, entry.payload)
+		entry.payload = nil
+		if err != nil {
+			return err
+		}
+		w.editor.output.completed++
+		return editorProgress(w.editor.OnWriteProgress).report("compress", w.editor.output.completed, 0)
+	case zipPreparedRawFile:
+		if err := editorProgress(w.editor.OnWriteProgress).report("compress", w.editor.output.completed, 0); err != nil {
+			return err
+		}
+		payload, err := entry.file.OpenRaw()
+		if err != nil {
+			return err
+		}
+		out, err := w.archive.CreateRaw(&entry.header)
+		if err != nil {
+			return err
+		}
+		if _, err := io.CopyBuffer(out, imageInput{ReadCloser: io.NopCloser(payload), ctx: w.editor.output.ctx}, w.copyBuf); err != nil {
+			return err
+		}
+		w.editor.output.completed++
+		return editorProgress(w.editor.OnWriteProgress).report("compress", w.editor.output.completed, 0)
+	case zipPreparedStoreFile:
+		if err := editorProgress(w.editor.OnWriteProgress).report("compress", w.editor.output.completed, 0); err != nil {
+			return err
+		}
+		input, err := entry.file.Open()
+		if err != nil {
+			return err
+		}
+		defer input.Close()
+		prepareOutputHeader(&entry.header, zip.Store, entry.file.UncompressedSize64, entry.file.UncompressedSize64, entry.file.CRC32)
+		out, err := w.archive.CreateRaw(&entry.header)
+		if err != nil {
+			return err
+		}
+		if _, err := io.CopyBuffer(out, imageInput{ReadCloser: io.NopCloser(input), ctx: w.editor.output.ctx}, w.copyBuf); err != nil {
+			return err
+		}
+		w.editor.output.completed++
+		return editorProgress(w.editor.OnWriteProgress).report("compress", w.editor.output.completed, 0)
+	}
+	return nil
+}
+
+// submitDir 按序提交目录条目，不阻塞后台预压缩
+// 入参: header 目录条目属性
+// 返回: error 写出或取消错误
+func (w *zipParallelWriter) submitDir(header zip.FileHeader) error {
+	if err := w.waitCapacity(0); err != nil {
+		return err
+	}
+	w.pending = append(w.pending, &zipPreparedEntry{kind: zipPreparedDir, header: header})
+	return nil
+}
+
+// submitStaged 按序提交已预压缩的自产页面条目
+// 入参: header 条目属性, staged 暂存页面
+// 返回: error 写出或取消错误
+func (w *zipParallelWriter) submitStaged(header zip.FileHeader, staged *editorStagedPage) error {
+	if err := w.waitCapacity(0); err != nil {
+		return err
+	}
+	w.pending = append(w.pending, &zipPreparedEntry{kind: zipPreparedStaged, header: header, staged: staged})
+	return nil
+}
+
+// submitEntry 按序提交内存条目，已压缩后缀直接计算校验和，其余交由worker并行预压缩
+// 入参: header 条目属性, data 原始数据
+// 返回: error 写出或取消错误
+func (w *zipParallelWriter) submitEntry(header zip.FileHeader, data []byte) error {
+	if len(data) > outputOptimizationBufferLimit {
+		if err := w.waitCapacity(0); err != nil {
+			return err
+		}
+		w.pending = append(w.pending, &zipPreparedEntry{kind: zipPreparedLargeEntry, header: header, data: data})
+		return nil
+	}
+	est := int64(len(data)) + 4096
+	if err := w.waitCapacity(est); err != nil {
+		return err
+	}
+	entry := &zipPreparedEntry{
+		kind:     zipPreparedBytes,
+		header:   header,
+		data:     data,
+		estBytes: est,
+		done:     make(chan struct{}),
+	}
+	w.pending = append(w.pending, entry)
+	w.inFlight += est
+	w.jobs <- entry
+	return nil
+}
+
+// submitFile 按序提交未修改的原ZIP条目，已压缩后缀零解压直通，其余并行预压缩
+// 入参: file 原始ZIP条目
+// 返回: error 写出或取消错误
+func (w *zipParallelWriter) submitFile(file *zip.File) error {
+	header := file.FileHeader
+	header.Extra = outputZIPExtra(header.Extra)
+	if file.UncompressedSize64 > outputOptimizationBufferLimit {
+		if err := w.waitCapacity(0); err != nil {
+			return err
+		}
+		w.pending = append(w.pending, &zipPreparedEntry{kind: zipPreparedRawFile, header: header, file: file})
+		return nil
+	}
+	if isPrecompressedOutputExt(file.Name) {
+		if err := w.waitCapacity(0); err != nil {
+			return err
+		}
+		kind := zipPreparedRawFile
+		if file.UncompressedSize64 < file.CompressedSize64 {
+			kind = zipPreparedStoreFile
+		}
+		w.pending = append(w.pending, &zipPreparedEntry{kind: kind, header: header, file: file})
+		return nil
+	}
+	est := int64(min(file.UncompressedSize64, file.CompressedSize64)) + 4096
+	if err := w.waitCapacity(est); err != nil {
+		return err
+	}
+	entry := &zipPreparedEntry{
+		kind:     zipPreparedRawFile,
+		header:   header,
+		file:     file,
+		estBytes: est,
+		done:     make(chan struct{}),
+	}
+	w.pending = append(w.pending, entry)
+	w.inFlight += est
+	w.jobs <- entry
+	return nil
+}
+
+// flush 排空并按序写出队列中全部剩余条目
+// 返回: error 写出或取消错误
+func (w *zipParallelWriter) flush() error {
+	for len(w.pending) > 0 {
+		if err := w.writeHead(); err != nil {
+			return err
+		}
+	}
+	return w.editor.output.ctx.Err()
+}
+
+// close 取消并等待全部后台预压缩worker退出，可重复调用
+func (w *zipParallelWriter) close() {
+	if w == nil || w.closed {
+		return
+	}
+	w.closed = true
+	w.cancel()
+	close(w.jobs)
+	w.group.Wait()
 }
 
 // outputSnapshot 创建只读输出配置，原签名存在时仅调整ZIP封装
@@ -568,15 +939,17 @@ func (e *Editor) writeOutputEntry(archive *zip.Writer, header zip.FileHeader, da
 	if err := editorProgress(e.OnWriteProgress).report("compress", e.output.completed, 0); err != nil {
 		return err
 	}
-	compressed, err := e.compressOutputBytes(data, len(data))
-	if err != nil {
-		return err
-	}
 	payload := data
 	header.Method = zip.Store
-	if compressed != nil {
-		payload = compressed
-		header.Method = zip.Deflate
+	if !isPrecompressedOutputExt(header.Name) {
+		compressed, err := e.compressOutputBytes(data, len(data))
+		if err != nil {
+			return err
+		}
+		if compressed != nil {
+			payload = compressed
+			header.Method = zip.Deflate
+		}
 	}
 	prepareOutputHeader(&header, header.Method, uint64(len(data)), uint64(len(payload)), crc32.ChecksumIEEE(data))
 	entry, err := archive.CreateRaw(&header)
@@ -615,39 +988,85 @@ func (e *Editor) writeOutputBytes(writer io.Writer, data []byte) error {
 // 入参: data 未压缩数据, limit 候选体积上限
 // 返回: []byte 更小的DEFLATE编码, error 取消或编码错误
 func (e *Editor) compressOutputBytes(data []byte, limit int) ([]byte, error) {
+	return compressOutputBytesWithDeflater(e.output.ctx, e.output.compressor(io.Discard), data, limit)
+}
+
+// compressOutputFile 分块重压缩ZIP条目，超过体积上限且可回退时立即早停
+// 入参: file 原始条目, buffer 读取缓冲, limit 候选体积上限
+// 返回: []byte 更小的DEFLATE编码, error 读取、编码或取消错误
+func (e *Editor) compressOutputFile(file *zip.File, buffer []byte, limit int) ([]byte, error) {
+	return compressOutputFileWithDeflater(e.output.ctx, e.output.compressor(io.Discard), file, buffer, limit)
+}
+
+// acquireOutputDeflater 从对象池获取并重置最高等级压缩器
+// 入参: writer 编码目标
+// 返回: *flate.Writer 压缩器
+func acquireOutputDeflater(writer io.Writer) *flate.Writer {
+	deflater := outputDeflaterPool.Get().(*flate.Writer)
+	deflater.Reset(writer)
+	return deflater
+}
+
+// releaseOutputDeflater 清理输出引用并归还压缩器到对象池
+// 入参: deflater 压缩器
+func releaseOutputDeflater(deflater *flate.Writer) {
+	if deflater == nil {
+		return
+	}
+	deflater.Reset(io.Discard)
+	outputDeflaterPool.Put(deflater)
+}
+
+// isPrecompressedOutputExt 判断条目扩展名是否属于已高度压缩的媒体或归档格式
+// 入参: name 条目路径
+// 返回: bool 是否属于已压缩后缀
+func isPrecompressedOutputExt(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".jpg", ".jpeg", ".png", ".jp2", ".j2k", ".jb2", ".webp", ".zip", ".pdf", ".ofd":
+		return true
+	}
+	return false
+}
+
+// compressOutputBytesWithDeflater 使用指定压缩器压缩内存数据并限制候选体积
+// 入参: ctx 取消上下文, deflater 压缩器, data 未压缩数据, limit 候选体积上限
+// 返回: []byte 更小的DEFLATE编码, error 取消或编码错误
+func compressOutputBytesWithDeflater(ctx context.Context, deflater *flate.Writer, data []byte, limit int) ([]byte, error) {
 	var compressed bytes.Buffer
 	output := &outputCompressionBuffer{buffer: &compressed, limit: min(limit, outputOptimizationBufferLimit)}
-	deflater := e.output.compressor(output)
-	defer deflater.Close()
+	deflater.Reset(output)
 	for offset := 0; offset < len(data); {
-		if err := e.output.ctx.Err(); err != nil {
+		if err := ctx.Err(); err != nil {
+			deflater.Reset(io.Discard)
 			return nil, err
 		}
 		end := min(offset+64<<10, len(data))
 		if _, err := deflater.Write(data[offset:end]); err != nil {
+			deflater.Reset(io.Discard)
 			if err == io.ErrShortBuffer {
-				return nil, e.output.ctx.Err()
+				return nil, ctx.Err()
 			}
 			return nil, err
 		}
 		offset = end
 	}
 	if err := deflater.Close(); err != nil {
+		deflater.Reset(io.Discard)
 		if err == io.ErrShortBuffer {
-			return nil, e.output.ctx.Err()
+			return nil, ctx.Err()
 		}
 		return nil, err
 	}
 	if compressed.Len() >= limit {
-		return nil, e.output.ctx.Err()
+		return nil, ctx.Err()
 	}
-	return compressed.Bytes(), e.output.ctx.Err()
+	return compressed.Bytes(), ctx.Err()
 }
 
-// compressOutputFile 分块重压缩ZIP条目，无收益时仍读完原数据并校验长度及校验和
-// 入参: file 原始条目, buffer 读取缓冲, limit 候选体积上限
+// compressOutputFileWithDeflater 分块重压缩ZIP条目，超过体积上限时立即早停
+// 入参: ctx 取消上下文, deflater 压缩器, file 原始条目, buffer 读取缓冲, limit 候选体积上限
 // 返回: []byte 更小的DEFLATE编码, error 读取、编码或取消错误
-func (e *Editor) compressOutputFile(file *zip.File, buffer []byte, limit int) ([]byte, error) {
+func compressOutputFileWithDeflater(ctx context.Context, deflater *flate.Writer, file *zip.File, buffer []byte, limit int) ([]byte, error) {
 	input, err := file.Open()
 	if err != nil {
 		return nil, err
@@ -655,24 +1074,31 @@ func (e *Editor) compressOutputFile(file *zip.File, buffer []byte, limit int) ([
 	defer input.Close()
 	var compressed bytes.Buffer
 	output := &outputCompressionBuffer{buffer: &compressed, limit: min(limit, outputOptimizationBufferLimit)}
-	deflater := e.output.compressor(output)
-	defer deflater.Close()
-	source := imageInput{ReadCloser: input, ctx: e.output.ctx}
+	deflater.Reset(output)
+	source := imageInput{ReadCloser: input, ctx: ctx}
 	_, err = io.CopyBuffer(deflater, source, buffer)
 	if output.exceeded {
-		_, err = io.CopyBuffer(io.Discard, source, buffer)
+		deflater.Reset(io.Discard)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, nil
 	}
 	closeErr := deflater.Close()
-	if e.output.ctx.Err() != nil {
-		return nil, e.output.ctx.Err()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		deflater.Reset(io.Discard)
+		return nil, ctxErr
 	}
 	if err != nil {
+		deflater.Reset(io.Discard)
 		return nil, err
 	}
 	if output.exceeded {
+		deflater.Reset(io.Discard)
 		return nil, nil
 	}
 	if closeErr != nil {
+		deflater.Reset(io.Discard)
 		return nil, closeErr
 	}
 	if compressed.Len() >= limit {
@@ -727,7 +1153,7 @@ func outputZIPExtra(extra []byte) []byte {
 	return append(output, extra[start:]...)
 }
 
-// writeOutputFile 重压缩未修改条目，只采用优于原ZIP编码的结果
+// writeOutputFile 重压缩未修改条目，已压缩媒体后缀直通，只采用优于原ZIP编码的结果
 // 入参: archive 输出归档, file 原始条目, buffer 流式复制缓冲
 // 返回: error 读取、写入或取消错误
 func (e *Editor) writeOutputFile(archive *zip.Writer, file *zip.File, buffer []byte) error {
@@ -738,22 +1164,34 @@ func (e *Editor) writeOutputFile(archive *zip.Writer, file *zip.File, buffer []b
 	header.Extra = outputZIPExtra(header.Extra)
 	var payload io.Reader
 	if file.UncompressedSize64 <= outputOptimizationBufferLimit {
-		limit := min(file.CompressedSize64, file.UncompressedSize64)
-		compressed, err := e.compressOutputFile(file, buffer, int(limit))
-		if err != nil {
-			return err
-		}
-		if compressed != nil {
-			prepareOutputHeader(&header, zip.Deflate, file.UncompressedSize64, uint64(len(compressed)), file.CRC32)
-			payload = bytes.NewReader(compressed)
-		} else if file.UncompressedSize64 < file.CompressedSize64 {
-			input, err := file.Open()
+		if isPrecompressedOutputExt(file.Name) {
+			if file.UncompressedSize64 < file.CompressedSize64 {
+				input, err := file.Open()
+				if err != nil {
+					return err
+				}
+				defer input.Close()
+				prepareOutputHeader(&header, zip.Store, file.UncompressedSize64, file.UncompressedSize64, file.CRC32)
+				payload = input
+			}
+		} else {
+			limit := min(file.CompressedSize64, file.UncompressedSize64)
+			compressed, err := e.compressOutputFile(file, buffer, int(limit))
 			if err != nil {
 				return err
 			}
-			defer input.Close()
-			prepareOutputHeader(&header, zip.Store, file.UncompressedSize64, file.UncompressedSize64, file.CRC32)
-			payload = input
+			if compressed != nil {
+				prepareOutputHeader(&header, zip.Deflate, file.UncompressedSize64, uint64(len(compressed)), file.CRC32)
+				payload = bytes.NewReader(compressed)
+			} else if file.UncompressedSize64 < file.CompressedSize64 {
+				input, err := file.Open()
+				if err != nil {
+					return err
+				}
+				defer input.Close()
+				prepareOutputHeader(&header, zip.Store, file.UncompressedSize64, file.UncompressedSize64, file.CRC32)
+				payload = input
+			}
 		}
 	}
 	if payload == nil {
@@ -772,18 +1210,6 @@ func (e *Editor) writeOutputFile(archive *zip.Writer, file *zip.File, buffer []b
 	}
 	e.output.completed++
 	return editorProgress(e.OnWriteProgress).report("compress", e.output.completed, 0)
-}
-
-// writeCompressedImage 优化已经编码的图片，再交付调用方输出流
-// 入参: writer 输出流, data 图片数据
-// 返回: error 优化或写入错误
-func (r *Renderer) writeCompressedImage(writer io.Writer, data []byte) error {
-	optimized, err := pdfgo.OptimizeImage(r.outputContext(), data, r.Compression)
-	if err != nil {
-		return err
-	}
-	_, err = io.Copy(writer, bytes.NewReader(optimized))
-	return err
 }
 
 // outputContext 优先使用当前页面上下文，否则使用输出上下文

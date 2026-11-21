@@ -252,27 +252,17 @@ func BuildPostTable() []byte {
 // 入参: tables 表数据映射
 // 返回: []byte 完整字体数据, error 错误信息
 func SerializeOTF(tables map[string][]byte) ([]byte, error) {
-	if len(tables) > math.MaxUint16/16 {
-		return nil, fmt.Errorf("too many font tables")
+	totalSize, err := serializedOTFSize(tables)
+	if err != nil {
+		return nil, err
 	}
 	headerSize := 12 + 16*len(tables)
-	size := uint64(headerSize)
 	tags := make([]string, 0, len(tables))
-	for tag, data := range tables {
-		if len(tag) != 4 {
-			return nil, fmt.Errorf("invalid font table tag %q", tag)
-		}
-		if tag == "head" && len(data) < 12 {
-			return nil, fmt.Errorf("invalid head font table")
-		}
-		size += (uint64(len(data)) + 3) &^ 3
-		if size > math.MaxUint32 || size > uint64(math.MaxInt) {
-			return nil, fmt.Errorf("font table data too large")
-		}
+	for tag := range tables {
 		tags = append(tags, tag)
 	}
 	sort.Strings(tags)
-	data := make([]byte, int(size))
+	data := make([]byte, totalSize)
 	numTables := len(tables)
 	entrySelector := 0
 	for 1<<(entrySelector+1) <= numTables {
@@ -313,6 +303,29 @@ func SerializeOTF(tables map[string][]byte) ([]byte, error) {
 		binary.BigEndian.PutUint32(data[adjustment:], 0xB1B0AFBA-checksum-calcTableChecksum(data[:headerSize]))
 	}
 	return data, nil
+}
+
+// serializedOTFSize 计算OpenType表集合序列化后的精确字节长度
+// 入参: tables 表数据映射
+// 返回: int 序列化字节数, error 表目录或长度错误
+func serializedOTFSize(tables map[string][]byte) (int, error) {
+	if len(tables) > math.MaxUint16/16 {
+		return 0, fmt.Errorf("too many font tables")
+	}
+	size := uint64(12 + 16*len(tables))
+	for tag, data := range tables {
+		if len(tag) != 4 {
+			return 0, fmt.Errorf("invalid font table tag %q", tag)
+		}
+		if tag == "head" && len(data) < 12 {
+			return 0, fmt.Errorf("invalid head font table")
+		}
+		size += (uint64(len(data)) + 3) &^ 3
+		if size > math.MaxUint32 || size > uint64(math.MaxInt) {
+			return 0, fmt.Errorf("font table data too large")
+		}
+	}
+	return int(size), nil
 }
 
 // finite 判断数值是否有限

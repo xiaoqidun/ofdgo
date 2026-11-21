@@ -90,10 +90,37 @@ func SubsetSFNT(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return SubsetSFNTParsed(sfnt, data, glyphs, mapped)
+}
+
+// SubsetSFNTParsed 复用已解析字体按实际用字裁剪，不修改传入字体表，避免重复解析
+// 入参: sfnt 已解析字体, data 原始字体数据(可为nil), glyphs 已排序的字形编号，包含0, mapped 是否保留显式字形编号
+// 返回: []byte 字体子集, error 错误信息
+func SubsetSFNTParsed(sfnt *SFNT, data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
+	if sfnt == nil {
+		return nil, fmt.Errorf("nil SFNT font")
+	}
 	if fontEmbeddingFlags(sfnt)&0x0100 != 0 {
-		return bytes.Clone(data), nil
+		if data != nil {
+			return bytes.Clone(data), nil
+		}
+		return sfnt.Write(), nil
 	}
 	if sfnt.IsCFF {
+		if !mapped {
+			keep := map[uint16]bool{0: true}
+			for _, gid := range glyphs {
+				if gid >= sfnt.NumGlyphs() {
+					return nil, fmt.Errorf("CFF glyph index out of range")
+				}
+				keep[gid] = true
+			}
+			if compact, ids, err := compactCFFDirect(sfnt.Tables["CFF "], int(sfnt.NumGlyphs()), keep); err == nil {
+				if result, err := compactCFFTables(sfnt, compact, ids, nil, nil); err == nil {
+					return result, nil
+				}
+			}
+		}
 		count, err := parseCFFAndCountGlyphs(sfnt.Tables["CFF "])
 		if err != nil {
 			return nil, err
@@ -132,15 +159,14 @@ func SubsetSFNT(data []byte, glyphs []uint16, mapped bool) ([]byte, error) {
 				tables[tag] = table
 			}
 		}
-		fixed, err := SerializeOTF(tables)
+		fixedSize, err := serializedOTFSize(tables)
 		if err != nil {
 			return nil, err
 		}
-		sfnt.Tables = tables
-		if subset := subsetSourceSFNT(sfnt, usage, len(fixed)); subset != nil {
+		if subset := subsetSourceSFNTTables(sfnt, tables, usage, fixedSize); subset != nil {
 			return subset, nil
 		}
-		return fixed, nil
+		return SerializeOTF(tables)
 	}
 	return subsetCompactSFNTFont(sfnt, glyphs, nil, nil)
 }
@@ -154,21 +180,68 @@ func SubsetSourceSFNT(data []byte, usage *Usage) []byte {
 		return nil
 	}
 	fontTables, err := FileTables(data, 0)
-	if err != nil {
+	if err != nil || !sourceSFNTTablesAllowed(fontTables) {
 		return nil
-	}
-	for tag := range fontTables {
-		switch tag {
-		case "cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "CFF ", "cvt ", "fpgm", "prep", "gasp", "kern", "vhea", "vmtx", "VORG", "GDEF", "GPOS", "GSUB", "BASE", "MATH", "meta", "PCLT", "FFTM", "STAT", "EBDT", "EBLC", "EBSC", "JSTF", "hdmx", "LTSH", "VDMX", "DSIG", "MERG":
-		default:
-			return nil
-		}
 	}
 	sfnt, err := ParseSFNTTables(fontTables)
 	if err != nil {
 		return nil
 	}
-	return subsetSourceSFNT(sfnt, usage, len(data))
+	return subsetSourceSFNTTables(sfnt, sfnt.Tables, usage, len(data))
+}
+
+// SubsetSourceSFNTParsed 复用已解析字体裁剪原有静态TrueType或CFF字体，不修改传入字体表
+// 入参: sfnt 已解析字体, usage 全包用字记录, size 原字体字节长度
+// 返回: []byte 更小的字体子集，无确定收益时为空
+func SubsetSourceSFNTParsed(sfnt *SFNT, usage *Usage, size int) []byte {
+	if sfnt == nil || usage == nil || usage.Unsafe || len(usage.Characters)+len(usage.Glyphs) == 0 || !sourceSFNTTablesAllowed(sfnt.Tables) {
+		return nil
+	}
+	return subsetSourceSFNTTables(sfnt, sfnt.Tables, usage, size)
+}
+
+// SubsetSFNTForPDFParsed 按PDF子集CID顺序裁剪静态TrueType或CFF字体，保持前len(glyphs)项字形编号恒等映射
+// 入参: sfnt 已解析字体, glyphs 按子集CID排列的源字形编号，首项为0
+// 返回: []byte 紧凑字体子集, error 格式或裁剪错误
+func SubsetSFNTForPDFParsed(sfnt *SFNT, glyphs []uint16) ([]byte, error) {
+	if sfnt == nil {
+		return nil, fmt.Errorf("nil SFNT font")
+	}
+	if fontEmbeddingFlags(sfnt)&0x0100 != 0 || sfnt.Tables["fvar"] != nil || slices.ContainsFunc([]string{"COLR", "CBDT", "sbix", "SVG "}, func(tag string) bool { return sfnt.Tables[tag] != nil }) {
+		return nil, fmt.Errorf("font does not support PDF subsetting")
+	}
+	if sfnt.IsCFF {
+		compact, ids, err := compactCFFOrdered(sfnt.Tables["CFF "], int(sfnt.NumGlyphs()), glyphs)
+		if err != nil {
+			return nil, err
+		}
+		return compactCFFTables(sfnt, compact, ids, nil, nil)
+	}
+	if !sfnt.IsTrueType {
+		return nil, fmt.Errorf("unsupported SFNT outline format")
+	}
+	result, err := subsetCompactSFNTFont(sfnt, glyphs, nil, nil)
+	if err != nil || len(result) == 0 {
+		if err == nil {
+			err = fmt.Errorf("empty TrueType subset")
+		}
+		return nil, err
+	}
+	return result, nil
+}
+
+// sourceSFNTTablesAllowed 校验原有字体是否仅包含安全可裁剪的标准表集合
+// 入参: fontTables 字体表映射
+// 返回: bool 是否允许裁剪
+func sourceSFNTTablesAllowed(fontTables map[string][]byte) bool {
+	for tag := range fontTables {
+		switch tag {
+		case "cmap", "head", "hhea", "hmtx", "maxp", "OS/2", "post", "name", "glyf", "loca", "CFF ", "cvt ", "fpgm", "prep", "gasp", "kern", "vhea", "vmtx", "VORG", "GDEF", "GPOS", "GSUB", "BASE", "MATH", "meta", "PCLT", "FFTM", "STAT", "EBDT", "EBLC", "EBSC", "JSTF", "hdmx", "LTSH", "VDMX", "DSIG", "MERG":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // fontEmbeddingFlags 读取OpenType的嵌入标志，未提供OS/2表时返回零
@@ -196,10 +269,10 @@ func dropTransientSubsetTables(tables map[string][]byte) {
 	}
 }
 
-// subsetSourceSFNT 复用已校验的字体表裁剪字形，仅返回小于原编码的结果
-// 入参: sfnt 已解析字体, usage 用字记录, size 原编码长度
+// subsetSourceSFNTTables 复用已校验的字体表裁剪字形，可紧凑时直走紧凑路径，仅返回小于原编码的结果
+// 入参: sfnt 已解析字体, baseTables 参与输出的表映射, usage 用字记录, size 原编码长度
 // 返回: []byte 更小的字体子集，无确定收益时为空
-func subsetSourceSFNT(sfnt *SFNT, usage *Usage, size int) []byte {
+func subsetSourceSFNTTables(sfnt *SFNT, baseTables map[string][]byte, usage *Usage, size int) []byte {
 	if usage == nil || usage.Unsafe || len(usage.Characters)+len(usage.Glyphs) == 0 || !sfnt.IsTrueType && !sfnt.IsCFF || fontEmbeddingFlags(sfnt)&0x0100 != 0 {
 		return nil
 	}
@@ -215,7 +288,7 @@ func subsetSourceSFNT(sfnt *SFNT, usage *Usage, size int) []byte {
 	glyphs := make(map[uint16]bool, len(usage.Glyphs)+1)
 	var cidToGID map[uint16]uint16
 	if sfnt.IsCFF && len(usage.Glyphs) > 0 {
-		cidToGID = CFFCIDToGID(sfnt.Tables["CFF "])
+		cidToGID = sfnt.CFFCIDToGID()
 	}
 	if len(cidToGID) > 0 {
 		for id := range usage.Glyphs {
@@ -245,21 +318,36 @@ func subsetSourceSFNT(sfnt *SFNT, usage *Usage, size int) []byte {
 			mapping[char] = id
 		}
 	}
-	variations, ok := subsetCmapVariations(sfnt.Tables["cmap"], usage.Characters, glyphs, sfnt.NumGlyphs())
-	if !ok || !retainSFNTSubstitutions(sfnt.Tables["GSUB"], glyphs, sfnt.NumGlyphs()) {
+	var variations []byte
+	if sfnt.hasCmapVariations {
+		var ok bool
+		variations, ok = subsetCmapVariations(baseTables["cmap"], usage.Characters, glyphs, sfnt.NumGlyphs())
+		if !ok {
+			return nil
+		}
+	}
+	if !retainSFNTSubstitutions(baseTables["GSUB"], glyphs, sfnt.NumGlyphs()) {
 		return nil
 	}
-	canCompact := len(usage.Glyphs) == 0 && sfnt.Tables["GSUB"] == nil && sfnt.Tables["GPOS"] == nil && sfnt.Tables["GDEF"] == nil && sfnt.Tables["kern"] == nil && sfnt.Tables["MATH"] == nil
+	canCompact := len(usage.Glyphs) == 0 && baseTables["GSUB"] == nil && baseTables["GPOS"] == nil && baseTables["GDEF"] == nil && baseTables["kern"] == nil && baseTables["MATH"] == nil
+	directCompact := canCompact && len(glyphs) < int(sfnt.NumGlyphs())
 	if sfnt.IsCFF {
-		count, err := parseCFFAndCountGlyphs(sfnt.Tables["CFF "])
+		if directCompact {
+			if compact, ids, err := compactCFFDirect(baseTables["CFF "], int(sfnt.NumGlyphs()), glyphs); err == nil {
+				if candidate, err := compactCFFTables(sfnt, compact, ids, mapping, variations); err == nil && len(candidate) < size {
+					return candidate
+				}
+			}
+		}
+		count, err := parseCFFAndCountGlyphs(baseTables["CFF "])
 		if err != nil || count != int(sfnt.NumGlyphs()) {
 			return nil
 		}
-		cff, err := subsetCFFCharstrings(sfnt.Tables["CFF "], glyphs)
+		cff, err := subsetCFFCharstrings(baseTables["CFF "], glyphs)
 		if err != nil {
 			return nil
 		}
-		tables := maps.Clone(sfnt.Tables)
+		tables := maps.Clone(baseTables)
 		tables["CFF "] = cff
 		tables["cmap"] = buildCmapWithVariations(sfnt.NumGlyphs(), mapping, variations)
 		dropTransientSubsetTables(tables)
@@ -267,7 +355,7 @@ func subsetSourceSFNT(sfnt *SFNT, usage *Usage, size int) []byte {
 		if err != nil || len(best) >= size {
 			best = nil
 		}
-		if canCompact {
+		if canCompact && !directCompact {
 			if compact, ids, err := compactCFFGlyphs(cff, glyphs); err == nil {
 				if candidate, err := compactCFFTables(sfnt, compact, ids, mapping, variations); err == nil && len(candidate) < size && (best == nil || len(candidate) < len(best)) {
 					best = candidate
@@ -276,8 +364,18 @@ func subsetSourceSFNT(sfnt *SFNT, usage *Usage, size int) []byte {
 		}
 		return best
 	}
+	if directCompact {
+		if candidate, err := subsetCompactSFNTFont(sfnt, slices.Sorted(maps.Keys(glyphs)), mapping, variations); err == nil {
+			if len(candidate) == 0 && hasBitmapTables(baseTables) {
+				return nil
+			}
+			if len(candidate) > 0 && len(candidate) < size {
+				return candidate
+			}
+		}
+	}
 	for id := 0; id < int(sfnt.NumGlyphs()); id++ {
-		if _, err := trueTypeGlyphData(sfnt.Tables, uint16(id)); err != nil {
+		if _, err := trueTypeGlyphData(baseTables, uint16(id)); err != nil {
 			return nil
 		}
 	}
@@ -291,11 +389,11 @@ func subsetSourceSFNT(sfnt *SFNT, usage *Usage, size int) []byte {
 	glyfSize := 0
 	for id, retained := range glyphs {
 		if retained {
-			data, _ := trueTypeGlyphData(sfnt.Tables, id)
+			data, _ := trueTypeGlyphData(baseTables, id)
 			glyfSize += len(data) + len(data)%2
 		}
 	}
-	if glyfSize == 0 && hasBitmapTables(sfnt.Tables) {
+	if glyfSize == 0 && hasBitmapTables(baseTables) {
 		return nil
 	}
 	locaFormat := uint16(1)
@@ -311,14 +409,14 @@ func subsetSourceSFNT(sfnt *SFNT, usage *Usage, size int) []byte {
 			loca = binary.BigEndian.AppendUint32(loca, uint32(len(glyf)))
 		}
 		if id < int(sfnt.NumGlyphs()) && glyphs[uint16(id)] {
-			data, _ := trueTypeGlyphData(sfnt.Tables, uint16(id))
+			data, _ := trueTypeGlyphData(baseTables, uint16(id))
 			glyf = append(glyf, data...)
 			if len(glyf)%2 != 0 {
 				glyf = append(glyf, 0)
 			}
 		}
 	}
-	tables := maps.Clone(sfnt.Tables)
+	tables := maps.Clone(baseTables)
 	tables["glyf"], tables["loca"] = glyf, loca
 	tables["cmap"] = buildCmapWithVariations(sfnt.NumGlyphs(), mapping, variations)
 	tables["head"] = bytes.Clone(tables["head"])
@@ -329,7 +427,7 @@ func subsetSourceSFNT(sfnt *SFNT, usage *Usage, size int) []byte {
 	if err != nil || len(best) >= size {
 		best = nil
 	}
-	if canCompact {
+	if canCompact && !directCompact {
 		if candidate, err := subsetCompactSFNTFont(sfnt, slices.Sorted(maps.Keys(glyphs)), mapping, variations); err == nil && len(candidate) > 0 && len(candidate) < size && (best == nil || len(candidate) < len(best)) {
 			best = candidate
 		}
@@ -547,20 +645,35 @@ func subsetCompactSFNTFont(sfnt *SFNT, glyphs []uint16, sourceMapping map[rune]u
 			table[tag] = bytes.Clone(data)
 		}
 	}
-	var glyf, hmtx, vmtx []byte
-	offsets := make([]int, len(ids)+1)
-	for idx, id := range ids {
-		offsets[idx] = len(glyf)
+	glyfSize := 0
+	for _, id := range ids {
 		data, err := trueTypeGlyphData(sfnt.Tables, id)
 		if err != nil {
 			return nil, err
 		}
-		data = bytes.Clone(data)
+		glyfSize += (len(data) + 3) &^ 3
+	}
+	glyf := make([]byte, 0, glyfSize)
+	hmtx := make([]byte, 0, len(ids)*4)
+	var vmtx []byte
+	if sfnt.vertical != 0 {
+		vmtx = make([]byte, 0, len(ids)*4)
+	}
+	offsets := make([]int, len(ids)+1)
+	for idx, id := range ids {
+		start := len(glyf)
+		offsets[idx] = start
+		data, err := trueTypeGlyphData(sfnt.Tables, id)
+		if err != nil {
+			return nil, err
+		}
+		glyf = append(glyf, data...)
 		if len(data) >= 10 && int16(binary.BigEndian.Uint16(data)) < 0 {
+			written := glyf[start:]
 			for pos := 10; ; {
-				flags := binary.BigEndian.Uint16(data[pos:])
-				child := binary.BigEndian.Uint16(data[pos+2:])
-				binary.BigEndian.PutUint16(data[pos+2:], remap[child])
+				flags := binary.BigEndian.Uint16(written[pos:])
+				child := binary.BigEndian.Uint16(written[pos+2:])
+				binary.BigEndian.PutUint16(written[pos+2:], remap[child])
 				pos += 6
 				if flags&1 != 0 {
 					pos += 2
@@ -578,7 +691,6 @@ func subsetCompactSFNTFont(sfnt *SFNT, glyphs []uint16, sourceMapping map[rune]u
 				}
 			}
 		}
-		glyf = append(glyf, data...)
 		for len(glyf)%4 != 0 {
 			glyf = append(glyf, 0)
 		}

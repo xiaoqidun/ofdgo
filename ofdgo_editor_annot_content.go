@@ -31,17 +31,14 @@ import (
 // 入参: index 页面索引, annotation 注解内容，ID由编辑器生成，空LastModDate使用当前日期
 // 返回: string 注解标识, error 错误信息
 func (e *Editor) AddAnnotation(index int, annotation Annotation) (string, error) {
-	var id string
-	err := e.Transaction(func(next *Editor) error {
-		var data []byte
-		var err error
-		id, data, err = next.prepareAnnotation(index, annotation)
-		if err != nil {
-			return err
-		}
-		return next.appendAnnotations(index, data, true)
-	})
+	savedMaxID := e.maxID
+	id, data, err := e.prepareAnnotation(index, annotation)
 	if err != nil {
+		e.maxID = savedMaxID
+		return "", err
+	}
+	if err := e.appendAnnotations(index, data, true); err != nil {
+		e.maxID = savedMaxID
 		return "", err
 	}
 	return id, nil
@@ -124,6 +121,18 @@ type editorFileBackup struct {
 	data    []byte
 	existed bool
 	inIndex bool
+}
+
+// editorPageHeaderBackup 保存单次增量提交失效前的页头缓存快照
+type editorPageHeaderBackup struct {
+	content PageContent
+	existed bool
+}
+
+// editorResFileBackup 保存单次增量提交失效前的资源文件解析缓存快照
+type editorResFileBackup struct {
+	parsed  *parsedRes
+	existed bool
 }
 
 // prepareAnnotation 校验注解并分配外观标识，提交由调用方事务或独立导入文档负责
@@ -326,7 +335,7 @@ func (e *Editor) appendPageAnnotations(ctx context.Context, indexes []int, annot
 				if content, readErr := reader.readFileViewContext(ctx, existing); readErr == nil {
 					added := bytes.TrimPrefix(annotations[0], []byte(xml.Header))
 					if patched, ok := appendOFDXMLBeforeClosing(content, "PageAnnot", added); ok {
-						if err := e.commitAnnotationPartsContext(ctx, base, map[string][]byte{existing: patched}); err != nil {
+						if err := e.commitAnnotationPartsModeContext(ctx, base, map[string][]byte{existing: patched}, true); err != nil {
 							return err
 						}
 						if !e.source.annotationPages[pageID] {
@@ -506,7 +515,7 @@ func (e *Editor) appendPageAnnotations(ctx context.Context, indexes []int, annot
 		}
 		parts[docName] = editorPatchXML(docData, []editorXMLPatch{patch})
 	}
-	if err := e.commitAnnotationPartsContext(ctx, base, parts); err != nil {
+	if err := e.commitAnnotationPartsModeContext(ctx, base, parts, true); err != nil {
 		return err
 	}
 	pages := maps.Clone(e.source.annotationPages)
@@ -560,6 +569,13 @@ func (e *Editor) commitAnnotationParts(base *editorSource, parts map[string][]by
 // 入参: ctx 取消上下文, base 原包, parts 修改的文件
 // 返回: error 结构、读取或取消错误
 func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorSource, parts map[string][]byte) error {
+	return e.commitAnnotationPartsModeContext(ctx, base, parts, false)
+}
+
+// commitAnnotationPartsModeContext 按追加或常规修改语义增量提交包快照并精准失效受影响缓存
+// 入参: ctx 取消上下文, base 原包, parts 修改的文件, appendOnly 是否为不缩减原包引用的纯追加写入
+// 返回: error 结构、读取或取消错误
+func (e *Editor) commitAnnotationPartsModeContext(ctx context.Context, base *editorSource, parts map[string][]byte, appendOnly bool) error {
 	parts, err := base.reader.versionChanges(ctx, parts)
 	if err != nil {
 		return err
@@ -569,6 +585,10 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 	}
 	updates := make(map[string][]byte, len(parts))
 	docPath := cleanPackagePath(base.reader.documentRoot)
+	versionPath := ""
+	if base.reader.versionInfo != nil {
+		versionPath = cleanPackagePath(base.reader.versionInfo.Location)
+	}
 	annPath := ""
 	if base.document.Annotations != "" {
 		annPath = cleanPackagePath(base.reader.ResPath(base.document.Annotations))
@@ -581,7 +601,17 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 	if strings.TrimSpace(base.document.CustomTags.Path) != "" {
 		tagPath = cleanPackagePath(base.reader.ResPath(base.document.CustomTags.Path))
 	}
+	docResSet := make(map[string]bool, len(base.document.CommonData.PublicRes)+len(base.document.CommonData.DocumentRes))
+	for _, res := range base.document.CommonData.PublicRes {
+		docResSet[cleanPackagePath(base.reader.ResPath(res))] = true
+	}
+	for _, res := range base.document.CommonData.DocumentRes {
+		docResSet[cleanPackagePath(base.reader.ResPath(res))] = true
+	}
 	docChanged, annChanged, attChanged, tagChanged := false, false, false, false
+	versionChanged, docResDirty, hasNewFile := false, false, false
+	var dirtyResFiles []string
+	var dirtyPageHeaders []string
 	for name, data := range parts {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -595,8 +625,14 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 			return fmt.Errorf("invalid package path: %q", name)
 		}
 		updates[name] = data
+		if !base.reader.fileNames[name] {
+			hasNewFile = true
+		}
 		if name == docPath {
 			docChanged = true
+		}
+		if versionPath != "" && name == versionPath {
+			versionChanged = true
 		}
 		if annPath != "" && name == annPath {
 			annChanged = true
@@ -607,13 +643,57 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 		if tagPath != "" && name == tagPath {
 			tagChanged = true
 		}
+		if base.reader.resFileCache[name] != nil || base.reader.resourcesRead[name] {
+			dirtyResFiles = append(dirtyResFiles, name)
+		}
+		if docResSet[name] {
+			docResDirty = true
+		}
+		if _, isPage := base.reader.pageHeaderCache[name]; isPage {
+			dirtyPageHeaders = append(dirtyPageHeaders, name)
+		}
 	}
-	inPlace := base.reader == e.ownedReader && e.ownedOwner == e && e.ownedTx == e.transactionChanges && (e.historyLimit == 0 || e.ownedRevision == e.revision)
+	inPlace := base.reader == e.ownedReader && e.ownedOwner == e && e.transactionChanges == nil && e.ownedTx == nil && !docResDirty && !versionChanged
 	var reader *Reader
 	var backups map[string]editorFileBackup
+	var pageHeaderBackups map[string]editorPageHeaderBackup
+	var resFileBackups map[string]editorResFileBackup
 	prevDoc := base.reader.doc
 	prevAnnFiles := base.reader.annotationFiles
 	prevPageAnnFiles := base.reader.pageAnnotFiles
+	setupCopy := func() {
+		files := maps.Clone(base.reader.files)
+		if files == nil {
+			files = make(map[string][]byte, len(updates))
+		}
+		fileNames := base.reader.fileNames
+		if hasNewFile {
+			fileNames = maps.Clone(base.reader.fileNames)
+		}
+		for name, data := range updates {
+			files[name] = data
+			if hasNewFile {
+				fileNames[name] = true
+			}
+		}
+		copied := *base.reader
+		copied.files = files
+		copied.fileNames = fileNames
+		copied.resources = e.runtimeResources
+		if len(dirtyPageHeaders) != 0 {
+			copied.pageHeaderCache = maps.Clone(base.reader.pageHeaderCache)
+			for _, name := range dirtyPageHeaders {
+				delete(copied.pageHeaderCache, name)
+			}
+		}
+		if len(dirtyResFiles) != 0 {
+			copied.resFileCache = maps.Clone(base.reader.resFileCache)
+			for _, name := range dirtyResFiles {
+				delete(copied.resFileCache, name)
+			}
+		}
+		reader = &copied
+	}
 	if inPlace {
 		reader = base.reader
 		backups = make(map[string]editorFileBackup, len(updates))
@@ -627,21 +707,24 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 			reader.files[name] = data
 			reader.fileNames[name] = true
 		}
+		if len(dirtyPageHeaders) != 0 {
+			pageHeaderBackups = make(map[string]editorPageHeaderBackup, len(dirtyPageHeaders))
+			for _, name := range dirtyPageHeaders {
+				hdr, existed := reader.pageHeaderCache[name]
+				pageHeaderBackups[name] = editorPageHeaderBackup{content: hdr, existed: existed}
+				delete(reader.pageHeaderCache, name)
+			}
+		}
+		if len(dirtyResFiles) != 0 {
+			resFileBackups = make(map[string]editorResFileBackup, len(dirtyResFiles))
+			for _, name := range dirtyResFiles {
+				parsed, existed := reader.resFileCache[name]
+				resFileBackups[name] = editorResFileBackup{parsed: parsed, existed: existed}
+				delete(reader.resFileCache, name)
+			}
+		}
 	} else {
-		files := maps.Clone(base.reader.files)
-		if files == nil {
-			files = make(map[string][]byte, len(updates))
-		}
-		fileNames := maps.Clone(base.reader.fileNames)
-		for name, data := range updates {
-			files[name] = data
-			fileNames[name] = true
-		}
-		copied := *base.reader
-		copied.files = files
-		copied.fileNames = fileNames
-		copied.resources = e.runtimeResources
-		reader = &copied
+		setupCopy()
 	}
 	restoreInPlace := func() {
 		if !inPlace {
@@ -657,13 +740,36 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 				}
 			}
 		}
+		for name, backup := range pageHeaderBackups {
+			if backup.existed {
+				reader.pageHeaderCache[name] = backup.content
+			}
+		}
+		for name, backup := range resFileBackups {
+			if backup.existed {
+				reader.resFileCache[name] = backup.parsed
+			}
+		}
+	}
+	if versionChanged && base.reader.versionInfo != nil {
+		oldInfo := base.reader.versionInfo
+		updatedVersion, vErr := reader.readDocumentVersionContext(ctx, oldInfo.ID, oldInfo.Location)
+		if vErr != nil {
+			restoreInPlace()
+			return vErr
+		}
+		updatedVersion.Index, updatedVersion.Current = oldInfo.Index, oldInfo.Current
+		reader.versionInfo = &updatedVersion
+		if updatedVersion.DocRoot != oldInfo.DocRoot {
+			reader.documentRoot = updatedVersion.DocRoot
+			reader.RootDir = path.Dir(updatedVersion.DocRoot)
+			docChanged = true
+		}
 	}
 	doc := base.document
 	if docChanged {
-		probe := *reader
-		probe.doc = nil
 		var docErr error
-		doc, docErr = probe.docStructureContext(ctx)
+		doc, docErr = reader.parseDocumentOnlyContext(ctx)
 		if docErr != nil {
 			restoreInPlace()
 			return docErr
@@ -671,6 +777,26 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 		if doc.Annotations != base.document.Annotations {
 			annChanged = true
 		}
+		if !slices.Equal(doc.CommonData.PublicRes, base.document.CommonData.PublicRes) || !slices.Equal(doc.CommonData.DocumentRes, base.document.CommonData.DocumentRes) {
+			docResDirty = true
+			if inPlace {
+				restoreInPlace()
+				inPlace = false
+				backups = nil
+				pageHeaderBackups = nil
+				resFileBackups = nil
+				setupCopy()
+			}
+		}
+	}
+	if docResDirty {
+		if err := reader.reloadDocumentResourcesContext(ctx, doc); err != nil {
+			restoreInPlace()
+			return err
+		}
+	} else if len(dirtyResFiles) != 0 {
+		reader.imageCatalog = nil
+		reader.resourceInfoCache = nil
 	}
 	newAnnFiles, newPageAnnFiles := reader.annotationFiles, reader.pageAnnotFiles
 	if annChanged {
@@ -678,6 +804,7 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 		probe.doc = doc
 		probe.annotationFiles = nil
 		probe.pageAnnotFiles = nil
+		probe.pageAnnotCanon = nil
 		_, _ = probe.annotationIndexContext(ctx, doc)
 		if err := ctx.Err(); err != nil {
 			restoreInPlace()
@@ -716,11 +843,17 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 		return err
 	}
 	reader.doc = doc
+	if docChanged {
+		reader.docPageIDs, reader.docPageIDsDoc, reader.docPageIDsLen = nil, nil, 0
+	}
 	if annChanged {
 		reader.annotationFiles = newAnnFiles
 		reader.pageAnnotFiles = newPageAnnFiles
+		reader.pageAnnotCanon = nil
 		reader.Annots = nil
 		reader.pageAnnotsLoaded = nil
+		reader.annotCanon = nil
+		reader.annotCanonLen = 0
 	} else if len(reader.Annots) != 0 || len(reader.pageAnnotsLoaded) != 0 {
 		var dirtyPages []string
 		for name := range updates {
@@ -737,6 +870,8 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 				delete(reader.Annots, pageID)
 				delete(reader.pageAnnotsLoaded, pageID)
 			}
+			reader.annotCanon = nil
+			reader.annotCanonLen = 0
 		}
 	}
 	if docChanged || attChanged {
@@ -745,6 +880,17 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 	if docChanged || tagChanged {
 		after.customTagCountReady = false
 		after.richTextTagKnown = false
+	}
+	if docResDirty || len(dirtyResFiles) != 0 {
+		after.pageResLoaded = false
+		after.pageResList = nil
+		e.fontRenderer = nil
+		e.fontMetrics = make(map[string]FontMetrics)
+	}
+	if appendOnly {
+		after.recordAppendOnlyFiles(updates)
+	} else {
+		after.mayShrinkResources = true
 	}
 	after.reader, after.document = reader, doc
 	e.resources = resources
@@ -766,11 +912,29 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 						}
 					}
 				}
+				for name, backup := range pageHeaderBackups {
+					if backup.existed {
+						reader.pageHeaderCache[name] = backup.content
+					}
+				}
+				for name, backup := range resFileBackups {
+					if backup.existed {
+						reader.resFileCache[name] = backup.parsed
+					}
+				}
 				reader.doc = prevDoc
+				reader.docPageIDs, reader.docPageIDsDoc, reader.docPageIDsLen = nil, nil, 0
 				reader.annotationFiles = prevAnnFiles
 				reader.pageAnnotFiles = prevPageAnnFiles
+				reader.pageAnnotCanon = nil
 				reader.Annots = nil
 				reader.pageAnnotsLoaded = nil
+				reader.annotCanon = nil
+				reader.annotCanonLen = 0
+				if len(resFileBackups) != 0 {
+					e.fontRenderer = nil
+					e.fontMetrics = make(map[string]FontMetrics)
+				}
 				e.source = before
 			}
 			change.redo = func(e *Editor) {
@@ -778,11 +942,25 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 					reader.files[name] = data
 					reader.fileNames[name] = true
 				}
+				for name := range pageHeaderBackups {
+					delete(reader.pageHeaderCache, name)
+				}
+				for name := range resFileBackups {
+					delete(reader.resFileCache, name)
+				}
 				reader.doc = doc
+				reader.docPageIDs, reader.docPageIDsDoc, reader.docPageIDsLen = nil, nil, 0
 				reader.annotationFiles = newAnnFiles
 				reader.pageAnnotFiles = newPageAnnFiles
+				reader.pageAnnotCanon = nil
 				reader.Annots = nil
 				reader.pageAnnotsLoaded = nil
+				reader.annotCanon = nil
+				reader.annotCanonLen = 0
+				if len(resFileBackups) != 0 {
+					e.fontRenderer = nil
+					e.fontMetrics = make(map[string]FontMetrics)
+				}
 				e.source = &after
 			}
 		} else {
@@ -798,7 +976,7 @@ func (e *Editor) commitAnnotationPartsContext(ctx context.Context, base *editorS
 // 入参: base 原包, parts 待写入条目
 // 返回: bool 是否允许走增量提交快路径
 func canCommitIncrementalParts(base *editorSource, parts map[string][]byte) bool {
-	if base == nil || base.reader == nil || base.reader.OFD == nil || base.document == nil || base.reader.fileNames == nil || base.reader.versionInfo != nil || len(parts) == 0 {
+	if base == nil || base.reader == nil || base.reader.OFD == nil || base.document == nil || base.reader.fileNames == nil || len(parts) == 0 {
 		return false
 	}
 	reader := base.reader
@@ -809,22 +987,6 @@ func canCommitIncrementalParts(base *editorSource, parts map[string][]byte) bool
 		}
 		if clean == "OFD.xml" || !validPackagePath(clean) {
 			return false
-		}
-		if reader.resFileCache[clean] != nil || reader.resourcesRead[clean] {
-			return false
-		}
-		if _, isPage := reader.pageHeaderCache[clean]; isPage {
-			return false
-		}
-		for _, res := range base.document.CommonData.PublicRes {
-			if cleanPackagePath(reader.ResPath(res)) == clean {
-				return false
-			}
-		}
-		for _, res := range base.document.CommonData.DocumentRes {
-			if cleanPackagePath(reader.ResPath(res)) == clean {
-				return false
-			}
 		}
 	}
 	return true
@@ -864,6 +1026,7 @@ func (e *Editor) commitAnnotationPartsFullContext(ctx context.Context, base *edi
 	after.attachmentIDs = nil
 	after.customTagCountReady = false
 	after.richTextTagKnown = false
+	after.mayShrinkResources = true
 	resources := e.resources
 	if before == nil {
 		resources = slices.Clone(resources)

@@ -15,7 +15,9 @@
 package ofdgo
 
 import (
+	"bytes"
 	"maps"
+	"reflect"
 	"slices"
 )
 
@@ -41,7 +43,7 @@ func (e *Editor) Changes() EditorChanges {
 func (e *Editor) Transaction(edit func(*Editor) error) error {
 	before := *e
 	before.Info = cloneEditorData(e.Info)
-	next := e.transactionSnapshot()
+	next := e.transactionSnapshotSharedSource()
 	next.history, next.historyIndex, next.historyLimit = nil, 0, 0
 	pending := &EditorChanges{}
 	next.transactionChanges = pending
@@ -50,6 +52,7 @@ func (e *Editor) Transaction(edit func(*Editor) error) error {
 	defer func() {
 		if !committed {
 			*e = before
+			e.rollbackLoadedSourcePages()
 		}
 	}()
 	if err := edit(e); err != nil {
@@ -158,6 +161,13 @@ type editorChange struct {
 	changes EditorChanges
 }
 
+// editorOriginChange 记录单次按页增量事务中发生变动的单个对象原文映射
+type editorOriginChange struct {
+	id      string
+	existed bool
+	value   *editorObjectOrigin
+}
+
 // merge 合并同一事务中的变化范围
 // 入参: change 待合并的变化
 func (c *EditorChanges) merge(change EditorChanges) {
@@ -204,10 +214,37 @@ func (e *Editor) transactionState() Editor {
 	return next
 }
 
+// transactionSnapshotSharedSource 复制顶层容器并共享只追加的原始页面解析缓存
+// 返回: Editor 独立事务状态
+func (e *Editor) transactionSnapshotSharedSource() Editor {
+	next := e.transactionStateSharedSource()
+	next.pages = slices.Clone(e.pages)
+	return next
+}
+
+// transactionStateSharedSource 复制文档与资源容器，不克隆只追加的原始页面与对象缓存
+// 返回: Editor 共享原始页面缓存的事务状态
+func (e *Editor) transactionStateSharedSource() Editor {
+	next := *e
+	next.Info = cloneEditorData(e.Info)
+	next.resources = slices.Clone(e.resources)
+	next.fonts, next.images, next.resourceID, next.promoted = maps.Clone(e.fonts), maps.Clone(e.images), maps.Clone(e.resourceID), maps.Clone(e.promoted)
+	next.origins = maps.Clone(e.origins)
+	next.removedPages = maps.Clone(e.removedPages)
+	next.structureRemaps = maps.Clone(e.structureRemaps)
+	next.fontMetrics = maps.Clone(e.fontMetrics)
+	next.objectIndices = nil
+	if e.source != nil {
+		source := *e.source
+		next.source = &source
+	}
+	return next
+}
+
 // restoreTransaction 恢复文档状态，保留历史和配置，仅在同一资源视图内共享缓存
 // 入参: state 文档状态
 func (e *Editor) restoreTransaction(state Editor) {
-	state = state.transactionSnapshot()
+	state = state.transactionSnapshotSharedSource()
 	e.restoreTransactionState(state)
 }
 
@@ -230,6 +267,7 @@ func (e *Editor) restoreTransactionState(state Editor) {
 	state.encryption, state.output, state.OnWriteProgress = e.encryption, e.output, e.OnWriteProgress
 	state.saveTarget, state.sourceFile = e.saveTarget, e.sourceFile
 	*e = state
+	e.syncLoadedSourcePages()
 }
 
 // sameResourceView 判断文档和资源来源是否一致，新建文档首次封装不改变已注册资源
@@ -268,7 +306,7 @@ func (e *Editor) retainDocumentResources(source *Editor) {
 	e.fontRenderer, e.fontMetrics = source.fontRenderer, source.fontMetrics
 }
 
-// recordTransaction 记录事务快照，在各自资源视图中保留后续注册的资源
+// recordTransaction 记录事务快照，单页对象事务仅存按页增量，结构级事务保留完整快照
 // 入参: before 修改前的文档状态, changes 可选的事务变化范围
 func (e *Editor) recordTransaction(before Editor, changes ...EditorChanges) {
 	scope := EditorChanges{All: true}
@@ -276,24 +314,52 @@ func (e *Editor) recordTransaction(before Editor, changes ...EditorChanges) {
 		scope = changes[0]
 	}
 	if change := e.recordChangeScope(scope); change != nil {
-		if !scope.All && len(scope.Pages) != 0 && len(before.pages) == len(e.pages) && e.sameDocument(&before) {
-			beforePages, afterPages := make([]PageContent, len(scope.Pages)), make([]PageContent, len(scope.Pages))
-			for i, index := range scope.Pages {
-				beforePages[i], afterPages[i] = before.pages[index], e.pages[index]
+		if e.canRecordPageDelta(&before, scope) {
+			indexes := slices.Clone(scope.Pages)
+			beforePages, afterPages := make([]PageContent, len(indexes)), make([]PageContent, len(indexes))
+			for i, index := range indexes {
+				page := before.pages[index]
+				if isUnloadedSourcePage(page) && e.source != nil {
+					if src := e.source.pages[page.ID]; src != nil && src.original != nil {
+						page = editorSourceInitialPage(src)
+					}
+				}
+				beforePages[i], afterPages[i] = page, e.pages[index]
 			}
-			after := e.transactionState()
-			before.pages, after.pages, before.history, after.history = nil, nil, nil, nil
+			beforeOrigins, afterOrigins := diffEditorOrigins(before.origins, e.origins)
 			change.undo = func(e *Editor) {
-				after.retainDocumentResources(e)
-				e.restorePageTransaction(before, scope.Pages, beforePages)
+				e.applyPageDelta(indexes, beforePages, beforeOrigins)
 			}
 			change.redo = func(e *Editor) {
-				before.retainDocumentResources(e)
-				e.restorePageTransaction(after, scope.Pages, afterPages)
+				e.applyPageDelta(indexes, afterPages, afterOrigins)
 			}
 			return
 		}
-		after := e.transactionSnapshot()
+		if !scope.All && len(scope.Pages) != 0 && len(before.pages) == len(e.pages) && e.sameDocument(&before) {
+			indexes := slices.Clone(scope.Pages)
+			beforePages, afterPages := make([]PageContent, len(indexes)), make([]PageContent, len(indexes))
+			for i, index := range indexes {
+				page := before.pages[index]
+				if isUnloadedSourcePage(page) && e.source != nil {
+					if src := e.source.pages[page.ID]; src != nil && src.original != nil {
+						page = editorSourceInitialPage(src)
+					}
+				}
+				beforePages[i], afterPages[i] = page, e.pages[index]
+			}
+			after := e.transactionStateSharedSource()
+			before.pages, after.pages, before.history, after.history = nil, nil, nil, nil
+			change.undo = func(e *Editor) {
+				after.retainDocumentResources(e)
+				e.restorePageTransaction(before, indexes, beforePages)
+			}
+			change.redo = func(e *Editor) {
+				before.retainDocumentResources(e)
+				e.restorePageTransaction(after, indexes, afterPages)
+			}
+			return
+		}
+		after := e.transactionSnapshotSharedSource()
 		before.history, after.history = nil, nil
 		change.undo = func(e *Editor) {
 			after.retainDocumentResources(e)
@@ -306,15 +372,104 @@ func (e *Editor) recordTransaction(before Editor, changes ...EditorChanges) {
 	}
 }
 
-// restorePageTransaction 仅替换事务涉及的页面，复用当前独占页面表
+// restorePageTransaction 仅替换事务涉及的页面，复用当前独占页面表与共享原始页面缓存
 // 入参: state 文档状态, indexes 受影响页码, pages 对应页面快照
 func (e *Editor) restorePageTransaction(state Editor, indexes []int, pages []PageContent) {
-	state = state.transactionState()
+	state = state.transactionStateSharedSource()
 	state.pages = e.pages
 	for i, index := range indexes {
 		state.pages[index] = pages[i]
 	}
 	e.restoreTransactionState(state)
+}
+
+// canRecordPageDelta 判断事务是否仅影响局部页面及对象原文，可采用按页增量快照
+// 入参: before 修改前的文档状态, scope 事务影响范围
+// 返回: bool 是否允许记录按页增量快照
+func (e *Editor) canRecordPageDelta(before *Editor, scope EditorChanges) bool {
+	if scope.All || len(scope.Pages) == 0 || len(before.pages) != len(e.pages) || !e.sameResourceView(before) {
+		return false
+	}
+	for _, index := range scope.Pages {
+		if index < 0 || index >= len(e.pages) || before.pages[index].ID != e.pages[index].ID {
+			return false
+		}
+	}
+	if !sameEditorSourceMeta(before.source, e.source) || !reflect.DeepEqual(before.Info, e.Info) {
+		return false
+	}
+	if !maps.Equal(before.removedPages, e.removedPages) || !sameStructureRemaps(before.structureRemaps, e.structureRemaps) {
+		return false
+	}
+	if !bytes.Equal(before.outlines, e.outlines) || before.pdfDestinations != e.pdfDestinations || len(before.optimizedImages) != len(e.optimizedImages) {
+		return false
+	}
+	return len(before.resources) <= len(e.resources)
+}
+
+// applyPageDelta 应用按页增量快照，仅替换变动页面和变动的原文映射键
+// 入参: indexes 受影响页码, pages 目标页面内容, origins 变动的原文映射项
+func (e *Editor) applyPageDelta(indexes []int, pages []PageContent, origins []editorOriginChange) {
+	for i, index := range indexes {
+		page := pages[i]
+		if isUnloadedSourcePage(page) && e.source != nil {
+			if src := e.source.pages[page.ID]; src != nil && src.original != nil {
+				page = editorSourceInitialPage(src)
+			}
+		}
+		e.pages[index] = page
+	}
+	if len(origins) != 0 {
+		if e.origins == nil {
+			e.origins = make(map[string]*editorObjectOrigin, len(origins))
+		}
+		for _, item := range origins {
+			if item.existed {
+				e.origins[item.id] = item.value
+			} else {
+				delete(e.origins, item.id)
+			}
+		}
+	}
+}
+
+// rollbackLoadedSourcePages 回滚失败事务期间惰性加载进共享缓存的原始页面与对象映射
+func (e *Editor) rollbackLoadedSourcePages() {
+	if e.source == nil || len(e.source.pages) == 0 {
+		return
+	}
+	for i := range e.pages {
+		page := e.pages[i]
+		if !isUnloadedSourcePage(page) {
+			continue
+		}
+		src := e.source.pages[page.ID]
+		if src == nil || src.original == nil {
+			continue
+		}
+		e.source.pages[page.ID] = &editorSourcePage{ref: src.ref}
+		for id := range src.nodes {
+			if cur := e.source.origins[id]; cur != nil && cur.page == src {
+				delete(e.source.origins, id)
+			}
+		}
+	}
+}
+
+// syncLoadedSourcePages 将恢复快照中的未加载空壳页与已加载的共享原始页面缓存对齐
+func (e *Editor) syncLoadedSourcePages() {
+	if e.source == nil || len(e.source.pages) == 0 {
+		return
+	}
+	for i := range e.pages {
+		page := e.pages[i]
+		if !isUnloadedSourcePage(page) {
+			continue
+		}
+		if src := e.source.pages[page.ID]; src != nil && src.original != nil {
+			e.pages[i] = editorSourceInitialPage(src)
+		}
+	}
 }
 
 // recordChange 分配修订标识并为已完成的有效修改预留记录
@@ -382,4 +537,102 @@ func moveEditorItem[T any](items []T, from, to int) {
 		copy(items[to+1:from+1], items[to:from])
 	}
 	items[to] = item
+}
+
+// isUnloadedSourcePage 判断页面是否为尚未惰性解析的原文档空壳占位
+// 入参: page 页面内容
+// 返回: bool 是否为未加载原始页面
+func isUnloadedSourcePage(page PageContent) bool {
+	return page.ID != "" && page.XMLName.Local == "" && page.Area == (PageArea{}) && len(page.Content.Layer) == 0 && len(page.Actions) == 0 && len(page.Template) == 0 && len(page.PageRes) == 0 && len(page.pageResources) == 0
+}
+
+// editorSourceInitialPage 根据已加载的原始页面记录构建未修改态页面内容
+// 入参: source 已加载的原始页面记录
+// 返回: PageContent 保留初始切片头的页面内容
+func editorSourceInitialPage(source *editorSourcePage) PageContent {
+	page := *source.original
+	page.Content.Layer = source.initialLayers
+	page.Actions = source.initialActions
+	return page
+}
+
+// diffEditorOrigins 计算事务前后对象原文映射的最小差异集合
+// 入参: before 修改前映射, after 修改后映射
+// 返回: []editorOriginChange 撤销变更列表, []editorOriginChange 重做变更列表
+func diffEditorOrigins(before, after map[string]*editorObjectOrigin) ([]editorOriginChange, []editorOriginChange) {
+	var undo, redo []editorOriginChange
+	for id, value := range after {
+		if old, ok := before[id]; !ok || old != value {
+			undo = append(undo, editorOriginChange{id: id, existed: ok, value: old})
+			redo = append(redo, editorOriginChange{id: id, existed: true, value: value})
+		}
+	}
+	for id, old := range before {
+		if _, ok := after[id]; !ok {
+			undo = append(undo, editorOriginChange{id: id, existed: true, value: old})
+			redo = append(redo, editorOriginChange{id: id, existed: false})
+		}
+	}
+	return undo, redo
+}
+
+// sameEditorSourceMeta 判断两个文档来源快照在包结构与元数据层面是否一致
+// 入参: a 事务前来源, b 事务后来源
+// 返回: bool 是否未发生包结构或文档级元数据变更
+func sameEditorSourceMeta(a, b *editorSource) bool {
+	if a == b {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	if a.reader != b.reader || a.document != b.document || a.directory != b.directory || a.fromNew != b.fromNew || a.fallbackDocID != b.fallbackDocID {
+		return false
+	}
+	if (a.pages == nil) != (b.pages == nil) || len(a.pages) != len(b.pages) {
+		return false
+	}
+	if !reflect.DeepEqual(a.info, b.info) || !maps.Equal(a.annotationPages, b.annotationPages) || !maps.Equal(a.retiredAttachments, b.retiredAttachments) || !maps.Equal(a.removedAttachments, b.removedAttachments) {
+		return false
+	}
+	if len(a.annotationStates) != len(b.annotationStates) || len(a.structureObjects) != len(b.structureObjects) || len(a.structureStarts) != len(b.structureStarts) {
+		return false
+	}
+	for k, av := range a.annotationStates {
+		if bv, ok := b.annotationStates[k]; !ok || !maps.Equal(av, bv) {
+			return false
+		}
+	}
+	for k, av := range a.structureObjects {
+		if bv, ok := b.structureObjects[k]; !ok || !maps.Equal(av, bv) {
+			return false
+		}
+	}
+	for k, av := range a.structureStarts {
+		if bv, ok := b.structureStarts[k]; !ok || !maps.Equal(av, bv) {
+			return false
+		}
+	}
+	return true
+}
+
+// sameStructureRemaps 比较两个标引重映射表是否一致
+// 入参: a 事务前重映射表, b 事务后重映射表
+// 返回: bool 是否一致
+func sameStructureRemaps(a, b map[string][]map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if !maps.Equal(av[i], bv[i]) {
+				return false
+			}
+		}
+	}
+	return true
 }

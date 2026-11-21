@@ -15,8 +15,10 @@
 package ofdgo
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
+	"compress/flate"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -26,12 +28,18 @@ import (
 	"maps"
 	"path"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
+
+// editorMaxIDFastLimit 限制标识字节快扫在内存中缓存的单文件字节上限
+const editorMaxIDFastLimit = 4 << 20
 
 // ObjectCapabilities 已有对象可执行的操作，Reason说明受限原因
 // Update表示完整替换内容，ReplaceFont表示可显式替换文字字体，Transform表示保留文字定位的几何变换，Order仅限同一图层或末级页块
@@ -116,8 +124,9 @@ func (r *Reader) EditorContext(ctx context.Context) (*Editor, error) {
 	e.pdfDestinations = r.pdfDestinations.clone()
 	e.encryption = r.encryption
 	directory := cleanPackagePath(reader.RootDir)
-	e.source = &editorSource{reader: reader, document: doc, info: cloneEditorData(*info), fallbackDocID: e.Info.DocID, directory: directory, pages: make(map[string]*editorSourcePage, len(doc.Pages.Page)), origins: make(map[string]*editorObjectOrigin)}
+	e.source = &editorSource{reader: reader, document: doc, info: cloneEditorData(*info), fallbackDocID: e.Info.DocID, directory: directory, pages: make(map[string]*editorSourcePage, len(doc.Pages.Page)), origins: make(map[string]*editorObjectOrigin), initialFiles: maps.Clone(reader.files)}
 	e.Info, e.maxID = cloneEditorData(*info), maximum
+	e.ownedReader, e.ownedOwner, e.ownedRevision = reader, e, e.revision
 	e.pages = make([]PageContent, len(doc.Pages.Page))
 	sourcePages := make([]editorSourcePage, len(doc.Pages.Page))
 	for i, page := range doc.Pages.Page {
@@ -141,11 +150,95 @@ func (r *Reader) EditorContext(ctx context.Context) (*Editor, error) {
 // 入参: index 页面索引
 // 返回: PageCapabilities 操作能力, error 错误信息
 func (e *Editor) PageCapabilities(index int) (PageCapabilities, error) {
+	return e.PageCapabilitiesContext(context.Background(), index)
+}
+
+// PageCapabilitiesContext 获取页面操作范围并响应取消，默认RGB或文档级颜色空间命中时常数时间返回
+// 入参: ctx 取消上下文, index 页面索引
+// 返回: PageCapabilities 操作能力, error 索引、读取或取消错误
+func (e *Editor) PageCapabilitiesContext(ctx context.Context, index int) (PageCapabilities, error) {
+	if err := ctx.Err(); err != nil {
+		return PageCapabilities{}, err
+	}
 	if index < 0 || index >= len(e.pages) {
 		return PageCapabilities{}, fmt.Errorf("page index %d out of range", index)
 	}
-	defer e.bindPageIndex(index)()
-	return PageCapabilities{Insert: e.sourceRGB(), Copy: true, Delete: true, Move: true, Resize: true}, nil
+	if insert, resolved := e.docDefaultRGB(); resolved {
+		return PageCapabilities{Insert: insert, Copy: true, Delete: true, Move: true, Resize: true}, nil
+	}
+	restore, err := e.bindPageIndexContext(ctx, index)
+	if err != nil {
+		return PageCapabilities{}, err
+	}
+	defer restore()
+	insert, err := e.sourceRGBContext(ctx)
+	if err != nil {
+		return PageCapabilities{}, err
+	}
+	return PageCapabilities{Insert: insert, Copy: true, Delete: true, Move: true, Resize: true}, nil
+}
+
+// PageCapabilitiesBatchContext 批量获取页面操作范围并响应取消，文档级默认颜色空间可直接批量返回
+// 入参: ctx 取消上下文, indexes 页面索引列表
+// 返回: []PageCapabilities 对应页面的操作能力列表, error 索引、读取或取消错误
+func (e *Editor) PageCapabilitiesBatchContext(ctx context.Context, indexes []int) ([]PageCapabilities, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(indexes) == 0 {
+		return nil, nil
+	}
+	if insert, resolved := e.docDefaultRGB(); resolved {
+		capability := PageCapabilities{Insert: insert, Copy: true, Delete: true, Move: true, Resize: true}
+		result := make([]PageCapabilities, len(indexes))
+		for i, index := range indexes {
+			if i&4095 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
+			if index < 0 || index >= len(e.pages) {
+				return nil, fmt.Errorf("page index %d out of range", index)
+			}
+			result[i] = capability
+		}
+		return result, ctx.Err()
+	}
+	for i, index := range indexes {
+		if i&4095 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		if index < 0 || index >= len(e.pages) {
+			return nil, fmt.Errorf("page index %d out of range", index)
+		}
+	}
+	if e.source != nil && len(indexes) >= 32 {
+		refs := make([]Page, 0, len(indexes))
+		for _, index := range indexes {
+			if len(e.pages[index].pageResources) > 0 {
+				continue
+			}
+			if source := e.source.pages[e.pages[index].ID]; source != nil && source.original == nil {
+				refs = append(refs, source.ref)
+			}
+		}
+		if len(refs) >= 32 {
+			if err := e.source.reader.preloadPageHeadersContext(ctx, refs); err != nil {
+				return nil, err
+			}
+		}
+	}
+	result := make([]PageCapabilities, len(indexes))
+	for i, index := range indexes {
+		capability, err := e.PageCapabilitiesContext(ctx, index)
+		if err != nil {
+			return nil, err
+		}
+		result[i] = capability
+	}
+	return result, ctx.Err()
 }
 
 // ObjectCapabilities 获取对象可执行的操作，不支持的内容保持原文，不强制转换
@@ -211,6 +304,10 @@ type editorSource struct {
 	richTextTagKnown    bool
 	customTagCount      int
 	customTagCountReady bool
+	scanCache           *renderCache[editorSourceScanKey, editorScanValue]
+	initialFiles        map[string][]byte
+	appendOnlyFiles     map[string][]byte
+	mayShrinkResources  bool
 }
 
 // editorObjectOrigin 保留原对象的XML语义，供复制和局部更新复用
@@ -234,6 +331,104 @@ type editorSourcePage struct {
 	initialActions []Action
 	nodes          map[string]*editorXML
 	repaired       bool
+}
+
+// editorMaxIDScanner 复用工作协程的解压器与读缓冲以加速包内XML标识扫描
+type editorMaxIDScanner struct {
+	flate io.ReadCloser
+	buf   bytes.Buffer
+}
+
+// close 释放复用的解压器资源
+func (s *editorMaxIDScanner) close() {
+	if s.flate != nil {
+		_ = s.flate.Close()
+		s.flate = nil
+	}
+}
+
+// scan 扫描单个包内条目的最大标识，标准UTF-8 XML走字节快扫并自动回退标准解码器
+// 入参: reader 来源阅读器, name 包内路径, progress 进度回调，并行工作协程传nil
+// 返回: uint64 最大标识, error 读取或解析错误
+func (s *editorMaxIDScanner) scan(reader *Reader, name string, progress editorProgress) (uint64, error) {
+	clean := cleanPackagePath(name)
+	if data, ok := reader.files[clean]; ok {
+		if id, fast := scanFastOFDXMLMaxID(data); fast {
+			return id, nil
+		}
+		return editorXMLMaxID(bytes.NewReader(data))
+	}
+	limit := reader.entryLimit()
+	if zf, ok := reader.packageFile(clean); ok && (zf.Method == zip.Deflate || zf.Method == zip.Store) && zf.UncompressedSize64 <= editorMaxIDFastLimit && (limit <= 0 || zf.UncompressedSize64 <= uint64(limit)) {
+		if raw, openErr := zf.OpenRaw(); openErr == nil {
+			var src io.Reader = raw
+			if zf.Method == zip.Deflate {
+				if s.flate == nil {
+					s.flate = flate.NewReader(raw)
+				} else {
+					_ = s.flate.(flate.Resetter).Reset(raw, nil)
+				}
+				src = s.flate
+			}
+			if s.buf.Cap() > 1<<20 {
+				s.buf = bytes.Buffer{}
+			} else {
+				s.buf.Reset()
+			}
+			maxRead := int64(editorMaxIDFastLimit)
+			if limit > 0 && limit < maxRead {
+				maxRead = limit
+			}
+			n, copyErr := io.Copy(&s.buf, io.LimitReader(src, maxRead+1))
+			if copyErr == nil && n <= maxRead {
+				data := s.buf.Bytes()
+				if id, fast := scanFastOFDXMLMaxID(data); fast {
+					return id, nil
+				}
+				return editorXMLMaxID(bytes.NewReader(data))
+			}
+			if limit > 0 && n > limit {
+				return 0, fmt.Errorf("package entry %s exceeds size limit (%d bytes)", clean, limit)
+			}
+		}
+	}
+	input, err := reader.openFile(clean)
+	if err != nil {
+		return 0, err
+	}
+	defer input.Close()
+	if src := reader.encryptedSource(); src != nil && src.has(clean) {
+		if sz, ok := src.size(clean); ok && sz <= editorMaxIDFastLimit && (limit <= 0 || sz <= uint64(limit)) {
+			if s.buf.Cap() > 1<<20 {
+				s.buf = bytes.Buffer{}
+			} else {
+				s.buf.Reset()
+			}
+			maxRead := int64(editorMaxIDFastLimit)
+			if limit > 0 && limit < maxRead {
+				maxRead = limit
+			}
+			n, copyErr := io.Copy(&s.buf, io.LimitReader(input, maxRead+1))
+			if copyErr != nil {
+				return 0, copyErr
+			}
+			if n <= maxRead {
+				data := s.buf.Bytes()
+				if id, fast := scanFastOFDXMLMaxID(data); fast {
+					return id, nil
+				}
+				return editorXMLMaxID(bytes.NewReader(data))
+			}
+		}
+	}
+	return editorXMLMaxID(&editorProgressReader{Reader: input, progress: progress, stage: "ids"})
+}
+
+// editorMaxIDChunkResult 汇总单批并行标识扫描的局部最大值与首个错误
+type editorMaxIDChunkResult struct {
+	maxID      uint64
+	archiveMax uint64
+	err        error
 }
 
 // editError 将操作受限原因转为错误，保留可供调用方识别的缺字诊断
@@ -281,31 +476,170 @@ func (e *Editor) sourceMaxID(progress editorProgress) (uint64, error) {
 		return e.maxID, nil
 	}
 	reader := e.source.reader
-	names := make(map[string]bool)
+	maximum := e.maxID
+	enc := reader.encryptedSource()
+	cachedArchiveMax, archiveCached := reader.maxIDCache.get(reader.archiveID, enc)
+	if archiveCached {
+		maximum = max(maximum, cachedArchiveMax)
+		var scanner editorMaxIDScanner
+		defer scanner.close()
+		for name := range reader.files {
+			if err := progress.report("ids", 0, 0); err != nil {
+				return 0, err
+			}
+			if strings.HasSuffix(name, "/") || isNonXMLPackageFile(name) {
+				continue
+			}
+			id, err := scanner.scan(reader, name, progress)
+			if err != nil {
+				return 0, fmt.Errorf("scan IDs in %s: %w", name, err)
+			}
+			maximum = max(maximum, id)
+		}
+		return maximum, nil
+	}
+	names := make(map[string]bool, len(reader.fileIndex)+len(reader.files))
 	for name := range reader.fileIndex {
 		names[name] = true
 	}
 	for name := range reader.files {
 		names[name] = true
 	}
-	maximum := e.maxID
-	for name := range names {
-		if err := progress.report("ids", 0, 0); err != nil {
-			return 0, err
+	if enc != nil {
+		for _, name := range enc.names() {
+			names[name] = true
 		}
+	}
+	pending := make([]string, 0, len(names))
+	for name := range names {
 		if strings.HasSuffix(name, "/") || isNonXMLPackageFile(name) {
 			continue
 		}
-		input, err := reader.openFile(name)
-		if err != nil {
+		pending = append(pending, name)
+	}
+	cacheableArchive := reader.archiveID != 0 || enc != nil
+	if cacheableArchive {
+		for name := range reader.files {
+			clean := cleanPackagePath(name)
+			if _, inZip := reader.fileIndex[clean]; inZip || enc.has(clean) {
+				cacheableArchive = false
+				break
+			}
+		}
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if e.runtimeResources != nil && e.runtimeResources.options.Parallelism > 0 && e.runtimeResources.options.Parallelism < workers {
+		workers = e.runtimeResources.options.Parallelism
+	}
+	archiveMax := uint64(0)
+	if workers <= 1 || len(pending) < 32 {
+		var scanner editorMaxIDScanner
+		defer scanner.close()
+		for _, name := range pending {
+			if err := progress.report("ids", 0, 0); err != nil {
+				return 0, err
+			}
+			id, err := scanner.scan(reader, name, progress)
+			if err != nil {
+				return 0, fmt.Errorf("scan IDs in %s: %w", name, err)
+			}
+			maximum = max(maximum, id)
+			if cacheableArchive {
+				if _, inFiles := reader.files[cleanPackagePath(name)]; !inFiles {
+					archiveMax = max(archiveMax, id)
+				}
+			}
+		}
+	} else {
+		if err := progress.report("ids", 0, 0); err != nil {
 			return 0, err
 		}
-		id, err := editorXMLMaxID(&editorProgressReader{Reader: input, progress: progress, stage: "ids"})
-		input.Close()
-		if err != nil {
-			return 0, fmt.Errorf("scan IDs in %s: %w", name, err)
+		if workers > len(pending)/16 {
+			workers = max(2, len(pending)/16)
 		}
-		maximum = max(maximum, id)
+		const chunkSize = 32
+		totalChunks := (len(pending) + chunkSize - 1) / chunkSize
+		results := make(chan editorMaxIDChunkResult, workers*2)
+		var next atomic.Int64
+		var canceled atomic.Bool
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for range workers {
+			go func() {
+				defer wg.Done()
+				var scanner editorMaxIDScanner
+				defer scanner.close()
+				for {
+					if canceled.Load() {
+						return
+					}
+					start := int(next.Add(chunkSize) - chunkSize)
+					if start >= len(pending) {
+						return
+					}
+					end := min(start+chunkSize, len(pending))
+					var chunkMax, chunkArchMax uint64
+					var chunkErr error
+					for idx := start; idx < end; idx++ {
+						if canceled.Load() {
+							return
+						}
+						name := pending[idx]
+						id, err := scanner.scan(reader, name, nil)
+						if err != nil {
+							chunkErr = fmt.Errorf("scan IDs in %s: %w", name, err)
+							break
+						}
+						chunkMax = max(chunkMax, id)
+						if cacheableArchive {
+							if _, inFiles := reader.files[cleanPackagePath(name)]; !inFiles {
+								chunkArchMax = max(chunkArchMax, id)
+							}
+						}
+					}
+					results <- editorMaxIDChunkResult{maxID: chunkMax, archiveMax: chunkArchMax, err: chunkErr}
+					if chunkErr != nil {
+						return
+					}
+				}
+			}()
+		}
+		go func() {
+			wg.Wait()
+			close(results)
+		}()
+		var firstErr error
+		received := 0
+		for res := range results {
+			received++
+			if firstErr == nil {
+				if res.err != nil {
+					firstErr = res.err
+					canceled.Store(true)
+				} else {
+					maximum = max(maximum, res.maxID)
+					archiveMax = max(archiveMax, res.archiveMax)
+					if received < totalChunks {
+						if err := progress.report("ids", 0, 0); err != nil {
+							firstErr = err
+							canceled.Store(true)
+						}
+					}
+				}
+			}
+		}
+		if firstErr != nil {
+			return 0, firstErr
+		}
+		if err := progress.report("ids", 0, 0); err != nil {
+			return 0, err
+		}
+	}
+	if cacheableArchive {
+		if reader.maxIDCache == nil {
+			reader.maxIDCache = &archiveMaxIDCache{}
+		}
+		reader.maxIDCache.put(reader.archiveID, enc, archiveMax)
 	}
 	return maximum, nil
 }
@@ -331,14 +665,53 @@ func (e *Editor) originalPage(index int) bool {
 	return e.source != nil && index >= 0 && index < len(e.pages) && e.source.pages[e.pages[index].ID] != nil
 }
 
+// docDefaultRGB 常数时间判定文档默认颜色空间是否已在文档级解析为8位RGB
+// 返回: bool 是否为8位RGB, bool 是否已在文档级确定
+func (e *Editor) docDefaultRGB() (bool, bool) {
+	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
+		return true, true
+	}
+	id := formatUnitID(uint64(e.source.document.CommonData.DefaultCS))
+	if space, ok := e.source.reader.resolveColorSpaceScoped(nil, id); ok {
+		return isDefaultRGBColorSpace(space), true
+	}
+	return false, false
+}
+
 // sourceRGB 判断新建RGB对象能否直接使用文档默认颜色空间
 // 返回: bool 是否为8位RGB文档
 func (e *Editor) sourceRGB() bool {
-	if e.source == nil || e.source.document.CommonData.DefaultCS == 0 {
-		return true
+	if rgb, resolved := e.docDefaultRGB(); resolved {
+		return rgb
 	}
 	space, _ := e.sourceColorSpace(formatUnitID(uint64(e.source.document.CommonData.DefaultCS)))
-	return space != nil && space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0
+	return isDefaultRGBColorSpace(space)
+}
+
+// sourceRGBContext 按当前作用域与文档页级资源判断默认颜色空间是否为8位RGB并响应取消
+// 入参: ctx 取消上下文
+// 返回: bool 是否为8位RGB文档, error 读取或取消错误
+func (e *Editor) sourceRGBContext(ctx context.Context) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if rgb, resolved := e.docDefaultRGB(); resolved {
+		return rgb, nil
+	}
+	id := formatUnitID(uint64(e.source.document.CommonData.DefaultCS))
+	if space, ok := e.source.reader.resolveColorSpaceScoped(e.pageScope, id); ok {
+		return isDefaultRGBColorSpace(space), nil
+	}
+	list, err := e.ensureSourcePageResourcesContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, parsed := range list {
+		if space, ok := parsed.colorSpaces.get(id); ok {
+			return isDefaultRGBColorSpace(space), nil
+		}
+	}
+	return false, nil
 }
 
 // repairSourceObjectIDs 按实际节点区分重复对象，只修复没有引用歧义的编号
@@ -987,26 +1360,49 @@ func (e *Editor) bindParsedScope(local []*parsedRes) func() {
 // 入参: index 页面索引
 // 返回: func() 恢复原作用域的函数
 func (e *Editor) bindPageIndex(index int) func() {
+	restore, _ := e.bindPageIndexContext(context.Background(), index)
+	return restore
+}
+
+// bindPageIndexContext 按页面索引绑定所属页面的局部资源作用域并响应取消
+// 入参: ctx 取消上下文, index 页面索引
+// 返回: func() 恢复原作用域的函数, error 取消错误
+func (e *Editor) bindPageIndexContext(ctx context.Context, index int) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return func() {}, err
+	}
 	if index < 0 || index >= len(e.pages) {
-		return func() {}
+		return func() {}, nil
 	}
 	if len(e.pages[index].pageResources) > 0 {
-		return e.bindParsedScope(e.pages[index].pageResources)
+		return e.bindParsedScope(e.pages[index].pageResources), nil
 	}
 	if e.originalPage(index) {
 		if source := e.source.pages[e.pages[index].ID]; source != nil {
 			if source.original != nil && len(source.original.pageResources) > 0 {
-				return e.bindParsedScope(source.original.pageResources)
+				return e.bindParsedScope(source.original.pageResources), nil
 			}
 			reader := e.source.reader
-			if header, err := reader.readPageHeaderContext(context.Background(), source.ref); err == nil {
-				if pageRes, resErr := reader.collectPageResourcesContext(context.Background(), reader.ResPath(source.ref.BaseLoc), &header); resErr == nil && len(pageRes) > 0 {
-					return e.bindParsedScope(pageRes)
+			header, err := reader.readPageHeaderContext(ctx, source.ref)
+			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return func() {}, ctxErr
 				}
+				return func() {}, nil
+			}
+			pageRes, resErr := reader.collectPageResourcesContext(ctx, reader.ResPath(source.ref.BaseLoc), &header)
+			if resErr != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return func() {}, ctxErr
+				}
+				return func() {}, nil
+			}
+			if len(pageRes) > 0 {
+				return e.bindParsedScope(pageRes), nil
 			}
 		}
 	}
-	return func() {}
+	return func() {}, nil
 }
 
 // ensureSourcePageResourcesContext 按需收集源文档全部模板页与页面头部的PageRes解析结果
@@ -1268,9 +1664,7 @@ func editorXMLMaxID(input io.Reader) (uint64, error) {
 			continue
 		}
 		if !started {
-			switch node.Name.Local {
-			case "OFD", "Document", "Page", "Res", "PageAnnot", "Annotations", "Attachments", "CustomTags":
-			default:
+			if !isOFDMaxIDRoot([]byte(node.Name.Local)) {
 				return 0, nil
 			}
 			started = true
@@ -1284,6 +1678,280 @@ func editorXMLMaxID(input io.Reader) (uint64, error) {
 			}
 		}
 	}
+}
+
+// isDefaultRGBColorSpace 判断颜色空间是否为可直接用于新建RGB对象的8位无配置RGB空间
+// 入参: space 颜色空间定义
+// 返回: bool 是否为默认8位RGB空间
+func isDefaultRGBColorSpace(space *ColorSpace) bool {
+	return space != nil && space.Type == "RGB" && space.Profile == "" && (space.BitsPerComponent == 0 || space.BitsPerComponent == 8) && len(space.Palette) == 0
+}
+
+// isOFDMaxIDRoot 判断根元素本地名是否属于需要扫描标识的OFD结构文件
+// 入参: local 根元素本地名称字节
+// 返回: bool 是否属于OFD结构根元素
+func isOFDMaxIDRoot(local []byte) bool {
+	switch string(local) {
+	case "OFD", "Document", "Page", "Res", "PageAnnot", "Annotations", "Attachments", "CustomTags":
+		return true
+	default:
+		return false
+	}
+}
+
+// isFastXMLSpace 判断字节是否为XML标准空白字符
+// 入参: b 待判字节
+// 返回: bool 是否为XML空白
+func isFastXMLSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
+}
+
+// parseFastUint32 无分配解析ST_ID允许的十进制无符号32位整数
+// 入参: data 原始属性值字节
+// 返回: uint64 解析值, bool 是否有效
+func parseFastUint32(data []byte) (uint64, bool) {
+	start, end := 0, len(data)
+	for start < end && isFastXMLSpace(data[start]) {
+		start++
+	}
+	for end > start && isFastXMLSpace(data[end-1]) {
+		end--
+	}
+	if start >= end {
+		return 0, false
+	}
+	var value uint64
+	for i := start; i < end; i++ {
+		ch := data[i]
+		if ch < '0' || ch > '9' {
+			return 0, false
+		}
+		value = value*10 + uint64(ch-'0')
+		if value > maxUnitID {
+			return 0, false
+		}
+	}
+	return value, true
+}
+
+// parseFastXMLDeclEncoding 检查XML声明中的编码属性是否兼容UTF-8字节扫描
+// 入参: decl XML声明主体内容
+// 返回: bool 是否允许继续UTF-8快速扫描
+func parseFastXMLDeclEncoding(decl []byte) bool {
+	lower := bytes.ToLower(decl)
+	pos := bytes.Index(lower, []byte("encoding"))
+	if pos < 0 {
+		return true
+	}
+	i := pos + len("encoding")
+	for i < len(decl) && isFastXMLSpace(decl[i]) {
+		i++
+	}
+	if i >= len(decl) || decl[i] != '=' {
+		return false
+	}
+	i++
+	for i < len(decl) && isFastXMLSpace(decl[i]) {
+		i++
+	}
+	if i >= len(decl) || (decl[i] != '"' && decl[i] != '\'') {
+		return false
+	}
+	quote := decl[i]
+	i++
+	end := bytes.IndexByte(decl[i:], quote)
+	if end < 0 {
+		return false
+	}
+	enc := strings.TrimSpace(string(decl[i : i+end]))
+	return strings.EqualFold(enc, "utf-8") || strings.EqualFold(enc, "utf8")
+}
+
+// scanFastOFDXMLMaxID 对标准UTF-8编码OFD XML执行字节级ID快扫，遇复杂或异常语法回退标准解码器
+// 入参: data 完整文件字节
+// 返回: uint64 最大标识, bool 是否完成快速扫描，为false时需回退xml.Decoder
+func scanFastOFDXMLMaxID(data []byte) (uint64, bool) {
+	n := len(data)
+	i := 0
+	if n >= 3 && data[0] == 0xef && data[1] == 0xbb && data[2] == 0xbf {
+		i = 3
+	}
+	for i < n && isFastXMLSpace(data[i]) {
+		i++
+	}
+	if i >= n || data[i] != '<' {
+		return 0, true
+	}
+	if i+5 < n && data[i+1] == '?' && data[i+2] == 'x' && data[i+3] == 'm' && data[i+4] == 'l' && (isFastXMLSpace(data[i+5]) || data[i+5] == '?') {
+		end := bytes.Index(data[i+5:], []byte("?>"))
+		if end < 0 {
+			return 0, false
+		}
+		if !parseFastXMLDeclEncoding(data[i+5 : i+5+end]) {
+			return 0, false
+		}
+		i += 5 + end + 2
+		for i < n && isFastXMLSpace(data[i]) {
+			i++
+		}
+		if i >= n || data[i] != '<' {
+			return 0, false
+		}
+	}
+	var stack [][]byte
+	var maximum uint64
+	started := false
+	for i < n {
+		rel := bytes.IndexByte(data[i:], '<')
+		if rel < 0 {
+			break
+		}
+		i += rel
+		if i+1 >= n {
+			return 0, false
+		}
+		next := data[i+1]
+		if next == '!' || next == '?' {
+			return 0, false
+		}
+		if next == '/' {
+			i += 2
+			nameStart := i
+			for i < n && !isFastXMLSpace(data[i]) && data[i] != '>' {
+				if data[i] == '<' || data[i] == '/' {
+					return 0, false
+				}
+				i++
+			}
+			name := data[nameStart:i]
+			for i < n && isFastXMLSpace(data[i]) {
+				i++
+			}
+			if i >= n || data[i] != '>' || len(stack) == 0 || !bytes.Equal(stack[len(stack)-1], name) {
+				return 0, false
+			}
+			stack = stack[:len(stack)-1]
+			i++
+			if len(stack) == 0 {
+				for i < n && isFastXMLSpace(data[i]) {
+					i++
+				}
+				if i != n {
+					return 0, false
+				}
+				return maximum, true
+			}
+			continue
+		}
+		i++
+		nameStart := i
+		for i < n && !isFastXMLSpace(data[i]) && data[i] != '>' && data[i] != '/' {
+			ch := data[i]
+			if ch == '<' || ch == '=' || ch == '"' || ch == '\'' {
+				return 0, false
+			}
+			i++
+		}
+		fullName := data[nameStart:i]
+		if len(fullName) == 0 {
+			return 0, false
+		}
+		if !started {
+			local := fullName
+			if colon := bytes.IndexByte(fullName, ':'); colon >= 0 {
+				if colon == 0 || colon == len(fullName)-1 || bytes.IndexByte(fullName[colon+1:], ':') >= 0 {
+					return 0, false
+				}
+				local = fullName[colon+1:]
+			}
+			if !isOFDMaxIDRoot(local) {
+				return 0, true
+			}
+			started = true
+		}
+		selfClosing := false
+		for {
+			hadSpace := false
+			for i < n && isFastXMLSpace(data[i]) {
+				hadSpace = true
+				i++
+			}
+			if i >= n {
+				return 0, false
+			}
+			if data[i] == '>' {
+				i++
+				break
+			}
+			if data[i] == '/' {
+				if i+1 >= n || data[i+1] != '>' {
+					return 0, false
+				}
+				selfClosing = true
+				i += 2
+				break
+			}
+			if !hadSpace {
+				return 0, false
+			}
+			attrStart := i
+			for i < n && !isFastXMLSpace(data[i]) && data[i] != '=' {
+				ch := data[i]
+				if ch == '<' || ch == '>' || ch == '/' || ch == '"' || ch == '\'' {
+					return 0, false
+				}
+				i++
+			}
+			attrName := data[attrStart:i]
+			if len(attrName) == 0 {
+				return 0, false
+			}
+			for i < n && isFastXMLSpace(data[i]) {
+				i++
+			}
+			if i >= n || data[i] != '=' {
+				return 0, false
+			}
+			i++
+			for i < n && isFastXMLSpace(data[i]) {
+				i++
+			}
+			if i >= n || (data[i] != '"' && data[i] != '\'') {
+				return 0, false
+			}
+			quote := data[i]
+			i++
+			valEnd := bytes.IndexByte(data[i:], quote)
+			if valEnd < 0 {
+				return 0, false
+			}
+			val := data[i : i+valEnd]
+			if bytes.IndexByte(val, '<') >= 0 {
+				return 0, false
+			}
+			if len(attrName) == 2 && attrName[0] == 'I' && attrName[1] == 'D' {
+				if bytes.IndexByte(val, '&') >= 0 {
+					return 0, false
+				}
+				if id, ok := parseFastUint32(val); ok && id > maximum {
+					maximum = id
+				}
+			}
+			i += valEnd + 1
+		}
+		if !selfClosing {
+			stack = append(stack, fullName)
+		} else if len(stack) == 0 {
+			for i < n && isFastXMLSpace(data[i]) {
+				i++
+			}
+			if i != n {
+				return 0, false
+			}
+			return maximum, true
+		}
+	}
+	return 0, false
 }
 
 // sourcePageUntouched 按写时复制切片头快速判断已加载页面是否保持初始未改状态

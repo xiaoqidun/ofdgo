@@ -2738,7 +2738,7 @@ func buildTextLayoutNode(group textLayoutGroup) StructureNode {
 // 入参: ctx 取消上下文, reader 包阅读器, index 文档索引
 // 返回: bool 是否可以排除字体引用, error 读取或取消错误
 func richTextTagsFontSafe(ctx context.Context, reader *Reader, index int) (bool, error) {
-	view, err := reader.DocumentContext(ctx, index)
+	view, err := editorDocumentViewContext(ctx, reader, index)
 	if err != nil {
 		return false, err
 	}

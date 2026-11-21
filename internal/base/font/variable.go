@@ -71,14 +71,49 @@ func subsetVariableSFNTFont(sfnt *SFNT, glyphs []uint16) ([]byte, error) {
 		}
 	}
 	table["cmap"] = BuildCmapTable(sfnt.NumGlyphs(), mapping)
-	static, err := SerializeOTF(table)
-	if err != nil {
-		return nil, err
+	valid := true
+	for id := 0; id < int(sfnt.NumGlyphs()); id++ {
+		if _, err := trueTypeGlyphData(table, uint16(id)); err != nil {
+			valid = false
+			break
+		}
 	}
-	if subset := SubsetSourceSFNT(static, usage); subset != nil {
-		table, err = FileTables(subset, 0)
-		if err != nil {
-			return nil, err
+	if valid {
+		glyfSize := 0
+		for id, retained := range usage.Glyphs {
+			if retained {
+				data, _ := trueTypeGlyphData(table, id)
+				glyfSize += len(data) + len(data)%2
+			}
+		}
+		if glyfSize > 0 || !hasBitmapTables(table) {
+			locaFormat := uint16(1)
+			if glyfSize <= 0x1fffe {
+				locaFormat = 0
+			}
+			glyf := make([]byte, 0, glyfSize)
+			loca := make([]byte, 0, (int(sfnt.NumGlyphs())+1)*(2+2*int(locaFormat)))
+			for id := 0; id <= int(sfnt.NumGlyphs()); id++ {
+				if locaFormat == 0 {
+					loca = binary.BigEndian.AppendUint16(loca, uint16(len(glyf)/2))
+				} else {
+					loca = binary.BigEndian.AppendUint32(loca, uint32(len(glyf)))
+				}
+				if id < int(sfnt.NumGlyphs()) && usage.Glyphs[uint16(id)] {
+					data, _ := trueTypeGlyphData(table, uint16(id))
+					glyf = append(glyf, data...)
+					if len(glyf)%2 != 0 {
+						glyf = append(glyf, 0)
+					}
+				}
+			}
+			if len(glyf)+len(loca) < len(table["glyf"])+len(table["loca"]) {
+				head := make([]byte, len(table["head"]))
+				copy(head, table["head"])
+				binary.BigEndian.PutUint16(head[50:], locaFormat)
+				clear(head[8:12])
+				table["glyf"], table["loca"], table["head"] = glyf, loca, head
+			}
 		}
 	}
 	table["gvar"], err = subsetGlyphVariations(sfnt.Tables["gvar"], usage.Glyphs)

@@ -21,6 +21,7 @@ import (
 	"image"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 	"weak"
 
@@ -53,9 +54,9 @@ type Resources struct {
 	options ResourceOptions
 	pool    *ConversionPool
 	mu      sync.Mutex
-	used    int64
-	limit   int64
-	checked time.Time
+	used    atomic.Int64
+	limit   atomic.Int64
+	checked atomic.Int64
 	order   list.List
 }
 
@@ -78,7 +79,9 @@ func NewResources(options ResourceOptions) (*Resources, error) {
 	if options.MaxEntryBytes == 0 {
 		options.MaxEntryBytes = defaultMaxEntryBytes
 	}
-	return &Resources{options: options, pool: pool, limit: options.CacheBytes}, nil
+	resources := &Resources{options: options, pool: pool}
+	resources.limit.Store(options.CacheBytes)
+	return resources, nil
 }
 
 // ConversionPool 返回资源策略共享的转换调度器
@@ -102,19 +105,14 @@ func (r *Resources) Acquire(ctx context.Context, memory int64) (func(), error) {
 
 // Clear 释放当前缓存，正在计算的任务完成后仍可写入新缓存
 func (r *Resources) Clear() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for r.order.Len() != 0 {
-		r.evict()
+	for r.evictOne() {
 	}
 }
 
 // CacheUsage 返回当前登记的派生缓存估算字节数，不含任务临时内存
 // 返回: int64 缓存成本
 func (r *Resources) CacheUsage() int64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.used
+	return r.used.Load()
 }
 
 // WithResources 设置阅读器及派生编辑器共享的资源策略
@@ -124,10 +122,12 @@ func WithResources(resources *Resources) ReaderOption {
 	return func(options *readerOptions) { options.resources = resources }
 }
 
-// resourceEntry 保存共享缓存成本与弱引用淘汰操作
-type resourceEntry struct {
-	cost  int64
-	evict func()
+// resourceNode 保存共享缓存成本、唯一扣减标记与弱引用淘汰操作
+type resourceNode struct {
+	cost    int64
+	removed atomic.Bool
+	element *list.Element
+	evict   func()
 }
 
 // renderCache 按估算字节数限制派生渲染数据，淘汰不修改源资源
@@ -140,35 +140,46 @@ type renderCache[K comparable, V any] struct {
 	loading     map[K]*renderCacheLoad[V]
 }
 
-// mutex 返回缓存数据及共享账本使用的同一把锁
-// 返回: *sync.Mutex 缓存锁
-func (c *renderCache[K, V]) mutex() *sync.Mutex {
-	if c.resources != nil {
-		return &c.resources.mu
-	}
-	return &c.mu
-}
-
-// touch 更新本地及共享条目的访问顺序，需持有缓存锁
-// 入参: item 缓存条目
-func (c *renderCache[K, V]) touch(item *list.Element) {
-	c.order.MoveToFront(item)
-	if shared := item.Value.(renderCacheEntry[K, V]).shared; shared != nil {
-		c.resources.order.MoveToFront(shared)
-	}
-}
-
-// remove 删除本地条目并归还共享预算，需持有缓存锁
+// remove 删除本地条目并在未扣减时归还全局字节计数，需持有本地缓存锁
 // 入参: item 缓存条目
 func (c *renderCache[K, V]) remove(item *list.Element) {
+	c.removeLocal(item)
+}
+
+// putLocked 在持有本地缓存锁时替换本地条目并按本地预算淘汰
+// 入参: key 缓存键, value 缓存值, cost 字节成本
+func (c *renderCache[K, V]) putLocked(key K, value V, cost int) {
+	if item := c.entries[key]; item != nil {
+		c.removeLocal(item)
+	}
+	if cost <= 0 || cost > c.limit {
+		return
+	}
+	if c.entries == nil {
+		c.entries = make(map[K]*list.Element)
+	}
+	for cost > c.limit-c.used {
+		c.removeLocal(c.order.Back())
+	}
+	entry := renderCacheEntry[K, V]{key: key, value: value, cost: cost}
+	item := c.order.PushFront(entry)
+	c.entries[key] = item
+	c.used += cost
+}
+
+// removeLocal 删除本地条目并在未扣减时归还全局字节计数，需持有本地缓存锁
+// 入参: item 缓存条目
+// 返回: *resourceNode 待从全局队列摘除的节点
+func (c *renderCache[K, V]) removeLocal(item *list.Element) *resourceNode {
 	entry := item.Value.(renderCacheEntry[K, V])
 	c.used -= entry.cost
 	c.order.Remove(item)
 	delete(c.entries, entry.key)
-	if entry.shared != nil {
-		c.resources.used -= int64(entry.cost)
-		c.resources.order.Remove(entry.shared)
+	if entry.node != nil && entry.node.removed.CompareAndSwap(false, true) {
+		c.resources.used.Add(-entry.node.cost)
+		return entry.node
 	}
+	return nil
 }
 
 // clear 释放已有缓存条目并归还共享预算，不取消正在加载的任务
@@ -176,10 +187,16 @@ func (c *renderCache[K, V]) clear() {
 	if c == nil {
 		return
 	}
-	c.mutex().Lock()
-	defer c.mutex().Unlock()
+	var detached []*resourceNode
+	c.mu.Lock()
 	for c.order.Len() != 0 {
-		c.remove(c.order.Back())
+		if node := c.removeLocal(c.order.Back()); node != nil {
+			detached = append(detached, node)
+		}
+	}
+	c.mu.Unlock()
+	if c.resources != nil {
+		c.resources.detachNodes(detached)
 	}
 }
 
@@ -187,10 +204,10 @@ func (c *renderCache[K, V]) clear() {
 // 入参: key 缓存键
 // 返回: V 缓存值, bool 是否命中
 func (c *renderCache[K, V]) get(key K) (V, bool) {
-	c.mutex().Lock()
-	defer c.mutex().Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if item := c.entries[key]; item != nil {
-		c.touch(item)
+		c.order.MoveToFront(item)
 		return item.Value.(renderCacheEntry[K, V]).value, true
 	}
 	var zero V
@@ -200,59 +217,91 @@ func (c *renderCache[K, V]) get(key K) (V, bool) {
 // put 缓存预算内的派生数据，超大单项不进入缓存
 // 入参: key 缓存键, value 缓存值, cost 字节成本
 func (c *renderCache[K, V]) put(key K, value V, cost int) {
-	c.mutex().Lock()
-	defer c.mutex().Unlock()
-	c.putLocked(key, value, cost)
-}
-
-// putLocked 在持有缓存锁时替换条目并按预算淘汰
-// 入参: key 缓存键, value 缓存值, cost 字节成本
-func (c *renderCache[K, V]) putLocked(key K, value V, cost int) {
-	if item := c.entries[key]; item != nil {
-		c.remove(item)
+	r := c.resources
+	if r != nil {
+		r.refresh()
 	}
-	if cost <= 0 || cost > c.limit {
+	var detached []*resourceNode
+	if cost <= 0 || cost > c.limit || r != nil && int64(cost) > r.limit.Load() {
+		c.mu.Lock()
+		if item := c.entries[key]; item != nil {
+			if node := c.removeLocal(item); node != nil {
+				detached = append(detached, node)
+			}
+		}
+		c.mu.Unlock()
+		if r != nil {
+			r.detachNodes(detached)
+		}
 		return
+	}
+	if r != nil {
+		r.reserve(int64(cost))
+	}
+	var added *resourceNode
+	c.mu.Lock()
+	if item := c.entries[key]; item != nil {
+		if node := c.removeLocal(item); node != nil {
+			detached = append(detached, node)
+		}
 	}
 	if c.entries == nil {
 		c.entries = make(map[K]*list.Element)
 	}
 	for cost > c.limit-c.used {
-		item := c.order.Back()
-		c.remove(item)
+		if node := c.removeLocal(c.order.Back()); node != nil {
+			detached = append(detached, node)
+		}
 	}
 	entry := renderCacheEntry[K, V]{key: key, value: value, cost: cost}
-	if r := c.resources; r != nil {
-		r.refresh()
-		if int64(cost) > r.limit {
-			return
-		}
-		for int64(cost) > r.limit-r.used {
-			r.evict()
-		}
-	}
 	item := c.order.PushFront(entry)
 	c.entries[key] = item
 	c.used += cost
-	if r := c.resources; r != nil {
+	if r != nil {
 		ref, entryRef := weak.Make(c), weak.Make(item)
-		entry.shared = r.order.PushFront(resourceEntry{cost: int64(cost), evict: func() {
-			if cache := ref.Value(); cache != nil {
-				previous := entryRef.Value()
-				if previous == nil {
-					return
-				}
-				entry := previous.Value.(renderCacheEntry[K, V])
-				if cache.entries[entry.key] != previous {
-					return
-				}
-				cache.used -= entry.cost
-				cache.order.Remove(previous)
-				delete(cache.entries, entry.key)
+		var node *resourceNode
+		node = &resourceNode{cost: int64(cost), evict: func() {
+			cache := ref.Value()
+			if cache == nil {
+				return
 			}
-		}})
+			cache.mu.Lock()
+			defer cache.mu.Unlock()
+			previous := entryRef.Value()
+			if previous == nil {
+				return
+			}
+			current := previous.Value.(renderCacheEntry[K, V])
+			if cache.entries[current.key] != previous || current.node != node {
+				return
+			}
+			cache.used -= current.cost
+			cache.order.Remove(previous)
+			delete(cache.entries, current.key)
+		}}
+		entry.node = node
 		item.Value = entry
-		r.used += int64(cost)
+		r.used.Add(int64(cost))
+		added = node
+	}
+	c.mu.Unlock()
+	if r != nil {
+		if len(detached) != 0 || added != nil {
+			r.mu.Lock()
+			for _, node := range detached {
+				if node.element != nil {
+					r.order.Remove(node.element)
+					node.element = nil
+				}
+			}
+			if added != nil && !added.removed.Load() {
+				added.element = r.order.PushFront(added)
+			}
+			r.mu.Unlock()
+		}
+		if limit := r.limit.Load(); r.used.Load() > limit {
+			r.trim(limit)
+		}
 	}
 }
 
@@ -268,15 +317,15 @@ func (c *renderCache[K, V]) load(ctx context.Context, key K, read func() (V, int
 		if err := ctx.Err(); err != nil {
 			return zero, err
 		}
-		c.mutex().Lock()
+		c.mu.Lock()
 		if item := c.entries[key]; item != nil {
-			c.touch(item)
+			c.order.MoveToFront(item)
 			value := item.Value.(renderCacheEntry[K, V]).value
-			c.mutex().Unlock()
+			c.mu.Unlock()
 			return value, nil
 		}
 		if pending := c.loading[key]; pending != nil {
-			c.mutex().Unlock()
+			c.mu.Unlock()
 			select {
 			case <-ctx.Done():
 				return zero, ctx.Err()
@@ -292,12 +341,12 @@ func (c *renderCache[K, V]) load(ctx context.Context, key K, read func() (V, int
 		}
 		pending := &renderCacheLoad[V]{done: make(chan struct{}), err: errors.New("resource loading interrupted")}
 		c.loading[key] = pending
-		c.mutex().Unlock()
+		c.mu.Unlock()
 		defer func() {
-			c.mutex().Lock()
+			c.mu.Lock()
 			delete(c.loading, key)
 			close(pending.done)
-			c.mutex().Unlock()
+			c.mu.Unlock()
 		}()
 		value, cost, err := read()
 		if err == nil {
@@ -320,10 +369,10 @@ type renderCacheLoad[V any] struct {
 
 // renderCacheEntry 保存缓存值及内存成本
 type renderCacheEntry[K comparable, V any] struct {
-	key    K
-	value  V
-	cost   int
-	shared *list.Element
+	key   K
+	value V
+	cost  int
+	node  *resourceNode
 }
 
 // context 为未指定转换池的操作附加资源调度器
@@ -336,25 +385,79 @@ func (r *Resources) context(ctx context.Context) context.Context {
 	return context.WithValue(ctx, conversionPoolKey{}, r.pool)
 }
 
-// refresh 按当前可用内存收缩缓存，需持有资源锁
+// refresh 按当前可用内存节流刷新动态预算并在锁外收缩缓存
 func (r *Resources) refresh() {
-	if r.options.AvailableMemory == nil || time.Since(r.checked) < 250*time.Millisecond {
+	if r.options.AvailableMemory == nil {
 		return
 	}
-	r.checked = time.Now()
-	r.limit = min(r.options.CacheBytes, max(0, r.options.AvailableMemory()))
-	for r.used > r.limit {
-		r.evict()
+	now := time.Now().UnixNano()
+	last := r.checked.Load()
+	if last != 0 && now-last < int64(250*time.Millisecond) {
+		return
+	}
+	if !r.checked.CompareAndSwap(last, now) {
+		return
+	}
+	limit := min(r.options.CacheBytes, max(0, r.options.AvailableMemory()))
+	r.limit.Store(limit)
+	r.trim(limit)
+}
+
+// reserve 在写入前淘汰旧条目直到满足预算
+// 入参: cost 待写入条目的估算字节数
+func (r *Resources) reserve(cost int64) {
+	limit := r.limit.Load()
+	for r.used.Load()+cost > limit {
+		if !r.evictOne() {
+			return
+		}
 	}
 }
 
-// evict 淘汰最久未访问的共享条目，需持有资源锁
-func (r *Resources) evict() {
+// trim 将全局缓存使用量收缩到上限以内
+// 入参: limit 目标缓存上限
+func (r *Resources) trim(limit int64) {
+	for r.used.Load() > limit {
+		if !r.evictOne() {
+			return
+		}
+	}
+}
+
+// detachNodes 批量从全局淘汰链表移除已本地删除的节点
+// 入参: nodes 待移除节点切片
+func (r *Resources) detachNodes(nodes []*resourceNode) {
+	if len(nodes) == 0 {
+		return
+	}
+	r.mu.Lock()
+	for _, node := range nodes {
+		if node.element != nil {
+			r.order.Remove(node.element)
+			node.element = nil
+		}
+	}
+	r.mu.Unlock()
+}
+
+// evictOne 弹出最久未访问节点并在释放资源锁后执行本地淘汰
+// 返回: bool 是否成功弹出节点
+func (r *Resources) evictOne() bool {
+	r.mu.Lock()
 	item := r.order.Back()
-	entry := item.Value.(resourceEntry)
+	if item == nil {
+		r.mu.Unlock()
+		return false
+	}
+	node := item.Value.(*resourceNode)
 	r.order.Remove(item)
-	r.used -= entry.cost
-	entry.evict()
+	node.element = nil
+	r.mu.Unlock()
+	if node.removed.CompareAndSwap(false, true) {
+		r.used.Add(-node.cost)
+		node.evict()
+	}
+	return true
 }
 
 // resourceCache 按类别基准分配共享预算，较大总预算同比扩展类别额度

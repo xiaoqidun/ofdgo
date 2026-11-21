@@ -16,65 +16,451 @@ package ofdgo
 
 import (
 	"bytes"
+	"cmp"
+	"compress/zlib"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"image"
 	"image/color"
-	"io"
-	"maps"
+	"math"
+	"reflect"
+	"slices"
 	"strconv"
-	"time"
+	"sync"
+	"sync/atomic"
 
 	"github.com/tdewolff/canvas"
-	canvasimage "github.com/tdewolff/canvas/image"
-	"github.com/tdewolff/canvas/renderers/pdf"
 	"github.com/xiaoqidun/j2kgo"
 	"github.com/xiaoqidun/jbig2"
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// pdfRenderer PDF渲染器
-type pdfRenderer struct {
-	*pdf.PDF
-	information    pdfgo.Dictionary
-	glyphPaths     renderCache[*canvas.Path, *canvas.Path]
-	fonts          map[*canvas.Font]*canvas.Font
-	fontData       map[*canvas.Font][]byte
-	cffFonts       map[*canvas.Font][]*pdfFontSubset
-	cffGlyphMap    map[*canvas.Font]map[uint16]*pdfFontSubset
-	images         [][]image.Image
-	placeholders   [][]bool
-	rawImages      [][]*codecpdf.RawImage
-	rawCache       map[string]*pdfRawImage
-	placeholderMap map[any]*image.RGBA
-	placeholderSeq uint32
-	imageClips     [][]string
-	imageClip      *canvas.Path
-	exactImages    bool
-	imageError     error
-	navigation     *pdfNavigation
-	text           []codecpdf.TextPage
-	textFauxBold   [][]codecpdf.TextFauxBold
-	exactText      bool
+// pdfRendererCtxKey 用于在页面渲染上下文中传递当前PDF渲染器以支持原生文字裁剪
+type pdfRendererCtxKey struct{}
+
+// pdfRawCacheKey 按阅读器实例与规范化包路径隔离原始图像流缓存
+type pdfRawCacheKey struct {
+	reader *Reader
+	path   string
 }
 
-// RenderPath 在绘制渐变前重置透明度图形状态，避免前驱半透明对象污染不透明渐变
+// pdfImageCacheKey 按图像来源键与降采样目标尺寸复用PDF图像XObject
+type pdfImageCacheKey struct {
+	key    any
+	target image.Point
+}
+
+// pdfTemplateFormKey 按模板页、页面尺寸、视口偏移与打印模式复用PDF模板Form
+type pdfTemplateFormKey struct {
+	template      *PageContent
+	width         float64
+	height        float64
+	offsetX       float64
+	offsetY       float64
+	printing      bool
+	printContents string
+}
+
+// pdfStampFormKey 按印章OFD内容摘要与打印模式复用PDF印章Form集合
+type pdfStampFormKey struct {
+	digest   [32]byte
+	printing bool
+}
+
+// pdfCompositeFormKey 按复合图元定义指针、打印模式与透明组隔离属性复用PDF Form
+type pdfCompositeFormKey struct {
+	unit          *CompositeGraphicUnit
+	printing      bool
+	printContents string
+	group         bool
+}
+
+// pdfEncodedImageEntry 保存并发去重编码后的PDF图像XObject待写出状态
+type pdfEncodedImageEntry struct {
+	done     chan struct{}
+	name     pdfgo.Name
+	ref      pdfgo.Reference
+	smaskRef pdfgo.Reference
+	encoded  codecpdf.EncodedImageStream
+	err      error
+}
+
+// pdfFormEntry 保存并发去重编译后的PDF Form XObject待写出状态
+type pdfFormEntry struct {
+	done              chan struct{}
+	name              pdfgo.Name
+	ref               pdfgo.Reference
+	width             float64
+	height            float64
+	transparencyGroup bool
+	resources         *codecpdf.ContentResources
+	data              []byte
+	compressed        bool
+	err               error
+}
+
+// pdfStampPageForm 保存单页OFD印章编译后的Form引用及原始物理尺寸
+type pdfStampPageForm struct {
+	name   pdfgo.Name
+	ref    pdfgo.Reference
+	width  float64
+	height float64
+}
+
+// pdfStampFormGroup 保存整枚OFD印章的多页Form缓存项
+type pdfStampFormGroup struct {
+	done  chan struct{}
+	forms []pdfStampPageForm
+	err   error
+}
+
+// pdfStreamSession 管理整份PDF输出期间并发安全的共享字体、图像、Form及图形资源表
+type pdfStreamSession struct {
+	writer        *codecpdf.StreamWriter
+	allocMu       sync.Mutex
+	compression   CompressionOptions
+	compress      bool
+	compressLevel int
+	fonts         *codecpdf.FontRegistry
+	graphics      *codecpdf.GraphicResourceRegistry
+	fontMu        sync.Mutex
+	fontDigests   map[*canvas.Font][32]byte
+	fontCanonical map[[32]byte]*canvas.Font
+	fontData      map[*canvas.Font][]byte
+	cffFonts      map[*canvas.Font][]*pdfFontSubset
+	cffGlyphMap   map[*canvas.Font]map[uint16]*pdfFontSubset
+	rawMu         sync.Mutex
+	rawCache      map[pdfRawCacheKey]*pdfRawImage
+	rawDigest     map[[32]byte]*pdfRawImage
+	imgMu         sync.Mutex
+	imgEntries    map[pdfImageCacheKey]*pdfEncodedImageEntry
+	imgSeq        int
+	imgUniqueSeq  atomic.Uint64
+	pendingImages []*pdfEncodedImageEntry
+	formMu        sync.Mutex
+	formSeq       int
+	templateForms map[pdfTemplateFormKey]*pdfFormEntry
+	stampForms    map[pdfStampFormKey]*pdfStampFormGroup
+	compForms     map[pdfCompositeFormKey]*pdfFormEntry
+	pendingForms  []*pdfFormEntry
+	contentRefs   map[[32]byte]pdfgo.Reference
+	templateHits  atomic.Int64
+	stampHits     atomic.Int64
+	compHits      atomic.Int64
+	contentHits   atomic.Int64
+}
+
+// newPDFStreamSession 创建支持多核并发资源登记的PDF流式写出共享会话
+// 入参: writer 流式PDF写出器, compression 压缩选项
+// 返回: *pdfStreamSession 共享会话实例
+func newPDFStreamSession(writer *codecpdf.StreamWriter, compression CompressionOptions) *pdfStreamSession {
+	level := zlib.DefaultCompression
+	if compression.Mode != CompressionUnchanged {
+		level = zlib.BestCompression
+	}
+	s := &pdfStreamSession{
+		writer:        writer,
+		compression:   compression,
+		compress:      true,
+		compressLevel: level,
+		fontDigests:   make(map[*canvas.Font][32]byte),
+		fontCanonical: make(map[[32]byte]*canvas.Font),
+		fontData:      make(map[*canvas.Font][]byte),
+		rawCache:      make(map[pdfRawCacheKey]*pdfRawImage),
+		rawDigest:     make(map[[32]byte]*pdfRawImage),
+		imgEntries:    make(map[pdfImageCacheKey]*pdfEncodedImageEntry),
+		templateForms: make(map[pdfTemplateFormKey]*pdfFormEntry),
+		stampForms:    make(map[pdfStampFormKey]*pdfStampFormGroup),
+		compForms:     make(map[pdfCompositeFormKey]*pdfFormEntry),
+		contentRefs:   make(map[[32]byte]pdfgo.Reference),
+	}
+	s.fonts = codecpdf.NewFontRegistry(s.allocRef, true, true, level)
+	s.graphics = codecpdf.NewGraphicResourceRegistry(s.allocRef)
+	return s
+}
+
+// FontResource 实现ContentResourceSink，按字体内容摘要跨协程共享同一PDF字体对象
+// 入参: font 画布字体, vertical 是否竖排
+// 返回: pdfgo.Name 资源名, pdfgo.Reference 对象引用, *codecpdf.FontEntry 字体项
+func (s *pdfStreamSession) FontResource(font *canvas.Font, vertical bool) (pdfgo.Name, pdfgo.Reference, *codecpdf.FontEntry) {
+	if font != nil && !font.IsCFF {
+		font = s.canonicalFont(font)
+	}
+	return s.fonts.Register(font, vertical)
+}
+
+// OpacityGS 实现ContentResourceSink，登记或复用透明度ExtGState资源
+// 入参: alpha 八位透明度
+// 返回: pdfgo.Name 状态名, pdfgo.Reference 对象引用
+func (s *pdfStreamSession) OpacityGS(alpha uint8) (pdfgo.Name, pdfgo.Reference) {
+	return s.graphics.OpacityGS(alpha)
+}
+
+// ShadingPattern 实现ContentResourceSink，登记或复用渐变Pattern资源
+// 入参: gradient 画布渐变, m 变换矩阵
+// 返回: pdfgo.Name Pattern名, pdfgo.Reference 对象引用
+func (s *pdfStreamSession) ShadingPattern(gradient canvas.Gradient, m canvas.Matrix) (pdfgo.Name, pdfgo.Reference) {
+	return s.graphics.ShadingPattern(gradient, m)
+}
+
+// allocRef 线程安全地向底层流式写出器申请新的PDF间接对象引用
+// 返回: pdfgo.Reference 对象引用
+func (s *pdfStreamSession) allocRef() pdfgo.Reference {
+	s.allocMu.Lock()
+	defer s.allocMu.Unlock()
+	return s.writer.AllocRef()
+}
+
+// canonicalFont 按只读SFNT表摘要将来自不同派生渲染器的相同非CFF字体归一化为单一实例，零拷贝不分配完整字体字节
+// 入参: font 画布字体
+// 返回: *canvas.Font 归一化字体实例
+func (s *pdfStreamSession) canonicalFont(font *canvas.Font) *canvas.Font {
+	s.fontMu.Lock()
+	if digest, ok := s.fontDigests[font]; ok {
+		canon := s.fontCanonical[digest]
+		s.fontMu.Unlock()
+		return canon
+	}
+	s.fontMu.Unlock()
+	h := sha256.New()
+	tags := make([]string, 0, len(font.Tables))
+	for tag := range font.Tables {
+		tags = append(tags, tag)
+	}
+	slices.SortFunc(tags, cmp.Compare[string])
+	var lenBuf [8]byte
+	for _, tag := range tags {
+		h.Write([]byte(tag))
+		table := font.Tables[tag]
+		binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(table)))
+		h.Write(lenBuf[:])
+		h.Write(table)
+	}
+	var digest [32]byte
+	h.Sum(digest[:0])
+	s.fontMu.Lock()
+	defer s.fontMu.Unlock()
+	s.fontDigests[font] = digest
+	if canon, ok := s.fontCanonical[digest]; ok {
+		return canon
+	}
+	s.fontCanonical[digest] = font
+	return font
+}
+
+// cachedFontBytes 线程安全地缓存源字体序列化后的SFNT字节
+// 入参: src 源画布字体
+// 返回: []byte SFNT字节
+func (s *pdfStreamSession) cachedFontBytes(src *canvas.Font) []byte {
+	s.fontMu.Lock()
+	if data, ok := s.fontData[src]; ok {
+		s.fontMu.Unlock()
+		return data
+	}
+	s.fontMu.Unlock()
+	data := basefont.SFNTData(src.Tables)
+	s.fontMu.Lock()
+	if existing, ok := s.fontData[src]; ok {
+		s.fontMu.Unlock()
+		return existing
+	}
+	s.fontData[src] = data
+	s.fontMu.Unlock()
+	return data
+}
+
+// registerImage 线程安全地按去重键并发编码单张PDF图像，首次编码完成后进入待写出队列
+// 入参: ctx 取消上下文, img 图像, rawPass 可选直通原始流, imageKey 可选外部去重键, target 目标降采样尺寸
+// 返回: pdfgo.Name XObject资源名, pdfgo.Reference 对象引用, error 编码错误
+func (s *pdfStreamSession) registerImage(ctx context.Context, img image.Image, rawPass *codecpdf.RawImage, imageKey any, target image.Point) (pdfgo.Name, pdfgo.Reference, error) {
+	var dedupKey any
+	if rawPass != nil && rawPass.Key != nil {
+		dedupKey = rawPass.Key
+	} else if imageKey != nil {
+		dedupKey = imageKey
+	} else if img != nil && reflect.TypeOf(img).Comparable() {
+		dedupKey = img
+	} else {
+		dedupKey = s.imgUniqueSeq.Add(1)
+	}
+	cacheKey := pdfImageCacheKey{key: dedupKey, target: target}
+	s.imgMu.Lock()
+	if existing, ok := s.imgEntries[cacheKey]; ok {
+		s.imgMu.Unlock()
+		<-existing.done
+		return existing.name, existing.ref, existing.err
+	}
+	entry := &pdfEncodedImageEntry{
+		done: make(chan struct{}),
+		name: pdfgo.Name("Im" + strconv.Itoa(s.imgSeq)),
+		ref:  s.allocRef(),
+	}
+	s.imgSeq++
+	s.imgEntries[cacheKey] = entry
+	s.imgMu.Unlock()
+	var encoded codecpdf.EncodedImageStream
+	var err error
+	if rawPass != nil {
+		encoded, err = codecpdf.EncodeRawImageStream(ctx, rawPass, s.compression, target)
+	} else {
+		encoded, err = codecpdf.EncodePDFImageStream(ctx, img, s.compression, target, s.compressLevel)
+	}
+	if err == nil && len(encoded.SMaskData) > 0 {
+		entry.smaskRef = s.allocRef()
+		encoded.Dict["SMask"] = entry.smaskRef
+	}
+	entry.encoded = encoded
+	entry.err = err
+	if err == nil {
+		s.imgMu.Lock()
+		s.pendingImages = append(s.pendingImages, entry)
+		s.imgMu.Unlock()
+	}
+	close(entry.done)
+	return entry.name, entry.ref, err
+}
+
+// allocFormNameRef 线程安全地分配新的Form XObject资源名与间接引用
+// 返回: pdfgo.Name Form名称, pdfgo.Reference 对象引用
+func (s *pdfStreamSession) allocFormNameRef() (pdfgo.Name, pdfgo.Reference) {
+	s.formMu.Lock()
+	name := pdfgo.Name("Fm" + strconv.Itoa(s.formSeq))
+	s.formSeq++
+	s.formMu.Unlock()
+	return name, s.allocRef()
+}
+
+// enqueueForm 将已完成编译压缩的Form XObject加入主协程待写出队列
+// 入参: entry Form缓存项
+func (s *pdfStreamSession) enqueueForm(entry *pdfFormEntry) {
+	s.formMu.Lock()
+	s.pendingForms = append(s.pendingForms, entry)
+	s.formMu.Unlock()
+}
+
+// flushPending 在主协程中流式写出所有新增图形字典、图像流与Form流并立即释放其内存缓冲
+// 返回: error 写入错误
+func (s *pdfStreamSession) flushPending() error {
+	if err := s.graphics.FlushPending(s.writer); err != nil {
+		return err
+	}
+	s.imgMu.Lock()
+	imgs := s.pendingImages
+	s.pendingImages = nil
+	s.imgMu.Unlock()
+	for _, entry := range imgs {
+		if len(entry.encoded.SMaskData) > 0 {
+			if err := s.writer.WritePreencodedStream(entry.smaskRef, entry.encoded.SMaskDict, entry.encoded.SMaskData); err != nil {
+				return err
+			}
+			entry.encoded.SMaskData = nil
+			entry.encoded.SMaskDict = nil
+		}
+		if err := s.writer.WritePreencodedStream(entry.ref, entry.encoded.Dict, entry.encoded.Data); err != nil {
+			return err
+		}
+		entry.encoded.Data = nil
+		entry.encoded.Dict = nil
+	}
+	s.formMu.Lock()
+	forms := s.pendingForms
+	s.pendingForms = nil
+	s.formMu.Unlock()
+	for _, form := range forms {
+		resRef, err := s.graphics.ResourceDictRef(s.writer, form.resources)
+		if err != nil {
+			return err
+		}
+		dict := codecpdf.FormXObjectDict(form.width, form.height, resRef, form.transparencyGroup)
+		if form.compressed {
+			dict["Filter"] = pdfgo.Name("FlateDecode")
+			if err := s.writer.WritePreencodedStream(form.ref, dict, form.data); err != nil {
+				return err
+			}
+		} else {
+			if err := s.writer.WriteStream(form.ref, dict, form.data, true); err != nil {
+				return err
+			}
+		}
+		form.data = nil
+		form.resources = nil
+	}
+	return nil
+}
+
+// allocFormNameRefUnlocked 在已持有formMu时分配Form资源名与间接对象引用
+// 返回: pdfgo.Name Form名称, pdfgo.Reference 对象引用
+func (s *pdfStreamSession) allocFormNameRefUnlocked() (pdfgo.Name, pdfgo.Reference) {
+	name := pdfgo.Name("Fm" + strconv.Itoa(s.formSeq))
+	s.formSeq++
+	return name, s.allocRef()
+}
+
+// pdfRenderer PDF单遍流式渲染器，实现canvas.Renderer并支持原生Form复用与文字裁剪
+type pdfRenderer struct {
+	session       *pdfStreamSession
+	ctx           context.Context
+	width         float64
+	height        float64
+	content       *codecpdf.ContentBuilder
+	contentStack  []*codecpdf.ContentBuilder
+	sizeStack     [][2]float64
+	groupAlphas   []uint8
+	glyphPaths    renderCache[*canvas.Path, *canvas.Path]
+	glyphUnicode  map[*canvas.Font]map[uint16]rune
+	imageKey      any
+	imageClip     *canvas.Path
+	imageError    error
+	text          []codecpdf.TextPage
+	textClip      *canvas.Path
+	textClipFirst int
+	textClipEmpty bool
+}
+
+// newPDFPageRenderer 为单页创建独占的流式PDF渲染器
+// 入参: session 共享PDF会话, ctx 取消上下文, width 页面宽度(毫米), height 页面高度(毫米), resources 缓存配额来源
+// 返回: *pdfRenderer 页面渲染器
+func newPDFPageRenderer(session *pdfStreamSession, ctx context.Context, width, height float64, resources *Resources) *pdfRenderer {
+	return &pdfRenderer{
+		session:    session,
+		ctx:        ctx,
+		width:      width,
+		height:     height,
+		content:    codecpdf.NewContentBuilder(session),
+		glyphPaths: *resourceCache[*canvas.Path, *canvas.Path](resources, 16<<20),
+		text:       make([]codecpdf.TextPage, 1),
+	}
+}
+
+// Size 返回当前PDF页面或Form画布尺寸(毫米)
+// 返回: float64 宽度, float64 高度
+func (r *pdfRenderer) Size() (float64, float64) {
+	return r.width, r.height
+}
+
+// RenderPath 直接向单遍内容流写入路径绘图指令
 // 入参: path 几何路径, style 绘制样式, matrix 变换矩阵
 func (r *pdfRenderer) RenderPath(path *canvas.Path, style canvas.Style, matrix canvas.Matrix) {
-	if style.Fill.IsGradient() || style.Stroke.IsGradient() {
-		r.resetOpacityState()
+	if r.imageError != nil {
+		return
 	}
-	r.PDF.RenderPath(path, style, matrix)
+	r.content.RenderPath(path, style, matrix)
 }
 
-// RenderImage 校验惰性图片并同步不透明画笔，直通JPEG/JPX/JBIG2并对阶段2替换图像使用轻量占位图消除双次解码
+// RenderImage 单遍登记并编码图像XObject，直接向内容流写入图像绘制与独立裁剪指令
 // 入参: img 图像, matrix 图像变换
 func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 	if r.imageError != nil {
 		return
+	}
+	var rawPass *codecpdf.RawImage
+	if rawImg, ok := img.(*pdfRawImage); ok && rawImg != nil && rawImg.raw != nil {
+		rawPass = rawImg.raw
 	}
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
@@ -82,159 +468,28 @@ func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 		r.imageError = fmt.Errorf("PDF output image pixel bounds differ")
 		return
 	}
-	var rawPass *codecpdf.RawImage
-	if rawImg, ok := img.(*pdfRawImage); ok && rawImg != nil && rawImg.raw != nil {
-		rawPass = rawImg.raw
-	}
-	encoded, isEncoded := img.(*EncodedImage)
-	target := img
-	drawMatrix := matrix
-	jpegPassThrough := false
-	usePlaceholder := false
-	var original image.Image
-	if rawPass != nil {
-		ph := r.placeholderImage(rawPass.Key)
-		target = ph
-		drawMatrix = matrix.Scale(float64(w)/float64(ph.Bounds().Dx()), float64(h)/float64(ph.Bounds().Dy()))
-		usePlaceholder = true
-	} else if isEncoded {
-		if encoded.MIME() == "image/jpeg" {
-			raw := encoded.Bytes()
-			if validJPEGStream(raw) {
-				cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
-				if err != nil {
-					r.imageError = err
-					return
-				}
-				if image.Rect(0, 0, cfg.Width, cfg.Height) != bounds {
-					r.imageError = fmt.Errorf("PDF output image pixel bounds differ")
-					return
-				}
-				if parsed, jpegErr := canvasimage.NewJPEGImage(bytes.NewReader(raw)); jpegErr == nil {
-					parsed.Bytes = raw
-					if img.ColorModel() == cfg.ColorModel && (cfg.ColorModel == color.YCbCrModel || cfg.ColorModel == color.GrayModel) {
-						target = parsed
-						jpegPassThrough = true
-					}
-				}
-			}
-		}
-		if !jpegPassThrough {
-			if len(r.images) != 0 {
-				original = img
-				ph := r.placeholderImage(original)
-				target = ph
-				drawMatrix = matrix.Scale(float64(w)/float64(ph.Bounds().Dx()), float64(h)/float64(ph.Bounds().Dy()))
-				usePlaceholder = true
-			} else {
-				transient, err := baseimage.DecodeTransientContext(context.Background(), encoded)
-				if err != nil {
-					r.imageError = err
-					return
-				}
-				if transient == nil || transient.Bounds() != bounds {
-					r.imageError = fmt.Errorf("PDF output image pixel bounds differ")
-					return
-				}
-				target = transient
-			}
-		}
-	} else if len(r.images) != 0 {
-		opaque := false
-		if source, ok := img.(interface{ Opaque() bool }); ok {
-			opaque = source.Opaque()
-		}
-		switch img.ColorModel() {
-		case color.GrayModel, color.CMYKModel:
-		case color.RGBAModel, color.NRGBAModel, color.AlphaModel:
-			if !opaque {
-				original = img
-			}
-		default:
-			original = img
-		}
-		if original != nil {
-			ph := r.placeholderImage(original)
-			target = ph
-			drawMatrix = matrix.Scale(float64(w)/float64(ph.Bounds().Dx()), float64(h)/float64(ph.Bounds().Dy()))
-			usePlaceholder = true
-		}
-	}
-	if len(r.images) != 0 {
-		r.exactImages = r.exactImages || original != nil
-		last := len(r.images) - 1
-		r.images[last] = append(r.images[last], original)
-		if usePlaceholder {
-			for len(r.placeholders) <= last {
-				r.placeholders = append(r.placeholders, nil)
-			}
-			for len(r.placeholders[last]) < len(r.images[last]) {
-				r.placeholders[last] = append(r.placeholders[last], false)
-			}
-			r.placeholders[last][len(r.images[last])-1] = true
-		}
-		if rawPass != nil {
-			for len(r.rawImages) <= last {
-				r.rawImages = append(r.rawImages, nil)
-			}
-			for len(r.rawImages[last]) < len(r.images[last]) {
-				r.rawImages[last] = append(r.rawImages[last], nil)
-			}
-			r.rawImages[last][len(r.images[last])-1] = rawPass
-		}
-		if r.imageClip != nil {
-			view := matrix.Scale(float64(w), float64(h))
-			if view.Det() != 0 {
-				for len(r.imageClips) <= last {
-					r.imageClips = append(r.imageClips, nil)
-				}
-				for len(r.imageClips[last]) < len(r.images[last]) {
-					r.imageClips[last] = append(r.imageClips[last], "")
-				}
-				r.imageClips[last][len(r.images[last])-1] = r.imageClip.Copy().Transform(view.Inv()).ToPDF()
+	if rawPass == nil {
+		if encoded, ok := img.(*EncodedImage); ok && encoded.MIME() == "image/jpeg" {
+			if rawImg := r.rawJPEGFromEncoded(encoded); rawImg != nil {
+				rawPass = rawImg.raw
 			}
 		}
 	}
-	r.resetOpacityState()
-	r.PDF.RenderImage(target, drawMatrix)
-}
-
-// placeholderImage 为阶段2替换图像分配唯一轻量占位图，避免阶段1像素解码及后端XObject去重碰撞
-// 入参: key 图像去重键
-// 返回: *image.RGBA 轻量占位图
-func (r *pdfRenderer) placeholderImage(key any) *image.RGBA {
-	if key != nil && r.placeholderMap != nil {
-		if existing, ok := r.placeholderMap[key]; ok {
-			return existing
+	var target image.Point
+	if dpi := r.session.compression.ImageDPI(); dpi > 0 {
+		widthMM := math.Hypot(matrix[0][0], matrix[1][0]) * float64(w)
+		heightMM := math.Hypot(matrix[0][1], matrix[1][1]) * float64(h)
+		target = codecpdf.TargetImageSize(widthMM, heightMM, dpi)
+		if target.X >= w && target.Y >= h {
+			target = image.Point{}
 		}
 	}
-	r.placeholderSeq++
-	seq := r.placeholderSeq
-	var img *image.RGBA
-	if seq < 1<<24 {
-		img = image.NewRGBA(image.Rect(0, 0, 1, 1))
-		img.Pix[0], img.Pix[1], img.Pix[2], img.Pix[3] = uint8(seq>>16), uint8(seq>>8), uint8(seq), 255
-	} else {
-		img = image.NewRGBA(image.Rect(0, 0, 2, 1))
-		hi, lo := seq>>24, seq&0xFFFFFF
-		img.Pix[0], img.Pix[1], img.Pix[2], img.Pix[3] = uint8(hi>>16), uint8(hi>>8), uint8(hi), 255
-		img.Pix[4], img.Pix[5], img.Pix[6], img.Pix[7] = uint8(lo>>16), uint8(lo>>8), uint8(lo), 255
+	name, ref, err := r.session.registerImage(r.ctx, img, rawPass, r.imageKey, target)
+	if err != nil {
+		r.imageError = err
+		return
 	}
-	if key != nil {
-		if r.placeholderMap == nil {
-			r.placeholderMap = make(map[any]*image.RGBA)
-		}
-		r.placeholderMap[key] = img
-	}
-	return img
-}
-
-// resetOpacityState 重置PDF透明度图形状态，避免前驱半透明对象污染后续绘制
-func (r *pdfRenderer) resetOpacityState() {
-	reset := canvas.DefaultStyle
-	reset.Fill = canvas.Paint{Color: canvas.White}
-	reset.Stroke = canvas.Paint{Color: canvas.Black}
-	r.PDF.RenderPath(&canvas.Path{}, reset, canvas.Identity)
+	r.content.DrawImage(name, ref, w, h, matrix, r.imageClip)
 }
 
 // glyphPath 在缓存预算内复用相似变换下的PDF字形圆弧转换
@@ -256,46 +511,85 @@ func (r *pdfRenderer) glyphPath(path *canvas.Path, matrix canvas.Matrix) *canvas
 	return converted
 }
 
-// writePDF 传递后端资源记录及OFD导航修正，写出最终PDF
-// 入参: ctx 取消上下文, data 后端PDF源, size 数据长度, writer 输出流, optimization 优化配置
-// 返回: error 资源、压缩或写入错误
-func (r *pdfRenderer) writePDF(ctx context.Context, data io.ReaderAt, size int64, writer io.Writer, optimization pdfgo.OptimizeOptions) error {
-	if r.imageError != nil {
-		return r.imageError
-	}
-	information := maps.Clone(r.information)
-	if information == nil {
-		information = make(pdfgo.Dictionary)
-	}
-	information["Producer"] = pdfgo.String(ofdCreator)
-	information["CreationDate"] = pdfgo.String(time.Now().UTC().Format("D:20060102150405Z"))
-	options := codecpdf.WriteOptions{
-		Information:  information,
-		Images:       r.images,
-		Placeholders: r.placeholders,
-		RawImages:    r.rawImages,
-		ImageClips:   r.imageClips,
-		Text:         r.text,
-		TextFauxBold: r.textFauxBold,
-		ExactImages:  r.exactImages,
-		ExactText:    r.exactText,
-		Optimization: optimization,
-	}
-	if r.navigation != nil && r.navigation.nativeWrite {
-		options.Links = make(map[int][]*pdfgo.LinkRegion, len(r.navigation.Link))
-		for page, links := range r.navigation.Link {
-			regions := make([]*pdfgo.LinkRegion, len(links))
-			for i, link := range links {
-				regions[i] = link.Region
-			}
-			options.Links[page] = regions
-		}
-		options.PrepareRewrite = r.navigation.prepareRewrite
-	}
-	return codecpdf.WriteSource(ctx, data, size, writer, options)
+// pushForm 压栈切换到一个独立Form XObject内容流构建上下文
+// 入参: width 表单宽度(毫米), height 表单高度(毫米)
+func (r *pdfRenderer) pushForm(width, height float64) {
+	r.contentStack = append(r.contentStack, r.content)
+	r.sizeStack = append(r.sizeStack, [2]float64{r.width, r.height})
+	r.text = append(r.text, codecpdf.TextPage{})
+	r.content = codecpdf.NewContentBuilder(r.session)
+	r.width, r.height = width, height
 }
 
-// rawImageResource 在无蒙版且不透明时读取并缓存JPX或JBIG2原始流直通对象
+// popForm 弹出当前Form上下文，压缩其内容流并恢复父级内容流构建上下文
+// 入参: transparencyGroup 是否作为隔离透明组Form
+// 返回: *pdfFormEntry 编译后的Form对象, error 压缩错误
+func (r *pdfRenderer) popForm(transparencyGroup bool) (*pdfFormEntry, error) {
+	builder := r.content
+	w, h := r.width, r.height
+	top := len(r.contentStack) - 1
+	r.content = r.contentStack[top]
+	r.contentStack = r.contentStack[:top]
+	r.width, r.height = r.sizeStack[top][0], r.sizeStack[top][1]
+	r.sizeStack = r.sizeStack[:top]
+	r.text = r.text[:len(r.text)-1]
+	raw := builder.Bytes()
+	data := raw
+	compressed := false
+	if r.session.compress {
+		comp, _, err := codecpdf.CompressBytes(nil, nil, r.session.compressLevel, raw)
+		if err != nil {
+			return nil, err
+		}
+		data = comp
+		compressed = true
+	}
+	name, ref := r.session.allocFormNameRef()
+	entry := &pdfFormEntry{
+		name:              name,
+		ref:               ref,
+		width:             w,
+		height:            h,
+		transparencyGroup: transparencyGroup,
+		resources:         builder.Resources(),
+		data:              data,
+		compressed:        compressed,
+	}
+	return entry, nil
+}
+
+// beginTransparencyGroup 开启PDF原生隔离透明组Form上下文
+// 入参: alpha 透明组整体不透明度
+// 返回: bool 是否开启成功
+func (r *pdfRenderer) beginTransparencyGroup(alpha uint8) bool {
+	if r.imageError != nil {
+		return false
+	}
+	r.groupAlphas = append(r.groupAlphas, alpha)
+	r.pushForm(r.width, r.height)
+	return true
+}
+
+// endTransparencyGroup 闭合当前透明组Form并在父级内容流中按整体透明度合成调用
+func (r *pdfRenderer) endTransparencyGroup() {
+	if len(r.groupAlphas) == 0 {
+		return
+	}
+	alpha := r.groupAlphas[len(r.groupAlphas)-1]
+	r.groupAlphas = r.groupAlphas[:len(r.groupAlphas)-1]
+	entry, err := r.popForm(true)
+	if err != nil {
+		if r.imageError == nil {
+			r.imageError = err
+		}
+		return
+	}
+	r.session.enqueueForm(entry)
+	inv := 1.0 / codecpdf.PtPerMM
+	r.content.DrawForm(entry.name, entry.ref, canvas.Identity.Scale(inv, inv), nil, alpha)
+}
+
+// rawImageResource 在无蒙版且不透明时读取并按路径与内容摘要去重缓存JPEG、JPX或JBIG2原始流直通对象
 // 入参: renderer 渲染器, obj 图像对象
 // 返回: *pdfRawImage 可直通图像，不满足条件时为nil
 func (r *pdfRenderer) rawImageResource(renderer *Renderer, obj ImageObject) *pdfRawImage {
@@ -314,11 +608,13 @@ func (r *pdfRenderer) rawImageResource(renderer *Renderer, obj ImageObject) *pdf
 		return nil
 	}
 	clean := cleanPackagePath(renderer.Reader.ResPath(resPath))
-	if r.rawCache != nil {
-		if cached, found := r.rawCache[clean]; found {
-			return cached
-		}
+	cacheKey := pdfRawCacheKey{reader: renderer.Reader, path: clean}
+	r.session.rawMu.Lock()
+	if cached, found := r.session.rawCache[cacheKey]; found {
+		r.session.rawMu.Unlock()
+		return cached
 	}
+	r.session.rawMu.Unlock()
 	ctx := renderer.pageContext
 	if ctx == nil {
 		ctx = renderer.outputContext()
@@ -327,18 +623,74 @@ func (r *pdfRenderer) rawImageResource(renderer *Renderer, obj ImageObject) *pdf
 	if err != nil {
 		return nil
 	}
+	digest := sha256.Sum256(data)
+	r.session.rawMu.Lock()
+	if cached, found := r.session.rawDigest[digest]; found {
+		r.session.rawCache[cacheKey] = cached
+		r.session.rawMu.Unlock()
+		return cached
+	}
+	r.session.rawMu.Unlock()
 	raw := tryPDFRawImage(ctx, data)
 	if raw != nil {
 		raw.raw.Key = raw
 	}
-	if r.rawCache == nil {
-		r.rawCache = make(map[string]*pdfRawImage)
+	r.session.rawMu.Lock()
+	if existing, found := r.session.rawDigest[digest]; found {
+		r.session.rawCache[cacheKey] = existing
+		r.session.rawMu.Unlock()
+		return existing
 	}
-	r.rawCache[clean] = raw
+	r.session.rawDigest[digest] = raw
+	r.session.rawCache[cacheKey] = raw
+	r.session.rawMu.Unlock()
 	return raw
 }
 
-// pdfRawImage 封装可直通写入PDF的JPX或JBIG2原始图像流
+// rawJPEGFromEncoded 将不透明且无额外色彩转换的惰性JPEG图像转入内容去重的DCTDecode直通对象
+// 入参: encoded 惰性编码JPEG图像
+// 返回: *pdfRawImage 可直通JPEG对象，不满足条件时为nil
+func (r *pdfRenderer) rawJPEGFromEncoded(encoded *EncodedImage) *pdfRawImage {
+	data := encoded.Bytes()
+	if !validJPEGStream(data) {
+		return nil
+	}
+	digest := sha256.Sum256(data)
+	r.session.rawMu.Lock()
+	if cached, found := r.session.rawDigest[digest]; found {
+		r.session.rawMu.Unlock()
+		return cached
+	}
+	r.session.rawMu.Unlock()
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 || encoded.Bounds() != image.Rect(0, 0, cfg.Width, cfg.Height) {
+		return nil
+	}
+	if encoded.ColorModel() != cfg.ColorModel {
+		return nil
+	}
+	colorSpace := ""
+	switch cfg.ColorModel {
+	case color.YCbCrModel:
+		colorSpace = "DeviceRGB"
+	case color.GrayModel:
+		colorSpace = "DeviceGray"
+	default:
+		return nil
+	}
+	raw := &pdfRawImage{raw: &codecpdf.RawImage{Filter: "DCTDecode", Width: cfg.Width, Height: cfg.Height, BitsPerComponent: 8, ColorSpace: colorSpace, Data: data}}
+	raw.raw.Key = raw
+	r.session.rawMu.Lock()
+	if existing, found := r.session.rawDigest[digest]; found {
+		r.session.rawMu.Unlock()
+		return existing
+	}
+	r.session.rawDigest[digest] = raw
+	r.session.rawMu.Unlock()
+	return raw
+}
+
+// pdfRawImage 封装可直通写入PDF的JPEG、JPX或JBIG2原始图像流
 type pdfRawImage struct {
 	raw *codecpdf.RawImage
 }
@@ -590,83 +942,34 @@ func (n *pdfNavigation) addOutlines(outlines []OutlineElem, level int, bookmarks
 	return nil
 }
 
-// apply 生成当前页链接，内部目标在原生写入时关联
-// 入参: renderer PDF渲染器, page 页面索引
-func (n *pdfNavigation) apply(renderer *pdf.PDF, page int) {
-	for _, link := range n.Link[page] {
-		renderer.AddLink("", link.Rect)
+// pageNavLinks 将指定页面的链接定义转换为点空间NavLink列表
+// 入参: page 页面索引, pageRefs 全部预分配页面对象引用
+// 返回: []codecpdf.NavLink 点空间链接列表
+func (n *pdfNavigation) pageNavLinks(page int, pageRefs []pdfgo.Reference) []codecpdf.NavLink {
+	links := n.Link[page]
+	if len(links) == 0 {
+		return nil
 	}
+	result := make([]codecpdf.NavLink, len(links))
+	for i, link := range links {
+		result[i] = codecpdf.NavLink{
+			Rect: pdfgo.Rectangle{
+				XMin: link.Rect.X0 * codecpdf.PtPerMM,
+				YMin: link.Rect.Y0 * codecpdf.PtPerMM,
+				XMax: link.Rect.X1 * codecpdf.PtPerMM,
+				YMax: link.Rect.Y1 * codecpdf.PtPerMM,
+			},
+			Region:  link.Region,
+			Actions: pdfNavigationValues(link.Actions, pageRefs),
+		}
+	}
+	return result
 }
 
-// prepareRewrite 关联输出页引用并准备附件、事件、链接及先序大纲的替换
-// 入参: ctx 取消上下文, reader 输出PDF, pages 输出页引用, options 替换配置
-// 返回: error 资源、目录结构或取消错误
-func (n *pdfNavigation) prepareRewrite(ctx context.Context, reader *pdfgo.Reader, pages []pdfgo.Reference, options *pdfgo.RewriteOptions) error {
-	if err := n.writeAttachments(ctx, options); err != nil {
-		return err
-	}
-	if err := n.loadAudio(ctx); err != nil {
-		return err
-	}
-	if err := n.writeVideo(ctx, pages, options); err != nil {
-		return err
-	}
-	if len(n.Open) != 0 {
-		options.OpenActions = pdfNavigationValues(n.Open, pages)
-	}
-	if len(n.PageOpen) != 0 {
-		options.PageOpenActions = make(map[pdfgo.Reference][]pdfgo.NavigationAction, len(n.PageOpen))
-		for page, actions := range n.PageOpen {
-			options.PageOpenActions[pages[page]] = pdfNavigationValues(actions, pages)
-		}
-	}
-	options.LinkDestinations = make(map[pdfgo.AnnotationLocation]pdfgo.Destination)
-	options.LinkActions = make(map[pdfgo.AnnotationLocation][]pdfgo.NavigationAction)
-	for page, links := range n.Link {
-		for index, link := range links {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if len(link.Actions) == 1 && link.Actions[0].Target != nil {
-				target := link.Actions[0].Target
-				dest := target.Destination
-				dest.Page = pages[target.Page]
-				options.LinkDestinations[pdfgo.AnnotationLocation{Page: pages[page], Index: index}] = dest
-			} else {
-				options.LinkActions[pdfgo.AnnotationLocation{Page: pages[page], Index: index}] = pdfNavigationValues(link.Actions, pages)
-			}
-		}
-	}
-	if len(n.Outline) == 0 {
-		return nil
-	}
-	options.OutlineDestinations = make(map[pdfgo.Reference]pdfgo.Destination, len(n.Outline))
-	options.OutlineTitles = make(map[pdfgo.Reference]string, len(n.Outline))
-	options.OutlineActions = make(map[pdfgo.Reference][]pdfgo.NavigationAction)
-	count := 0
-	if err := reader.WalkOutlines(ctx, func(level int, item pdfgo.OutlineItem) error {
-		if count >= len(n.Outline) || n.Outline[count].Level != level || strconv.Itoa(count) != item.Title {
-			return fmt.Errorf("PDF output outline differs")
-		}
-		actions := n.Outline[count].Actions
-		if len(actions) == 1 && actions[0].Target != nil {
-			target := actions[0].Target
-			dest := target.Destination
-			dest.Page = pages[target.Page]
-			options.OutlineDestinations[item.Reference] = dest
-		} else {
-			options.OutlineActions[item.Reference] = pdfNavigationValues(actions, pages)
-		}
-		options.OutlineTitles[item.Reference] = n.Outline[count].Name
-		count++
-		return nil
-	}); err != nil {
-		return err
-	}
-	if count != len(n.Outline) {
-		return fmt.Errorf("PDF output outline missing")
-	}
-	return nil
+// hasDeferredMedia 判断当前导航状态是否包含可能跨页添加屏幕注解或延迟加载媒体的动作
+// 返回: bool 是否含视频或音频动作
+func (n *pdfNavigation) hasDeferredMedia() bool {
+	return len(n.video) > 0 || len(n.audio) > 0
 }
 
 // pdfLink PDF链接
@@ -696,6 +999,302 @@ type pdfNavigationAction struct {
 	Attachment *pdfgo.AttachmentAction
 	Sound      *pdfgo.SoundAction
 	Movie      *pdfMovieAction
+}
+
+// drawPDFTemplatePage 将OFD模板页编译为全局复用的PDF Form XObject并在当前页调用
+// 入参: pdfOut PDF渲染器, template 模板页内容, offsetX 视口横偏移, offsetY 视口纵偏移, pageOrigin 页面原点变换, pageH 页面高度
+// 返回: error 渲染或压缩错误
+func (r *Renderer) drawPDFTemplatePage(pdfOut *pdfRenderer, template *PageContent, offsetX, offsetY float64, pageOrigin *Matrix, pageH float64) error {
+	key := pdfTemplateFormKey{
+		template:      template,
+		width:         pdfOut.width,
+		height:        pdfOut.height,
+		offsetX:       offsetX,
+		offsetY:       offsetY,
+		printing:      r.printing,
+		printContents: r.printContents,
+	}
+	pdfOut.session.formMu.Lock()
+	if existing, ok := pdfOut.session.templateForms[key]; ok {
+		pdfOut.session.formMu.Unlock()
+		<-existing.done
+		if existing.err != nil {
+			return existing.err
+		}
+		pdfOut.session.templateHits.Add(1)
+		inv := 1.0 / codecpdf.PtPerMM
+		pdfOut.content.DrawForm(existing.name, existing.ref, canvas.Identity.Scale(inv, inv), nil, 255)
+		return nil
+	}
+	name, ref := pdfOut.session.allocFormNameRefUnlocked()
+	entry := &pdfFormEntry{
+		done:   make(chan struct{}),
+		name:   name,
+		ref:    ref,
+		width:  pdfOut.width,
+		height: pdfOut.height,
+	}
+	pdfOut.session.templateForms[key] = entry
+	pdfOut.session.formMu.Unlock()
+	subPDF := newPDFPageRenderer(pdfOut.session, pdfOut.ctx, pdfOut.width, pdfOut.height, r.Reader.resources)
+	subRenderer := *r
+	subRenderer.pageContext = context.WithValue(pdfOut.ctx, pdfRendererCtxKey{}, subPDF)
+	subRenderer.renderError = nil
+	subVisitor := &canvasPageVisitor{renderer: &subRenderer, ctx: canvas.NewContext(subPDF), height: pageH}
+	restoreTpl := subRenderer.bindParsedResources(template.pageResources)
+	var walkErr error
+	for templateOrder := range 3 {
+		if walkErr = subRenderer.walkLayers(template.Content.Layer, templateOrder, pageOrigin, subVisitor); walkErr != nil {
+			break
+		}
+	}
+	restoreTpl()
+	if walkErr == nil {
+		if subPDF.imageError != nil {
+			walkErr = subPDF.imageError
+		} else if subRenderer.renderError != nil {
+			walkErr = subRenderer.renderError
+		}
+	}
+	if walkErr == nil {
+		raw := subPDF.content.Bytes()
+		data := raw
+		compressed := false
+		if pdfOut.session.compress {
+			comp, _, compErr := codecpdf.CompressBytes(nil, nil, pdfOut.session.compressLevel, raw)
+			if compErr != nil {
+				walkErr = compErr
+			} else {
+				data = comp
+				compressed = true
+			}
+		}
+		if walkErr == nil {
+			entry.resources = subPDF.content.Resources()
+			entry.data = data
+			entry.compressed = compressed
+			pdfOut.session.enqueueForm(entry)
+		}
+	}
+	entry.err = walkErr
+	close(entry.done)
+	if walkErr != nil {
+		return walkErr
+	}
+	inv := 1.0 / codecpdf.PtPerMM
+	pdfOut.content.DrawForm(entry.name, entry.ref, canvas.Identity.Scale(inv, inv), nil, 255)
+	return nil
+}
+
+// drawPDFOFDStamp 将OFD矢量印章编译为全局复用的PDF Form XObject，骑缝章每页仅施加裁剪与变换
+// 入参: pdfOut PDF渲染器, s 印章定义, pageH 页面高度, parentClip 父裁剪路径
+// 返回: error 渲染或压缩错误
+func (r *Renderer) drawPDFOFDStamp(pdfOut *pdfRenderer, s Stamp, pageH float64, parentClip *canvas.Path) error {
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = pdfOut.ctx
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	validBox := rasterPositive(s.Box.W) && rasterPositive(s.Box.H) && (s.Clip == nil || rasterPositive(s.Clip.W) && rasterPositive(s.Clip.H))
+	if !validBox {
+		return nil
+	}
+	key := pdfStampFormKey{digest: sha256.Sum256(s.Data), printing: r.printing}
+	pdfOut.session.formMu.Lock()
+	group, exists := pdfOut.session.stampForms[key]
+	if !exists {
+		group = &pdfStampFormGroup{done: make(chan struct{})}
+		pdfOut.session.stampForms[key] = group
+		pdfOut.session.formMu.Unlock()
+		var compileErr error
+		session, err := r.loadStampOFD(ctx, s.Data)
+		if err != nil {
+			compileErr = err
+		} else {
+			forms := make([]pdfStampPageForm, 0, len(session.pages))
+			for i, content := range session.pages {
+				sealBox := session.boxes[i]
+				if !rasterPositive(sealBox.W) || !rasterPositive(sealBox.H) {
+					continue
+				}
+				subPDF := newPDFPageRenderer(pdfOut.session, pdfOut.ctx, sealBox.W, sealBox.H, r.Reader.resources)
+				pageRenderer := *session.renderer
+				pageRenderer.DPI = r.DPI
+				pageRenderer.printing = r.printing
+				pageRenderer.decodeImages = r.decodeImages
+				pageRenderer.pageContext = context.WithValue(pdfOut.ctx, pdfRendererCtxKey{}, subPDF)
+				pageRenderer.renderError = nil
+				if err := pageRenderer.renderCanvasPageClipped(canvas.NewContext(subPDF), content, false, nil); err != nil {
+					compileErr = err
+					break
+				}
+				if subPDF.imageError != nil {
+					compileErr = subPDF.imageError
+					break
+				}
+				raw := subPDF.content.Bytes()
+				data := raw
+				compressed := false
+				if pdfOut.session.compress {
+					comp, _, compErr := codecpdf.CompressBytes(nil, nil, pdfOut.session.compressLevel, raw)
+					if compErr != nil {
+						compileErr = compErr
+						break
+					}
+					data = comp
+					compressed = true
+				}
+				name, ref := pdfOut.session.allocFormNameRef()
+				pdfOut.session.enqueueForm(&pdfFormEntry{
+					name:       name,
+					ref:        ref,
+					width:      sealBox.W,
+					height:     sealBox.H,
+					resources:  subPDF.content.Resources(),
+					data:       data,
+					compressed: compressed,
+				})
+				forms = append(forms, pdfStampPageForm{name: name, ref: ref, width: sealBox.W, height: sealBox.H})
+			}
+			group.forms = forms
+		}
+		group.err = compileErr
+		close(group.done)
+	} else {
+		pdfOut.session.formMu.Unlock()
+		<-group.done
+		if group.err == nil {
+			pdfOut.session.stampHits.Add(1)
+		}
+	}
+	if group.err != nil {
+		return group.err
+	}
+	var clip *canvas.Path
+	if parentClip != nil || s.Clip != nil {
+		clip = canvas.Rectangle(s.Box.W, s.Box.H).Translate(s.Box.X, pageH-s.Box.Y-s.Box.H)
+		if parentClip != nil {
+			clip = r.intersectCachedClipPath(clip, parentClip)
+		}
+		if s.Clip != nil {
+			rect := canvas.Rectangle(s.Clip.W, s.Clip.H).Translate(s.Box.X+s.Clip.X, pageH-s.Box.Y-s.Clip.Y-s.Clip.H)
+			clip = r.intersectCachedClipPath(clip, rect)
+		}
+		if clip.Empty() {
+			return nil
+		}
+	}
+	for _, pf := range group.forms {
+		m := canvas.Identity.Translate(s.Box.X, pageH-s.Box.Y-s.Box.H).Scale((s.Box.W/pf.width)/codecpdf.PtPerMM, (s.Box.H/pf.height)/codecpdf.PtPerMM)
+		pdfOut.content.DrawForm(pf.name, pf.ref, m, clip, 255)
+	}
+	return nil
+}
+
+// drawPDFCompositeForm 将文档级复用复合图元编译为全局共享PDF Form XObject并按实例变换调用
+// 入参: pdfOut PDF渲染器, ref 复合图元定义, matrix 实例到页面矩阵, stateClip 页面几何裁剪, cvClip 画布裁剪, pageH 页面高度, alpha 整体不透明度, needGroup 是否需透明组隔离, references 当前引用链
+// 返回: error 渲染或压缩错误
+func (r *Renderer) drawPDFCompositeForm(pdfOut *pdfRenderer, ref *CompositeGraphicUnit, matrix Matrix, stateClip *GeometryPath, cvClip *canvas.Path, pageH float64, alpha uint8, needGroup bool, references map[*CompositeGraphicUnit]bool) error {
+	if alpha == 0 {
+		return nil
+	}
+	var clip *canvas.Path
+	if stateClip != nil {
+		var err error
+		clip, err = geometryToCanvasPath(stateClip)
+		if err != nil {
+			return err
+		}
+		if clip != nil {
+			clip = clip.Translate(0, pageH)
+		}
+	}
+	clip = r.intersectCachedClipPath(cvClip, clip)
+	if clip != nil && clip.Empty() {
+		return nil
+	}
+	key := pdfCompositeFormKey{unit: ref, printing: r.printing, printContents: r.printContents, group: needGroup}
+	pdfOut.session.formMu.Lock()
+	if existing, ok := pdfOut.session.compForms[key]; ok {
+		pdfOut.session.formMu.Unlock()
+		<-existing.done
+		if existing.err != nil {
+			return existing.err
+		}
+		pdfOut.session.compHits.Add(1)
+		inv := 1.0 / codecpdf.PtPerMM
+		m := canvas.Matrix{
+			{matrix.a * inv, -matrix.c * inv, matrix.e + matrix.c*ref.Height},
+			{-matrix.b * inv, matrix.d * inv, pageH - matrix.f - matrix.d*ref.Height},
+		}
+		pdfOut.content.DrawForm(existing.name, existing.ref, m, clip, alpha)
+		return nil
+	}
+	name, formRef := pdfOut.session.allocFormNameRefUnlocked()
+	entry := &pdfFormEntry{
+		done:              make(chan struct{}),
+		name:              name,
+		ref:               formRef,
+		width:             ref.Width,
+		height:            ref.Height,
+		transparencyGroup: needGroup,
+	}
+	pdfOut.session.compForms[key] = entry
+	pdfOut.session.formMu.Unlock()
+	subPDF := newPDFPageRenderer(pdfOut.session, pdfOut.ctx, ref.Width, ref.Height, r.Reader.resources)
+	subRenderer := *r
+	subRenderer.pageContext = context.WithValue(pdfOut.ctx, pdfRendererCtxKey{}, subPDF)
+	subRenderer.renderError = nil
+	subVisitor := &canvasPageVisitor{renderer: &subRenderer, ctx: canvas.NewContext(subPDF), height: ref.Height}
+	nextRefs := make(map[*CompositeGraphicUnit]bool, len(references)+1)
+	for k, v := range references {
+		nextRefs[k] = v
+	}
+	nextRefs[ref] = true
+	copyUnit := *ref
+	copyUnit.Alpha = nil
+	walkErr := subRenderer.walkComposite(copyUnit, RenderState{}, subVisitor, nextRefs)
+	if walkErr == nil {
+		if subPDF.imageError != nil {
+			walkErr = subPDF.imageError
+		} else if subRenderer.renderError != nil {
+			walkErr = subRenderer.renderError
+		}
+	}
+	if walkErr == nil {
+		raw := subPDF.content.Bytes()
+		data := raw
+		compressed := false
+		if pdfOut.session.compress {
+			comp, _, compErr := codecpdf.CompressBytes(nil, nil, pdfOut.session.compressLevel, raw)
+			if compErr != nil {
+				walkErr = compErr
+			} else {
+				data = comp
+				compressed = true
+			}
+		}
+		if walkErr == nil {
+			entry.resources = subPDF.content.Resources()
+			entry.data = data
+			entry.compressed = compressed
+			pdfOut.session.enqueueForm(entry)
+		}
+	}
+	entry.err = walkErr
+	close(entry.done)
+	if walkErr != nil {
+		return walkErr
+	}
+	inv := 1.0 / codecpdf.PtPerMM
+	m := canvas.Matrix{
+		{matrix.a * inv, -matrix.c * inv, matrix.e + matrix.c*ref.Height},
+		{-matrix.b * inv, matrix.d * inv, pageH - matrix.f - matrix.d*ref.Height},
+	}
+	pdfOut.content.DrawForm(entry.name, entry.ref, m, clip, alpha)
+	return nil
 }
 
 // pdfSourceRect 转换PDF动作区域
@@ -841,7 +1440,7 @@ func isJBIG2File(data []byte) bool {
 	return len(data) >= 8 && bytes.Equal(data[:8], []byte{0x97, 0x4A, 0x42, 0x32, 0x0D, 0x0A, 0x1A, 0x0A})
 }
 
-// tryPDFRawImage 检测不透明JP2/JPX与JBIG2原始流并构造零像素重编码直通对象
+// tryPDFRawImage 检测不透明JPEG、JP2/JPX与JBIG2原始流并构造零像素重编码直通对象
 // 入参: ctx 取消上下文, data 原始图像字节
 // 返回: *pdfRawImage 可直通图像，不满足条件时为nil
 func tryPDFRawImage(ctx context.Context, data []byte) *pdfRawImage {
@@ -850,6 +1449,33 @@ func tryPDFRawImage(ctx context.Context, data []byte) *pdfRawImage {
 	}
 	if ctx.Err() != nil || len(data) == 0 {
 		return nil
+	}
+	if baseimage.IsJPEG(data) && validJPEGStream(data) {
+		enc, _, err := baseimage.DecodeContext(ctx, data)
+		if err != nil {
+			return nil
+		}
+		encoded, ok := enc.(*EncodedImage)
+		if !ok {
+			return nil
+		}
+		cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+		if err != nil || cfg.Width <= 0 || cfg.Height <= 0 || encoded.Bounds() != image.Rect(0, 0, cfg.Width, cfg.Height) {
+			return nil
+		}
+		if encoded.ColorModel() != cfg.ColorModel {
+			return nil
+		}
+		colorSpace := ""
+		switch cfg.ColorModel {
+		case color.YCbCrModel:
+			colorSpace = "DeviceRGB"
+		case color.GrayModel:
+			colorSpace = "DeviceGray"
+		default:
+			return nil
+		}
+		return &pdfRawImage{raw: &codecpdf.RawImage{Filter: "DCTDecode", Width: cfg.Width, Height: cfg.Height, BitsPerComponent: 8, ColorSpace: colorSpace, Data: data}}
 	}
 	if isJP2Container(data) || isJ2KCodestream(data) {
 		decoder, err := j2kgo.NewDecoder(ctx, bytes.NewReader(data), nil)

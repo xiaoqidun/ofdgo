@@ -20,6 +20,7 @@ import (
 	"image/color"
 	"image/draw"
 	"math"
+	"reflect"
 	"slices"
 	"sync"
 
@@ -31,19 +32,11 @@ import (
 
 // canvasSRGBTables 复用八位预乘sRGB的双向传递表，透明度参与索引以保留原运算精度
 var canvasSRGBTables = sync.OnceValue(func() [2]*[256][256]uint8 {
-	var result [2]*[256][256]uint8
-	space := canvas.SRGBColorSpace{}
-	for direction, transform := range []func(color.Color) color.RGBA{space.ToLinear, space.FromLinear} {
-		table := new([256][256]uint8)
-		for alpha := range 256 {
-			for value := range 256 {
-				table[alpha][value] = transform(color.RGBA{R: uint8(value), A: uint8(alpha)}).R
-			}
-		}
-		result[direction] = table
-	}
-	return result
+	return buildCanvasColorTables(canvas.SRGBColorSpace{})
 })
+
+// canvasGammaTables 缓存Gamma色彩空间的双向查表
+var canvasGammaTables sync.Map
 
 // init 注册Canvas适配器和默认组合
 func init() {
@@ -179,14 +172,30 @@ func (g rasterGradientCanvas) SetColorSpace(space canvas.ColorSpace) canvas.Grad
 // 入参: space 颜色空间, linear 是否转入线性空间
 // 返回: func(color.RGBA) color.RGBA 单像素变换
 func canvasColorTransfer(space canvas.ColorSpace, linear bool) func(color.RGBA) color.RGBA {
-	if _, ok := space.(canvas.SRGBColorSpace); ok {
-		direction := 1
-		if linear {
-			direction = 0
-		}
+	direction := 1
+	if linear {
+		direction = 0
+	}
+	switch cs := space.(type) {
+	case canvas.SRGBColorSpace:
 		table := canvasSRGBTables()[direction]
 		return func(value color.RGBA) color.RGBA {
 			return color.RGBA{R: table[value.A][value.R], G: table[value.A][value.G], B: table[value.A][value.B], A: value.A}
+		}
+	case canvas.GammaColorSpace:
+		if finite(cs.Gamma) && cs.Gamma > 0 {
+			key := math.Float64bits(cs.Gamma)
+			var tables [2]*[256][256]uint8
+			if cached, ok := canvasGammaTables.Load(key); ok {
+				tables = cached.([2]*[256][256]uint8)
+			} else {
+				tables = buildCanvasColorTables(cs)
+				canvasGammaTables.Store(key, tables)
+			}
+			table := tables[direction]
+			return func(value color.RGBA) color.RGBA {
+				return color.RGBA{R: table[value.A][value.R], G: table[value.A][value.G], B: table[value.A][value.B], A: value.A}
+			}
 		}
 	}
 	if linear {
@@ -203,20 +212,28 @@ func (b CanvasBackend) renderImage(page *RasterPage, img *image.RGBA) (image.Ima
 	if space == nil {
 		space = canvas.DefaultColorSpace
 	}
+	_, linear := space.(canvas.LinearColorSpace)
+	var toLinear func(color.RGBA) color.RGBA
+	var linearImages map[image.Image]*image.RGBA
+	if !linear {
+		toLinear = canvasColorTransfer(space, true)
+		linearImages = make(map[image.Image]*image.RGBA)
+	}
 	masks := renderCache[[32]byte, *image.Alpha]{limit: 16 << 20}
-	if err := b.renderCommands(page, page.Commands, img, image.Point{}, img.Rect.Dx(), img.Rect.Dy(), space, &masks); err != nil {
+	var scratch []byte
+	if err := b.renderCommands(page, page.Commands, img, image.Point{}, img.Rect.Dx(), img.Rect.Dy(), space, toLinear, linearImages, &masks, &scratch); err != nil {
 		return nil, err
 	}
-	if _, linear := space.(canvas.LinearColorSpace); !linear {
+	if !linear {
 		baseimage.TransformRGBA(img, img, canvasColorTransfer(space, false))
 	}
 	return img, nil
 }
 
 // renderCommands 在带页面像素偏移的目标缓冲上执行指令序列并支持嵌套离屏透明组合成
-// 入参: page 页面定义, commands 指令切片, img 当前目标缓冲, offset 目标左上角在整页中的像素偏移, pageW 整页像素宽, pageH 整页像素高, space 线性或目标色彩空间, masks 裁剪蒙版缓存
+// 入参: page 页面定义, commands 指令切片, img 当前目标缓冲, offset 目标左上角在整页中的像素偏移, pageW 整页像素宽, pageH 整页像素高, space 线性或目标色彩空间, toLinear 非线性转线性单像素函数, linearImages 页内线性图像缓存, masks 裁剪蒙版缓存, scratch 可复用离屏裁剪缓冲
 // 返回: error 绘制错误
-func (b CanvasBackend) renderCommands(page *RasterPage, commands []RasterCommand, img *image.RGBA, offset image.Point, pageW, pageH int, space canvas.ColorSpace, masks *renderCache[[32]byte, *image.Alpha]) error {
+func (b CanvasBackend) renderCommands(page *RasterPage, commands []RasterCommand, img *image.RGBA, offset image.Point, pageW, pageH int, space canvas.ColorSpace, toLinear func(color.RGBA) color.RGBA, linearImages map[image.Image]*image.RGBA, masks *renderCache[[32]byte, *image.Alpha], scratch *[]byte) error {
 	scale := page.DPI / 25.4
 	dstPageBounds := img.Rect.Add(offset)
 	r := rasterizer.FromImage(img, canvas.DPMM(scale), space)
@@ -235,7 +252,7 @@ func (b CanvasBackend) renderCommands(page *RasterPage, commands []RasterCommand
 				continue
 			}
 			offscreen := image.NewRGBA(image.Rect(0, 0, groupBounds.Dx(), groupBounds.Dy()))
-			if err := b.renderCommands(page, commands[i+1:end], offscreen, groupBounds.Min, pageW, pageH, space, masks); err != nil {
+			if err := b.renderCommands(page, commands[i+1:end], offscreen, groupBounds.Min, pageW, pageH, space, toLinear, linearImages, masks, scratch); err != nil {
 				return err
 			}
 			compositeGroupAlpha(img, groupBounds.Sub(offset), offscreen, cmd.GroupAlpha)
@@ -250,17 +267,35 @@ func (b CanvasBackend) renderCommands(page *RasterPage, commands []RasterCommand
 			if err != nil {
 				return fmt.Errorf("canvas image %d: %w", i, err)
 			}
-			if _, linear := space.(canvas.LinearColorSpace); !linear {
-				converted := image.NewRGBA(source.Bounds())
-				baseimage.TransformRGBA(converted, source, canvasColorTransfer(space, true))
-				source = converted
+			if toLinear != nil {
+				cacheable := reflect.ValueOf(source).Kind() == reflect.Pointer
+				if cacheable {
+					if converted, ok := linearImages[source]; ok {
+						source = converted
+					} else {
+						converted = image.NewRGBA(source.Bounds())
+						baseimage.TransformRGBA(converted, source, toLinear)
+						linearImages[source] = converted
+						source = converted
+					}
+				} else {
+					converted := image.NewRGBA(source.Bounds())
+					baseimage.TransformRGBA(converted, source, toLinear)
+					source = converted
+				}
 			}
 			if err := drawRasterImageCommandOffset(b, page, img, offset, pageH, source, cmd, masks); err != nil {
 				return err
 			}
 			continue
 		}
-		p, err := rasterCanvasPath(visibleRasterPath(cmd, page), pathData)
+		visible := visibleRasterPath(cmd, page)
+		if cmd.Clip != nil {
+			if len(cmd.Clip) == 0 || len(visible) == 0 {
+				continue
+			}
+		}
+		p, err := rasterCanvasPath(visible, pathData)
 		if err != nil {
 			return fmt.Errorf("canvas command %d: %w", i, err)
 		}
@@ -352,15 +387,29 @@ func (b CanvasBackend) renderCommands(page *RasterPage, commands []RasterCommand
 			r.RenderPath(p, style, matrix)
 			continue
 		}
+		pathRect, bounded := rasterCommandPathPixelBounds(page, cmd, visible, pageH, dstPageBounds)
+		if bounded && pathRect.Empty() {
+			continue
+		}
 		mask, err := rasterClipMask(b, page, cmd.Clip, masks)
 		if err != nil {
 			return err
 		}
 		clipRect := mask.Rect.Intersect(dstPageBounds)
+		if bounded {
+			clipRect = clipRect.Intersect(pathRect)
+		}
 		if clipRect.Empty() {
 			continue
 		}
-		part := image.NewRGBA(image.Rect(0, 0, clipRect.Dx(), clipRect.Dy()))
+		w, h := clipRect.Dx(), clipRect.Dy()
+		need := w * h * 4
+		if cap(*scratch) < need {
+			*scratch = make([]byte, need)
+		}
+		buf := (*scratch)[:need]
+		clear(buf)
+		part := &image.RGBA{Pix: buf, Stride: w * 4, Rect: image.Rect(0, 0, w, h)}
 		local := rasterizer.FromImage(part, canvas.DPMM(scale), space)
 		matrix[0][2] -= float64(clipRect.Min.X) / scale
 		matrix[1][2] -= float64(pageH-clipRect.Max.Y) / scale
@@ -368,6 +417,31 @@ func (b CanvasBackend) renderCommands(page *RasterPage, commands []RasterCommand
 		draw.DrawMask(img, clipRect.Sub(offset), part, image.Point{}, mask, clipRect.Min, draw.Over)
 	}
 	return nil
+}
+
+// rasterCommandPathPixelBounds 计算路径绘制指令含描边外扩后的紧致像素包围盒
+// 入参: page 页面定义, cmd 绘制指令, path 可见路径片段, pageH 整页像素高, limit 目标像素边界
+// 返回: image.Rectangle 截断后的像素包围盒, bool 坐标与描边外扩是否全部有限
+func rasterCommandPathPixelBounds(page *RasterPage, cmd RasterCommand, path []RasterSegment, pageH int, limit image.Rectangle) (image.Rectangle, bool) {
+	scale := page.DPI / 25.4
+	margin := 2.0
+	if cmd.Stroke != nil {
+		miter := 1.0
+		if cmd.Stroke.Join == "" || cmd.Stroke.Join == "Miter" {
+			ml := cmd.Stroke.MiterLimit
+			if ml <= 0 && !cmd.Stroke.MiterLimitSet {
+				ml = defaultMiterLimit
+			}
+			miter = math.Max(math.Sqrt2, max(1.0, ml))
+		} else if cmd.Stroke.Cap == "Square" {
+			miter = math.Sqrt2
+		}
+		margin = math.Ceil(cmd.Stroke.Width*scale*miter/2) + 2
+		if !finite(margin) {
+			return image.Rectangle{}, false
+		}
+	}
+	return rasterSegmentsPixelBounds(path, page.PixelTransform(cmd.Transform, pageH), margin, limit)
 }
 
 // findRasterGroupEnd 查找与起始透明组指令配对的结束指令索引
@@ -394,7 +468,6 @@ func findRasterGroupEnd(commands []RasterCommand, begin int) int {
 // 返回: image.Rectangle 整页像素坐标中的脏区包围盒
 func rasterCommandsPixelBounds(page *RasterPage, commands []RasterCommand, pageW, pageH int) image.Rectangle {
 	pageBounds := image.Rect(0, 0, pageW, pageH)
-	scale := page.DPI / 25.4
 	identityPx := page.PixelTransform(RasterMatrix{1, 0, 0, 1, 0, 0}, pageH)
 	var union image.Rectangle
 	for i := 0; i < len(commands); i++ {
@@ -419,17 +492,8 @@ func rasterCommandsPixelBounds(page *RasterPage, commands []RasterCommand, pageW
 			if len(cmd.Path) == 0 || cmd.Paint.Gradient == nil && cmd.Paint.Color.A == 0 {
 				continue
 			}
-			m := page.PixelTransform(cmd.Transform, pageH)
-			margin := 2.0
-			if cmd.Stroke != nil {
-				miter := math.Max(math.Sqrt2, max(1.0, cmd.Stroke.MiterLimit))
-				margin = math.Ceil(cmd.Stroke.Width*scale*miter/2) + 2
-				if !finite(margin) {
-					return pageBounds
-				}
-			}
 			var ok bool
-			rect, ok = rasterSegmentsPixelBounds(cmd.Path, m, margin, pageBounds)
+			rect, ok = rasterCommandPathPixelBounds(page, cmd, cmd.Path, pageH, pageBounds)
 			if !ok {
 				return pageBounds
 			}
@@ -610,6 +674,23 @@ func rasterCanvasPath(path []RasterSegment, buffer []float64) (*canvas.Path, err
 		}
 	}
 	return p, nil
+}
+
+// buildCanvasColorTables 为单通道可分离色彩空间预生成双向查表
+// 入参: space 色彩空间
+// 返回: [2]*[256][256]uint8 索引0为ToLinear、索引1为FromLinear的查找表
+func buildCanvasColorTables(space canvas.ColorSpace) [2]*[256][256]uint8 {
+	var result [2]*[256][256]uint8
+	for direction, transform := range []func(color.Color) color.RGBA{space.ToLinear, space.FromLinear} {
+		table := new([256][256]uint8)
+		for alpha := range 256 {
+			for value := range 256 {
+				table[alpha][value] = transform(color.RGBA{R: uint8(value), A: uint8(alpha)}).R
+			}
+		}
+		result[direction] = table
+	}
+	return result
 }
 
 // defaultRenderBackends 创建默认组合，调用方可按职责替换任意后端

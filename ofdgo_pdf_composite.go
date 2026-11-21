@@ -41,6 +41,7 @@ type pdfCompositeNode struct {
 	text       *pdfgo.TextMark
 	image      *pdfgo.ImageMark
 	group      *pdfgo.GroupMark
+	form       *pdfgo.FormMark
 	children   []pdfCompositeNode
 	textObject *pdfgo.TextObject
 	glyph      *pdfgo.TextMark
@@ -729,12 +730,14 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widg
 			nodes = append(nodes, pdfCompositeNode{group: &mark, children: children})
 			return nil
 		}
-		v.Form = func(_ pdfgo.FormMark, walk func(pdfgo.Visitor) error) error {
+		v.Form = func(mark pdfgo.FormMark, walk func(pdfgo.Visitor) error) error {
 			children, err := collect(walk, replacement)
 			if err != nil {
 				return err
 			}
 			if len(children) != 0 {
+				formMark := mark
+				children[0].form = &formMark
 				children[0].formCount = len(children)
 				nodes = append(nodes, children...)
 			}
@@ -820,16 +823,29 @@ func (p *pdfImporter) compositePage(space *pdfgo.ColorSpace, walk func(pdfgo.Vis
 // 返回: error 转换或合成错误
 func (p *pdfImporter) compositeObjects(nodes []pdfCompositeNode) error {
 	space := p.compositeSpace
+	previousLocalForms := p.localFormCounts
+	p.localFormCounts = countLocalForms(nodes)
+	defer func() { p.localFormCounts = previousLocalForms }()
 	for i := 0; i < len(nodes); i++ {
 		node := nodes[i]
-		if count := node.formCount; count >= 16 && count <= len(nodes)-i && !p.transferBackdrop {
-			packed, err := p.compositeForm(nodes[i : i+count])
+		if count := node.formCount; count > 0 && count <= len(nodes)-i && !p.transferBackdrop && p.shouldReuseForm(node.form, count) {
+			packed, err := p.compositeForm(node.form, nodes[i:i+count])
 			if err != nil {
 				return fmt.Errorf("convert form at graphic %d: %w", i+1, err)
 			}
 			if packed {
 				p.compositeNodes = append(p.compositeNodes, nodes[i:i+count]...)
 				i += count - 1
+				continue
+			}
+		}
+		if node.group != nil && !node.group.Page && (node.group.Ref != (pdfgo.Reference{}) || node.group.Stream != nil) && !p.transferBackdrop && p.shouldReuseGroupForm(node.group, len(node.children)) {
+			packed, err := p.compositeGroupForm(node)
+			if err != nil {
+				return fmt.Errorf("convert group form at graphic %d: %w", i+1, err)
+			}
+			if packed {
+				p.compositeNodes = append(p.compositeNodes, node)
 				continue
 			}
 		}

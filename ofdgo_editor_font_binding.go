@@ -1015,7 +1015,63 @@ func externalFontName(name string) string {
 	return name
 }
 
-// pruneUnreferencedFiles 流式核对全包文件引用并同步版本清单，保留附件及无法确认的扩展引用
+// editableVersionLocation 确认当前编辑版本独占且未受签章保护的Version.xml路径
+// 入参: ctx 取消上下文, reader 包快照, protectedFiles 受签章保护的文件路径
+// 返回: string 允许同步更新的Version.xml路径，非独占、受保护或非版本入口时为空, error 读取或取消错误
+func editableVersionLocation(ctx context.Context, reader *Reader, protectedFiles map[string]bool) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if !reader.currentVersioned() {
+		return "", nil
+	}
+	view := *reader
+	if _, err := view.DocumentRootContext(ctx); err != nil {
+		return "", err
+	}
+	if view.versionInfo == nil {
+		return "", nil
+	}
+	target := cleanPackagePath(view.versionInfo.Location)
+	if target == "" || protectedFiles[target] {
+		return "", nil
+	}
+	data, err := reader.readFileViewContext(ctx, "OFD.xml")
+	if err != nil {
+		return "", err
+	}
+	root, err := parseEditorXMLContext(ctx, data)
+	if err != nil {
+		return "", err
+	}
+	refs := 0
+	for _, body := range root.children {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if !body.matchesOFD("DocBody") {
+			continue
+		}
+		entries, err := parseVersionEntries(ctx, body)
+		if err != nil {
+			return "", err
+		}
+		for _, entry := range entries {
+			if cleanPackagePath(entry.Location) == target {
+				refs++
+				if refs > 1 {
+					return "", nil
+				}
+			}
+		}
+	}
+	if refs != 1 {
+		return "", nil
+	}
+	return target, ctx.Err()
+}
+
+// pruneUnreferencedFiles 流式核对全包文件引用并仅同步当前编辑版本独占的Version.xml，尊重签章与历史版本保护
 // 入参: ctx 取消上下文, reader 包快照, candidates 待清理的文件路径
 // 返回: error 取消或读取错误
 func pruneUnreferencedFiles(ctx context.Context, reader *Reader, candidates ...string) error {
@@ -1030,6 +1086,31 @@ func pruneUnreferencedFiles(ctx context.Context, reader *Reader, candidates ...s
 	}
 	if len(removed) == 0 {
 		return nil
+	}
+	hasSig, err := reader.hasOutputSignatures(ctx)
+	if err != nil {
+		return err
+	}
+	var protectedFiles map[string]bool
+	if hasSig {
+		var protected bool
+		_, protectedFiles, protected, err = reader.outputSignatureProtection(ctx)
+		if err != nil {
+			return err
+		}
+		if protected {
+			return ctx.Err()
+		}
+		for name := range protectedFiles {
+			delete(removed, name)
+		}
+		if len(removed) == 0 {
+			return ctx.Err()
+		}
+	}
+	editableVersionXML, err := editableVersionLocation(ctx, reader, protectedFiles)
+	if err != nil {
+		return err
 	}
 	indexes := make([]int, reader.DocumentCount())
 	for index := range indexes {
@@ -1058,6 +1139,7 @@ func pruneUnreferencedFiles(ctx context.Context, reader *Reader, candidates ...s
 		if files[name] && !structures[name] {
 			continue
 		}
+		editableVersion := editableVersionXML != "" && cleanPackagePath(name) == editableVersionXML
 		root, uncertain := "", false
 		inspect := func(node xml.StartElement) error {
 			if root == "" {
@@ -1077,7 +1159,7 @@ func pruneUnreferencedFiles(ctx context.Context, reader *Reader, candidates ...s
 		}
 		add := func(location string, kind int) {
 			location = cleanPackagePath(location)
-			if root == "DocVersion" && kind == packageReferenceData {
+			if root == "DocVersion" && kind == packageReferenceData && editableVersion {
 				return
 			}
 			delete(removed, location)
@@ -1086,8 +1168,9 @@ func pruneUnreferencedFiles(ctx context.Context, reader *Reader, candidates ...s
 			}
 		}
 		record := func(node *editorXML, attribute, target string) {
-			if root == "DocVersion" && node.name.Local == "File" && attribute == "" && removed[target] {
-				versions[name] = append(versions[name], versionEditLink{node: node, target: target})
+			cleanTarget := cleanPackagePath(target)
+			if root == "DocVersion" && editableVersion && node.name.Local == "File" && attribute == "" && removed[cleanTarget] {
+				versions[name] = append(versions[name], versionEditLink{node: node, target: cleanTarget})
 			}
 		}
 		err := reader.scanDocumentFileReferences(ctx, name, true, add, record, inspect)
@@ -1120,6 +1203,9 @@ func pruneUnreferencedFiles(ctx context.Context, reader *Reader, candidates ...s
 	for name, links := range versions {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if protectedFiles[cleanPackagePath(name)] {
+			continue
 		}
 		var patches []editorXMLPatch
 		for _, link := range links {
@@ -1157,6 +1243,9 @@ func pruneUnreferencedFiles(ctx context.Context, reader *Reader, candidates ...s
 	}
 	if view.Zip != nil {
 		view.Zip = &zip.Reader{Comment: view.Zip.Comment, File: slices.DeleteFunc(slices.Clone(view.Zip.File), func(file *zip.File) bool { return removed[cleanPackagePath(file.Name)] })}
+	}
+	if src := view.encryptedSource(); src != nil {
+		view.setEncryptedSource(src.omit(removed))
 	}
 	if err := view.initRootContext(ctx); err != nil {
 		return err

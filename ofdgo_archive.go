@@ -16,14 +16,20 @@ package ofdgo
 
 import (
 	"archive/zip"
+	"bytes"
 	"compress/flate"
 	"context"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"io/fs"
 	"path"
 	"strings"
+	"sync"
 )
+
+// archiveParallelMaxBytes 限制单条目并发预压缩的内存上限，超限文件回退主线程流式写出
+const archiveParallelMaxBytes = 32 << 20
 
 // ArchiveFile 描述已生成的归档文件，不关闭调用方提供的源读取器
 type ArchiveFile struct {
@@ -44,50 +50,180 @@ func WriteArchive(ctx context.Context, writer io.Writer, files []ArchiveFile, op
 	if err := options.Compression.Validate(); err != nil {
 		return 0, err
 	}
-	names := map[string]bool{}
+	names := make(map[string]bool, len(files))
+	deflateCount := 0
 	for _, file := range files {
 		if !fs.ValidPath(file.Name) || file.Name == "." || strings.Contains(file.Name, "\\") || names[file.Name] || file.Input == nil {
 			return 0, fmt.Errorf("invalid archive file %q", file.Name)
 		}
 		names[file.Name] = true
+		if archiveMethod(file.Name) == zip.Deflate && file.Input.Size() <= archiveParallelMaxBytes {
+			deflateCount++
+		}
 	}
 	var count int64
 	archive := zip.NewWriter(convertWriter{ctx: ctx, writer: writer, count: &count})
 	configureArchive(archive, options.Compression)
-	var buffer []byte
-	for i, file := range files {
+	workers := min(deflateCount, conversionWorkers(ctx))
+	if workers <= 1 {
+		var buffer []byte
+		for i, file := range files {
+			if err := ctx.Err(); err != nil {
+				return count, err
+			}
+			if options.OnProgress != nil {
+				if err := options.OnProgress(i, len(files)); err != nil {
+					return count, err
+				}
+			}
+			if err := ctx.Err(); err != nil {
+				return count, err
+			}
+			if buffer == nil {
+				buffer = make([]byte, 32<<10)
+			}
+			if err := writeArchiveStream(ctx, archive, file, archiveMethod(file.Name), buffer); err != nil {
+				return count, err
+			}
+		}
+		if err := archive.Close(); err != nil {
+			return count, err
+		}
 		if err := ctx.Err(); err != nil {
 			return count, err
 		}
 		if options.OnProgress != nil {
+			if err := options.OnProgress(len(files), len(files)); err != nil {
+				return count, err
+			}
+		}
+		return count, ctx.Err()
+	}
+	level := flate.DefaultCompression
+	if options.Compression.Mode != CompressionUnchanged {
+		level = flate.BestCompression
+	}
+	tasks := make([]*archiveEntryTask, len(files))
+	for i, file := range files {
+		if archiveMethod(file.Name) == zip.Deflate && file.Input.Size() <= archiveParallelMaxBytes {
+			tasks[i] = &archiveEntryTask{file: file, done: make(chan struct{})}
+		}
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	tokens := make(chan struct{}, workers*2)
+	jobs := make(chan *archiveEntryTask, workers)
+	var workerWG sync.WaitGroup
+	for range workers {
+		workerWG.Add(1)
+		go func() {
+			defer workerWG.Done()
+			fw, err := flate.NewWriter(io.Discard, level)
+			if err != nil {
+				for task := range jobs {
+					task.err = err
+					close(task.done)
+				}
+				return
+			}
+			copyBuf := make([]byte, 32<<10)
+			for task := range jobs {
+				if err := runCtx.Err(); err != nil {
+					task.err = err
+					close(task.done)
+					continue
+				}
+				task.crc, task.data, task.err = compressArchiveEntry(runCtx, task.file.Input, fw, copyBuf)
+				close(task.done)
+			}
+		}()
+	}
+	var producerWG sync.WaitGroup
+	producerWG.Add(1)
+	go func() {
+		defer producerWG.Done()
+		defer close(jobs)
+		for i, task := range tasks {
+			if task == nil {
+				continue
+			}
+			select {
+			case <-runCtx.Done():
+				for _, remaining := range tasks[i:] {
+					if remaining != nil {
+						remaining.err = runCtx.Err()
+						close(remaining.done)
+					}
+				}
+				return
+			case tokens <- struct{}{}:
+			}
+			select {
+			case <-runCtx.Done():
+				for _, remaining := range tasks[i:] {
+					if remaining != nil {
+						remaining.err = runCtx.Err()
+						close(remaining.done)
+					}
+				}
+				return
+			case jobs <- task:
+			}
+		}
+	}()
+	finish := func() {
+		cancel()
+		producerWG.Wait()
+		workerWG.Wait()
+	}
+	buffer := make([]byte, 32<<10)
+	for i, file := range files {
+		if err := ctx.Err(); err != nil {
+			finish()
+			return count, err
+		}
+		if options.OnProgress != nil {
 			if err := options.OnProgress(i, len(files)); err != nil {
+				finish()
 				return count, err
 			}
 		}
 		if err := ctx.Err(); err != nil {
+			finish()
 			return count, err
 		}
-		method := uint16(zip.Deflate)
-		switch strings.ToLower(path.Ext(file.Name)) {
-		case ".ofd", ".pdf", ".png", ".jpg", ".jpeg":
-			method = zip.Store
+		if task := tasks[i]; task != nil {
+			select {
+			case <-task.done:
+			case <-ctx.Done():
+				finish()
+				return count, ctx.Err()
+			}
+			if task.err != nil {
+				finish()
+				return count, task.err
+			}
+			header := zip.FileHeader{Name: file.Name}
+			prepareOutputHeader(&header, zip.Deflate, uint64(file.Input.Size()), uint64(len(task.data)), task.crc)
+			entry, err := archive.CreateRaw(&header)
+			if err != nil {
+				finish()
+				return count, err
+			}
+			if _, err := io.CopyBuffer(entry, bytes.NewReader(task.data), buffer); err != nil {
+				finish()
+				return count, err
+			}
+			task.data = nil
+			<-tokens
+			continue
 		}
-		entry, err := archive.CreateHeader(&zip.FileHeader{Name: file.Name, Method: method})
-		if err != nil {
+		if err := writeArchiveStream(ctx, archive, file, archiveMethod(file.Name), buffer); err != nil {
+			finish()
 			return count, err
-		}
-		input := convertReader{ctx: ctx, input: file.Input}
-		if buffer == nil {
-			buffer = make([]byte, 32<<10)
-		}
-		written, err := io.CopyBuffer(entry, io.NewSectionReader(input, 0, file.Input.Size()), buffer)
-		if err != nil {
-			return count, err
-		}
-		if written != file.Input.Size() {
-			return count, io.ErrUnexpectedEOF
 		}
 	}
+	finish()
 	if err := archive.Close(); err != nil {
 		return count, err
 	}
@@ -100,6 +236,70 @@ func WriteArchive(ctx context.Context, writer io.Writer, files []ArchiveFile, op
 		}
 	}
 	return count, ctx.Err()
+}
+
+// archiveEntryTask 保存单个待压缩归档条目的并发压缩结果
+type archiveEntryTask struct {
+	file ArchiveFile
+	crc  uint32
+	data []byte
+	err  error
+	done chan struct{}
+}
+
+// archiveMethod 按扩展名选择归档存储或压缩方式
+// 入参: name 归档条目名称
+// 返回: uint16 ZIP压缩方法
+func archiveMethod(name string) uint16 {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".ofd", ".pdf", ".png", ".jpg", ".jpeg":
+		return zip.Store
+	default:
+		return zip.Deflate
+	}
+}
+
+// compressArchiveEntry 单次读取输入并同时计算CRC32与Flate压缩流
+// 入参: ctx 取消上下文, input 输入源, fw 可复用Flate写入器, buffer 读取缓冲
+// 返回: uint32 IEEE校验值, []byte 压缩数据, error 读取或压缩错误
+func compressArchiveEntry(ctx context.Context, input *Input, fw *flate.Writer, buffer []byte) (uint32, []byte, error) {
+	size := input.Size()
+	var output bytes.Buffer
+	fw.Reset(&output)
+	hash := crc32.NewIEEE()
+	src := io.NewSectionReader(convertReader{ctx: ctx, input: input}, 0, size)
+	written, err := io.CopyBuffer(io.MultiWriter(fw, hash), src, buffer)
+	if err != nil {
+		return 0, nil, err
+	}
+	if written != size {
+		return 0, nil, io.ErrUnexpectedEOF
+	}
+	if err := fw.Close(); err != nil {
+		return 0, nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, nil, err
+	}
+	return hash.Sum32(), output.Bytes(), nil
+}
+
+// writeArchiveStream 以流式方式将单个条目写入ZIP归档
+// 入参: ctx 取消上下文, archive 归档写入器, file 归档文件, method ZIP压缩方法, buffer 复制缓冲
+// 返回: error 读写错误
+func writeArchiveStream(ctx context.Context, archive *zip.Writer, file ArchiveFile, method uint16, buffer []byte) error {
+	entry, err := archive.CreateHeader(&zip.FileHeader{Name: file.Name, Method: method})
+	if err != nil {
+		return err
+	}
+	written, err := io.CopyBuffer(entry, io.NewSectionReader(convertReader{ctx: ctx, input: file.Input}, 0, file.Input.Size()), buffer)
+	if err != nil {
+		return err
+	}
+	if written != file.Input.Size() {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
 }
 
 // configureArchive 统一归档压缩等级，在单个归档内复用压缩器

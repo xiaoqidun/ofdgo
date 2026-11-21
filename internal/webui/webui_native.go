@@ -29,6 +29,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xiaoqidun/ofdgo"
 )
@@ -97,6 +98,7 @@ type NativeEngine struct {
 	saves          sync.WaitGroup
 	closed         bool
 	ctxMu          sync.Mutex
+	pdfCtx         context.Context
 	renderMu       sync.Mutex
 	renderCount    int
 	renderSeq      uint64
@@ -167,97 +169,81 @@ func (e *NativeEngine) Call(ctx context.Context, name string, args []any, emit f
 	if e.closed {
 		return nativeFailure(fmt.Errorf("native engine is closed"))
 	}
-	if name == "ofdgoRenderPage" && e.currentSession != nil && e.pdf == nil {
-		defer func() {
-			if failure := recover(); failure != nil {
-				result = nativeFailure(fmt.Errorf("%v", failure))
-			}
-		}()
-		worker, err := e.renderSession(ctx)
-		if err != nil {
-			return nativeFailure(err)
-		}
-		operation := &businessEngine{currentSession: worker, currentEditor: e.currentEditor, ctx: ctx}
-		values := make([]platformValue, len(args))
-		for i, arg := range args {
-			values[i] = platformValueOf(arg)
-		}
-		if len(values) > 0 && operation.currentEditor != nil {
-			pageErr := e.prepareRender(operation, values[0].Int())
-			if pageErr != nil {
-				return nativeFailure(pageErr)
-			}
-		}
-		operation.currentEditor = nil
-		e.ctxMu.Lock()
-		e.renderSeq++
-		renderID := e.renderSeq
-		e.renderContexts[renderID] = ctx
-		e.ctxMu.Unlock()
-		e.renderMu.Lock()
-		if e.renderCount == 0 {
-			e.renderDone = make(chan struct{})
-		}
-		e.renderCount++
-		e.renderMu.Unlock()
+	if name == "ofdgoRenderPage" && e.currentSession != nil {
 		<-e.gate
 		locked = false
-		defer func() {
-			worker.Renderer.OutputContext = context.Background()
-			e.ctxMu.Lock()
-			delete(e.renderContexts, renderID)
-			e.ctxMu.Unlock()
-			e.renderMu.Lock()
-			if result != nil && result["ok"] == true && ctx.Err() == nil {
-				e.currentSession.retainSVGFonts(worker.svgFonts)
-				clear(worker.pageCache)
-				worker.textCache.Clear()
-				clear(worker.svgFonts)
-				e.renderIdle = append(e.renderIdle, worker)
-			}
-			e.renderCount--
-			if e.renderCount == 0 {
-				close(e.renderDone)
-			}
-			e.renderMu.Unlock()
-		}()
-		data, err := operation.safeCall(operation.renderPage, values)
+		return e.runConcurrentRender(ctx, args, emit)
+	}
+	if name == "ofdgoLoadPDF" && e.currentSession != nil && e.pdf != nil {
+		<-e.gate
+		locked = false
+		return e.runLoadPDF(ctx, emit)
+	}
+	if name == "ofdgoDocumentInfo" {
+		if e.pdf != nil {
+			return map[string]any{"ok": true, "data": map[string]any{"detailsPending": true}}
+		}
+		if e.currentSession == nil {
+			return nativeFailure(fmt.Errorf("ofd document is not opened"))
+		}
+		<-e.gate
+		locked = false
+		return e.runDocumentInfo(ctx, args)
+	}
+	if name == "ofdgoSVGFontData" && e.currentSession != nil {
+		if len(args) == 0 {
+			return nativeFailure(fmt.Errorf("missing font name"))
+		}
+		fontName := platformValueOf(args[0]).String()
+		e.renderMu.Lock()
+		data, err := e.currentSession.SVGFontData(fontName)
+		e.renderMu.Unlock()
 		if err != nil {
 			return nativeFailure(err)
 		}
-		result = nativePlain(data).(map[string]any)
-		if result["ok"] != true {
-			return result
-		}
-		page := result["data"].(map[string]any)
-		known := make(map[string]bool)
-		if len(args) > 4 {
-			for i := 0; i < values[4].Length(); i++ {
-				known[values[4].Index(i).String()] = true
+		return map[string]any{"ok": true, "data": map[string]any{"bytes": data}}
+	}
+	if nativeConcurrentRead(name, e.currentEditor != nil) && e.currentSession != nil && (e.pdf == nil || nativePDFConcurrentRead(name)) {
+		<-e.gate
+		locked = false
+		return e.runConcurrentRead(ctx, name, args, emit)
+	}
+	var lockedPDF *pendingPDF
+	if e.pdf != nil {
+		if nativeReplacesPDF(name) {
+			old := e.pdf
+			e.pdf = nil
+			old.closed.Store(true)
+			<-e.gate
+			locked = false
+			closeDetachedPDF(old)
+			select {
+			case e.gate <- struct{}{}:
+				locked = true
+			case <-ctx.Done():
+				return nativeFailure(ctx.Err())
+			}
+			if err := ctx.Err(); err != nil {
+				return nativeFailure(err)
+			}
+			if e.closed {
+				return nativeFailure(fmt.Errorf("native engine is closed"))
+			}
+		} else {
+			var lockErr error
+			lockedPDF, locked, lockErr = e.acquirePDFGate(ctx, locked)
+			if lockErr != nil {
+				return nativeFailure(lockErr)
+			}
+			if lockedPDF != nil {
+				defer lockedPDF.mu.Unlock()
 			}
 		}
-		for _, value := range page["fonts"].([]any) {
-			font := value.(map[string]any)
-			if name := font["name"].(string); !known[name] {
-				font["data"] = worker.svgFonts[name]
-			}
-		}
-		if e.currentEditor != nil && !(len(values) > 6 && values[6].Bool()) {
-			objects, textErr := e.renderObjects(operation, values[0].Int())
-			if textErr != nil {
-				return nativeFailure(textErr)
-			}
-			page["objects"] = nativePlain(objects)
-		}
-		if err := ctx.Err(); err != nil {
+	}
+	if !nativeReadOnly(name) || e.pdf != nil {
+		if err := e.waitRenders(ctx); err != nil {
 			return nativeFailure(err)
 		}
-		return result
-	}
-	if err := e.waitRenders(ctx); err != nil {
-		return nativeFailure(err)
-	}
-	if e.pdf != nil || !nativeReadOnly(name) {
 		e.renderIdle = nil
 	}
 	if name == "ofdgoSaveSnapshot" {
@@ -367,8 +353,18 @@ func (e *NativeEngine) Close() error {
 		e.renderSlots = make(chan struct{}, e.renderParallelism())
 	})
 	e.gate <- struct{}{}
-	defer func() { <-e.gate }()
 	e.closed = true
+	oldPDF := e.pdf
+	e.pdf = nil
+	if oldPDF != nil {
+		oldPDF.closed.Store(true)
+	}
+	<-e.gate
+	if oldPDF != nil {
+		closeDetachedPDF(oldPDF)
+	}
+	e.gate <- struct{}{}
+	defer func() { <-e.gate }()
 	e.clearPDF()
 	_, _ = e.discardPrint(nil)
 	_ = e.waitRenders(context.Background())
@@ -960,12 +956,66 @@ func nativeReadOnly(name string) bool {
 	switch name {
 	case "ofdgoImagePreview", "ofdgoImagePageSize", "ofdgoCheckDocument", "ofdgoDocumentInfo", "ofdgoEditorInfo", "ofdgoDocumentNavigation", "ofdgoDocumentVersions", "ofdgoPackageDocuments",
 		"ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice", "ofdgoActionList", "ofdgoPageSettings", "ofdgoStyleResource",
-		"ofdgoOutlineLinks", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoStructureXML", "ofdgoOpenLinks", "ofdgoRenderBackends",
+		"ofdgoOutlineLinks", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoStructureXML", "ofdgoOpenLinks", "ofdgoDestinationView", "ofdgoRenderBackends",
 		"ofdgoSVGFontData", "ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoPagesText", "ofdgoResources", "ofdgoResourceReferences",
-		"ofdgoResourceTargets", "ofdgoResourceLocations", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoClearImport":
+		"ofdgoResourceTargets", "ofdgoResourceLocations", "ofdgoOutputFormats", "ofdgoExportFormats", "ofdgoParsePageRange", "ofdgoVerifySignatures", "ofdgoClearImport":
 		return true
 	}
 	return false
+}
+
+// nativeConcurrentRead 判断可在独立只读工作会话上与并行渲染池并发执行的查询
+// 入参: name 操作名称, editing 是否存在活动编辑器实例
+// 返回: bool 是否允许不排空渲染池并发执行
+func nativeConcurrentRead(name string, editing bool) bool {
+	switch name {
+	case "ofdgoPageTextString", "ofdgoPagesText", "ofdgoSearchPage", "ofdgoSearchPages",
+		"ofdgoOpenLinks", "ofdgoOutlineLinks", "ofdgoDestinationView", "ofdgoVerifySignatures",
+		"ofdgoAnnotationInfos", "ofdgoDocumentNavigation",
+		"ofdgoStructureTargets", "ofdgoStructureXML", "ofdgoResources", "ofdgoResourceReferences",
+		"ofdgoResourceLocations":
+		return true
+	case "ofdgoDocumentVersions", "ofdgoInvoices", "ofdgoInvoice", "ofdgoPageSettings":
+		return !editing
+	}
+	return false
+}
+
+// nativePDFConcurrentRead 判断在渐进打开PDF阶段仍可不经过PDF导入器并发执行的只读查询
+// 入参: name 操作名称
+// 返回: bool 是否可直接并发读取
+func nativePDFConcurrentRead(name string) bool {
+	return name == "ofdgoDocumentVersions"
+}
+
+// nativeReplacesPDF 判断操作是否会替换或销毁当前渐进PDF会话
+// 入参: name 操作名称
+// 返回: bool 是否替换当前PDF会话
+func nativeReplacesPDF(name string) bool {
+	switch name {
+	case "ofdgoOpen", "ofdgoOpenPDF", "ofdgoCreateDocument", "ofdgoImportImages":
+		return true
+	}
+	return false
+}
+
+// closeDetachedPDF 在互斥锁保护下安全关闭已摘除的渐进PDF会话
+// 入参: pending 已摘除的渐进PDF状态
+func closeDetachedPDF(pending *pendingPDF) {
+	if pending == nil {
+		return
+	}
+	pending.closed.Store(true)
+	pending.mu.Lock()
+	if pending.importer != nil {
+		_ = pending.importer.Close()
+		pending.importer = nil
+	}
+	if pending.input != nil {
+		_ = pending.input.Close()
+		pending.input = nil
+	}
+	pending.mu.Unlock()
 }
 
 // waitRenders 等待已开始的页面任务，取消等待不修改当前会话
@@ -986,6 +1036,52 @@ func (e *NativeEngine) waitRenders(ctx context.Context) error {
 	}
 }
 
+// beginReadTask 登记并发只读或渲染任务并绑定取消上下文，调用时已持有引擎门控
+// 入参: ctx 任务取消上下文
+// 返回: uint64 任务编号
+func (e *NativeEngine) beginReadTask(ctx context.Context) uint64 {
+	e.ctxMu.Lock()
+	e.renderSeq++
+	id := e.renderSeq
+	e.renderContexts[id] = ctx
+	e.ctxMu.Unlock()
+	e.renderMu.Lock()
+	if e.renderCount == 0 {
+		e.renderDone = make(chan struct{})
+	}
+	e.renderCount++
+	e.renderMu.Unlock()
+	return id
+}
+
+// endReadTask 注销并发只读或渲染任务，并按条件归还空闲只读会话
+// 入参: id 任务编号, session 关联主会话, worker 只读工作会话, retain 是否归还到空闲池
+func (e *NativeEngine) endReadTask(id uint64, session, worker *Session, retain bool) {
+	if worker != nil {
+		worker.Renderer.OutputContext = context.Background()
+	}
+	e.ctxMu.Lock()
+	delete(e.renderContexts, id)
+	e.ctxMu.Unlock()
+	e.renderMu.Lock()
+	if worker != nil && retain && session != nil && e.currentSession == session && worker.pdfSyncGen == session.pdfSyncGen {
+		if len(worker.svgFonts) > 0 {
+			session.retainSVGFonts(worker.svgFonts)
+			clear(worker.svgFonts)
+		}
+		clear(worker.pageCache)
+		if worker.editing {
+			worker.textCache.Clear()
+		}
+		e.renderIdle = append(e.renderIdle, worker)
+	}
+	e.renderCount--
+	if e.renderCount == 0 {
+		close(e.renderDone)
+	}
+	e.renderMu.Unlock()
+}
+
 // renderParallelism 返回首次调用时采用的页面并行数
 // 返回: int 同时运行的页面任务数
 func (e *NativeEngine) renderParallelism() int {
@@ -999,23 +1095,668 @@ func (e *NativeEngine) renderParallelism() int {
 // 入参: ctx 渲染上下文
 // 返回: *Session 渲染会话, error 准备错误
 func (e *NativeEngine) renderSession(ctx context.Context) (*Session, error) {
+	source := e.currentSession
 	e.renderMu.Lock()
-	defer e.renderMu.Unlock()
-	if count := len(e.renderIdle); count > 0 {
+	for count := len(e.renderIdle); count > 0; count = len(e.renderIdle) {
 		worker := e.renderIdle[count-1]
 		e.renderIdle[count-1] = nil
 		e.renderIdle = e.renderIdle[:count-1]
-		worker.Renderer.OutputContext = ctx
-		return worker, nil
+		if worker.pdfSyncGen == source.pdfSyncGen && worker.doc == source.doc {
+			e.renderMu.Unlock()
+			worker.Renderer.OutputContext = ctx
+			return worker, nil
+		}
 	}
-	source := e.currentSession
+	e.renderMu.Unlock()
+	return e.newReadWorker(ctx, source)
+}
+
+// newReadWorker 从主会话派生独立只读工作会话，共享只读缓存和线程安全文字缓存
+// 入参: ctx 任务上下文, source 主会话
+// 返回: *Session 独立工作会话, error 派生错误
+func (e *NativeEngine) newReadWorker(ctx context.Context, source *Session) (*Session, error) {
 	renderer, err := source.Renderer.Fork(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &Session{Reader: renderer.Reader, Renderer: renderer, doc: source.doc, fontFS: source.fontFS,
-		pageCache: make(map[int]*ofdgo.PageContent), boxCache: append([]pageBoxInfo(nil), source.boxCache...),
-		textCache: ofdgo.NewPageTextCache(sessionTextCacheBytes), svgFonts: make(map[string][]byte), editing: source.editing}, nil
+	textCache := source.textCache
+	if source.editing || textCache == nil {
+		textCache = ofdgo.NewPageTextCache(sessionTextCacheBytes)
+	}
+	return &Session{
+		Reader:     renderer.Reader,
+		Renderer:   renderer,
+		doc:        source.doc,
+		fontFS:     source.fontFS,
+		pageCache:  make(map[int]*ofdgo.PageContent),
+		boxCache:   append([]pageBoxInfo(nil), source.boxCache...),
+		textCache:  textCache,
+		svgFonts:   make(map[string][]byte),
+		editing:    source.editing,
+		pdfSyncGen: source.pdfSyncGen,
+	}, nil
+}
+
+// acquirePDFGate 遵循pending.mu先于e.gate的单向锁序同时获取渐进PDF锁和引擎门控
+// 入参: ctx 取消上下文, locked 当前是否持有门控
+// 返回: *pendingPDF 已锁定的渐进PDF状态, bool 返回时是否持有门控, error 取消或关闭错误
+func (e *NativeEngine) acquirePDFGate(ctx context.Context, locked bool) (*pendingPDF, bool, error) {
+	for {
+		pending := e.pdf
+		if pending == nil {
+			return nil, locked, nil
+		}
+		if locked {
+			<-e.gate
+			locked = false
+		}
+		pending.mu.Lock()
+		select {
+		case e.gate <- struct{}{}:
+			locked = true
+		case <-ctx.Done():
+			pending.mu.Unlock()
+			return nil, false, ctx.Err()
+		}
+		if err := ctx.Err(); err != nil {
+			pending.mu.Unlock()
+			return nil, locked, err
+		}
+		if e.closed {
+			pending.mu.Unlock()
+			return nil, locked, fmt.Errorf("native engine is closed")
+		}
+		if e.pdf == pending && !pending.closed.Load() {
+			return pending, locked, nil
+		}
+		pending.mu.Unlock()
+	}
+}
+
+// preparePDFPageNative 在引擎门控外按页转换渐进PDF，仅在增量同步瞬间短暂持锁
+// 入参: ctx 取消上下文, pending 渐进PDF状态, session 目标会话, pageIndex 页面索引, emit 进度回调
+// 返回: error 转换、同步或取消错误
+func (e *NativeEngine) preparePDFPageNative(ctx context.Context, pending *pendingPDF, session *Session, pageIndex int, emit func(any)) error {
+	pending.mu.Lock()
+	defer pending.mu.Unlock()
+	if pending.finished.Load() {
+		return nil
+	}
+	if pending.closed.Load() {
+		return context.Canceled
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	e.ctxMu.Lock()
+	e.pdfCtx = ctx
+	e.ctxMu.Unlock()
+	defer func() {
+		e.ctxMu.Lock()
+		e.pdfCtx = nil
+		e.ctxMu.Unlock()
+	}()
+	call := &nativeCall{engine: e, ctx: ctx, emit: emit}
+	pending.progress = platformValueOf(call.progress("conversion", "", true))
+	pending.font = platformValueOf(nativeCallback(call.font))
+	e.bindPDFContext(pending, ctx)
+	if pending.retry {
+		if err := pending.importer.Reset(ctx); err != nil {
+			return err
+		}
+		reader, err := pending.importer.Reader(ctx, -1)
+		if err != nil {
+			return err
+		}
+		select {
+		case e.gate <- struct{}{}:
+		case <-ctx.Done():
+			_ = reader.Close()
+			return ctx.Err()
+		}
+		if e.closed || e.pdf != pending || e.currentSession != session {
+			<-e.gate
+			_ = reader.Close()
+			if !e.closed && pending.finished.Load() {
+				return nil
+			}
+			return context.Canceled
+		}
+		if err := e.waitRenders(ctx); err != nil {
+			<-e.gate
+			_ = reader.Close()
+			return err
+		}
+		e.currentSession.textCache.Clear()
+		clear(e.currentSession.svgFonts)
+		err = e.replacePDFReader(reader)
+		if err == nil {
+			session = e.currentSession
+			pending.page, pending.next, pending.retry = -1, 0, false
+			pending.syncGen++
+			session.pdfSyncGen = pending.syncGen
+			e.renderIdle = nil
+		}
+		<-e.gate
+		if err != nil {
+			return err
+		}
+	}
+	if pageIndex >= 0 && !pending.importer.Ready(pageIndex) {
+		if err := pending.importer.ConvertPage(ctx, pageIndex); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				pending.retry = true
+			}
+			return err
+		}
+	}
+	select {
+	case e.gate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-e.gate }()
+	if e.closed || e.pdf != pending || e.currentSession != session {
+		if !e.closed && pending.finished.Load() {
+			return nil
+		}
+		return context.Canceled
+	}
+	if pending.importer.PageSynced(session.Reader, pageIndex) {
+		return nil
+	}
+	if err := pending.importer.SyncReader(ctx, session.Reader, pageIndex); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			pending.retry = true
+		}
+		return err
+	}
+	pending.page = pageIndex
+	pending.syncGen++
+	session.pdfSyncGen = pending.syncGen
+	e.renderMu.Lock()
+	e.renderIdle = nil
+	e.renderMu.Unlock()
+	return nil
+}
+
+// runConcurrentRender 在并行渲染池中渲染普通或渐进PDF页面
+// 入参: ctx 取消上下文, args 调用参数, emit 进度回调
+// 返回: map[string]any 渲染结果
+func (e *NativeEngine) runConcurrentRender(ctx context.Context, args []any, emit func(any)) (result map[string]any) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			result = nativeFailure(fmt.Errorf("%v", failure))
+		}
+	}()
+	values := make([]platformValue, len(args))
+	for i, arg := range args {
+		values[i] = platformValueOf(arg)
+	}
+	var session, worker *Session
+	var editor *ofdgo.Editor
+	var renderID uint64
+	for {
+		select {
+		case e.gate <- struct{}{}:
+		case <-ctx.Done():
+			return nativeFailure(ctx.Err())
+		}
+		if err := ctx.Err(); err != nil {
+			<-e.gate
+			return nativeFailure(err)
+		}
+		if e.closed {
+			<-e.gate
+			return nativeFailure(fmt.Errorf("native engine is closed"))
+		}
+		if e.currentSession == nil {
+			<-e.gate
+			return nativeFailure(fmt.Errorf("ofd document is not opened"))
+		}
+		if e.pdf != nil {
+			if len(values) == 0 {
+				<-e.gate
+				return nativeFailure(fmt.Errorf("missing page index"))
+			}
+			pageIndex := values[0].Int()
+			if e.pdf.retry || !e.pdf.importer.PageSynced(e.currentSession.Reader, pageIndex) {
+				pending := e.pdf
+				targetSession := e.currentSession
+				<-e.gate
+				if err := e.preparePDFPageNative(ctx, pending, targetSession, pageIndex, emit); err != nil {
+					return nativeFailure(err)
+				}
+				continue
+			}
+		}
+		var err error
+		worker, err = e.renderSession(ctx)
+		if err != nil {
+			<-e.gate
+			return nativeFailure(err)
+		}
+		session = e.currentSession
+		editor = e.currentEditor
+		if len(values) > 0 && editor != nil {
+			operation := &businessEngine{currentSession: worker, currentEditor: editor, ctx: ctx}
+			if pageErr := e.prepareRender(operation, values[0].Int()); pageErr != nil {
+				<-e.gate
+				return nativeFailure(pageErr)
+			}
+		}
+		renderID = e.beginReadTask(ctx)
+		<-e.gate
+		break
+	}
+	retain := false
+	defer func() {
+		e.endReadTask(renderID, session, worker, retain)
+	}()
+	operation := &businessEngine{currentSession: worker, ctx: ctx}
+	data, err := operation.safeCall(operation.renderPage, values)
+	if err != nil {
+		return nativeFailure(err)
+	}
+	result = nativePlain(data).(map[string]any)
+	if result["ok"] != true {
+		return result
+	}
+	page := result["data"].(map[string]any)
+	known := make(map[string]bool)
+	if len(args) > 4 {
+		for i := 0; i < values[4].Length(); i++ {
+			known[values[4].Index(i).String()] = true
+		}
+	}
+	for _, value := range page["fonts"].([]any) {
+		font := value.(map[string]any)
+		if name := font["name"].(string); !known[name] {
+			font["data"] = worker.svgFonts[name]
+		}
+	}
+	if editor != nil && !(len(values) > 6 && values[6].Bool()) {
+		objects, textErr := e.renderObjects(operation, values[0].Int())
+		if textErr != nil {
+			return nativeFailure(textErr)
+		}
+		page["objects"] = nativePlain(objects)
+	}
+	if err := ctx.Err(); err != nil {
+		return nativeFailure(err)
+	}
+	retain = true
+	return result
+}
+
+// runLoadPDF 在不阻塞并行渲染池的前提下分片转换渐进PDF并在全部完成后切换完整会话
+// 入参: ctx 取消上下文, emit 进度回调
+// 返回: map[string]any 加载状态与文档摘要
+func (e *NativeEngine) runLoadPDF(ctx context.Context, emit func(any)) (result map[string]any) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			result = nativeFailure(fmt.Errorf("%v", failure))
+		}
+	}()
+	select {
+	case e.gate <- struct{}{}:
+	case <-ctx.Done():
+		return nativeFailure(ctx.Err())
+	}
+	if err := ctx.Err(); err != nil {
+		<-e.gate
+		return nativeFailure(err)
+	}
+	if e.closed {
+		<-e.gate
+		return nativeFailure(fmt.Errorf("native engine is closed"))
+	}
+	if e.currentSession == nil {
+		<-e.gate
+		return nativeFailure(fmt.Errorf("ofd document is not opened"))
+	}
+	pending := e.pdf
+	session := e.currentSession
+	warnings := e.pdfWarnings
+	<-e.gate
+	if pending == nil {
+		return map[string]any{"ok": true, "data": map[string]any{"done": true, "doc": nativePlain(session.Summary()), "warnings": string(warnings)}}
+	}
+	pending.mu.Lock()
+	defer pending.mu.Unlock()
+	if pending.finished.Load() {
+		select {
+		case e.gate <- struct{}{}:
+		case <-ctx.Done():
+			return nativeFailure(ctx.Err())
+		}
+		if e.closed || e.currentSession == nil {
+			<-e.gate
+			return nativeFailure(context.Canceled)
+		}
+		summary := e.currentSession.Summary()
+		doneWarnings := e.pdfWarnings
+		<-e.gate
+		return map[string]any{"ok": true, "data": map[string]any{"done": true, "doc": nativePlain(summary), "warnings": string(doneWarnings)}}
+	}
+	if pending.closed.Load() {
+		return nativeFailure(context.Canceled)
+	}
+	if err := ctx.Err(); err != nil {
+		return nativeFailure(err)
+	}
+	e.ctxMu.Lock()
+	e.pdfCtx = ctx
+	e.ctxMu.Unlock()
+	defer func() {
+		e.ctxMu.Lock()
+		e.pdfCtx = nil
+		e.ctxMu.Unlock()
+	}()
+	call := &nativeCall{engine: e, ctx: ctx, emit: emit}
+	pending.progress = platformValueOf(call.progress("conversion", "", true))
+	pending.font = platformValueOf(nativeCallback(call.font))
+	e.bindPDFContext(pending, ctx)
+	if pending.retry {
+		if err := pending.importer.Reset(ctx); err != nil {
+			return nativeFailure(err)
+		}
+		reader, err := pending.importer.Reader(ctx, -1)
+		if err != nil {
+			return nativeFailure(err)
+		}
+		select {
+		case e.gate <- struct{}{}:
+		case <-ctx.Done():
+			_ = reader.Close()
+			return nativeFailure(ctx.Err())
+		}
+		if e.closed || e.pdf != pending || e.currentSession != session {
+			<-e.gate
+			_ = reader.Close()
+			return nativeFailure(context.Canceled)
+		}
+		if err := e.waitRenders(ctx); err != nil {
+			<-e.gate
+			_ = reader.Close()
+			return nativeFailure(err)
+		}
+		e.currentSession.textCache.Clear()
+		clear(e.currentSession.svgFonts)
+		err = e.replacePDFReader(reader)
+		if err == nil {
+			session = e.currentSession
+			pending.page, pending.next, pending.retry = -1, 0, false
+			pending.syncGen++
+			session.pdfSyncGen = pending.syncGen
+			e.renderIdle = nil
+		}
+		<-e.gate
+		if err != nil {
+			return nativeFailure(err)
+		}
+	}
+	deadline := time.Now().Add(32 * time.Millisecond)
+	for pending.next < pending.importer.PageCount() {
+		index := pending.next
+		if !pending.importer.Ready(index) {
+			if err := pending.importer.ConvertPage(ctx, index); err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					pending.retry = true
+				}
+				return nativeFailure(err)
+			}
+		}
+		pending.next++
+		if time.Now().After(deadline) {
+			return map[string]any{"ok": true, "data": map[string]any{"done": false}}
+		}
+	}
+	editor, report, err := pending.importer.Finish(ctx)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			pending.retry = true
+		}
+		return nativeFailure(err)
+	}
+	reader, err := editor.Reader(ctx)
+	if err != nil {
+		return nativeFailure(err)
+	}
+	encodedWarnings, warnErr := json.Marshal(report.Warnings)
+	if warnErr != nil {
+		_ = reader.Close()
+		return nativeFailure(warnErr)
+	}
+	select {
+	case e.gate <- struct{}{}:
+	case <-ctx.Done():
+		_ = reader.Close()
+		return nativeFailure(ctx.Err())
+	}
+	if e.closed || e.pdf != pending || e.currentSession != session {
+		<-e.gate
+		_ = reader.Close()
+		return nativeFailure(context.Canceled)
+	}
+	if err := e.waitRenders(ctx); err != nil {
+		<-e.gate
+		_ = reader.Close()
+		return nativeFailure(err)
+	}
+	if err := e.replacePDFReader(reader); err != nil {
+		<-e.gate
+		return nativeFailure(err)
+	}
+	e.currentSession.input = pending.input
+	if !e.currentSession.Reader.Encryption().Encrypted {
+		e.currentSession.pdfSource = pending.input
+	}
+	pending.input = nil
+	pending.finished.Store(true)
+	pending.closed.Store(true)
+	e.pdf = nil
+	e.pdfWarnings = encodedWarnings
+	e.renderIdle = nil
+	summary := e.currentSession.Summary()
+	<-e.gate
+	if pending.importer != nil {
+		_ = pending.importer.Close()
+		pending.importer = nil
+	}
+	return map[string]any{"ok": true, "data": map[string]any{"done": true, "doc": nativePlain(summary), "warnings": string(encodedWarnings)}}
+}
+
+// runDocumentInfo 在不排空并行渲染池的前提下执行文档详情验签或分批字体扫描
+// 入参: ctx 取消上下文, args 调用参数
+// 返回: map[string]any 文档信息结果
+func (e *NativeEngine) runDocumentInfo(ctx context.Context, args []any) (result map[string]any) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			result = nativeFailure(fmt.Errorf("%v", failure))
+		}
+	}()
+	scanFonts := len(args) > 0 && platformValueOf(args[0]).Bool()
+	select {
+	case e.gate <- struct{}{}:
+	case <-ctx.Done():
+		return nativeFailure(ctx.Err())
+	}
+	if err := ctx.Err(); err != nil {
+		<-e.gate
+		return nativeFailure(err)
+	}
+	if e.closed {
+		<-e.gate
+		return nativeFailure(fmt.Errorf("native engine is closed"))
+	}
+	if e.pdf != nil {
+		<-e.gate
+		return map[string]any{"ok": true, "data": map[string]any{"detailsPending": true}}
+	}
+	session := e.currentSession
+	if session == nil {
+		<-e.gate
+		return nativeFailure(fmt.Errorf("ofd document is not opened"))
+	}
+	if scanFonts {
+		e.renderMu.Lock()
+		fontsRead := session.fontsRead
+		cachedFonts := session.fontInfos
+		e.renderMu.Unlock()
+		if fontsRead {
+			<-e.gate
+			return map[string]any{"ok": true, "data": map[string]any{"fonts": nativePlain(cachedFonts), "fontCount": len(cachedFonts), "detailsPending": false}}
+		}
+		if session.fontScanMu == nil {
+			session.fontScanMu = &sync.Mutex{}
+		}
+		if session.fontScanWorker == nil {
+			worker, err := e.newReadWorker(ctx, session)
+			if err != nil {
+				<-e.gate
+				return nativeFailure(err)
+			}
+			session.fontScanWorker = worker
+		}
+		fontScanMu := session.fontScanMu
+		fontWorker := session.fontScanWorker
+		taskID := e.beginReadTask(ctx)
+		<-e.gate
+		defer e.endReadTask(taskID, session, nil, false)
+		fontScanMu.Lock()
+		defer fontScanMu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return nativeFailure(err)
+		}
+		fontWorker.Renderer.OutputContext = ctx
+		done := fontWorker.scanFontInfoBatch()
+		fontWorker.Renderer.OutputContext = context.Background()
+		if err := ctx.Err(); err != nil {
+			return nativeFailure(err)
+		}
+		if !done {
+			return map[string]any{"ok": true, "data": map[string]bool{"detailsPending": true}}
+		}
+		e.renderMu.Lock()
+		session.fontInfos = fontWorker.fontInfos
+		session.fontsRead = true
+		fonts := session.fontInfos
+		e.renderMu.Unlock()
+		return map[string]any{"ok": true, "data": map[string]any{"fonts": nativePlain(fonts), "fontCount": len(fonts), "detailsPending": false}}
+	}
+	worker, err := e.renderSession(ctx)
+	if err != nil {
+		<-e.gate
+		return nativeFailure(err)
+	}
+	e.renderMu.Lock()
+	worker.signaturesRead = session.signaturesRead
+	worker.signatures = session.signatures
+	worker.signatureError = session.signatureError
+	e.renderMu.Unlock()
+	taskID := e.beginReadTask(ctx)
+	<-e.gate
+	retain := false
+	defer func() {
+		worker.signaturesRead = false
+		worker.signatures = nil
+		worker.signatureError = nil
+		e.endReadTask(taskID, session, worker, retain)
+	}()
+	details, err := worker.detailsContext(ctx)
+	if err != nil {
+		return nativeFailure(err)
+	}
+	if worker.signaturesRead && ctx.Err() == nil {
+		e.renderMu.Lock()
+		if e.currentSession == session && !session.signaturesRead {
+			session.signaturesRead = true
+			session.signatures = worker.signatures
+			session.signatureError = worker.signatureError
+		}
+		e.renderMu.Unlock()
+	}
+	retain = true
+	return map[string]any{"ok": true, "data": nativePlain(details)}
+}
+
+// runConcurrentRead 在独立只读工作会话上并发执行不修改会话状态的查询，不排空并行渲染池
+// 入参: ctx 取消上下文, name 操作名称, args 调用参数, emit 进度回调
+// 返回: map[string]any 查询结果
+func (e *NativeEngine) runConcurrentRead(ctx context.Context, name string, args []any, emit func(any)) (result map[string]any) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			if err, ok := failure.(error); ok {
+				result = nativeFailure(err)
+			} else {
+				result = nativeFailure(fmt.Errorf("%v", failure))
+			}
+		}
+	}()
+	select {
+	case e.gate <- struct{}{}:
+	case <-ctx.Done():
+		return nativeFailure(ctx.Err())
+	}
+	if err := ctx.Err(); err != nil {
+		<-e.gate
+		return nativeFailure(err)
+	}
+	if e.closed {
+		<-e.gate
+		return nativeFailure(fmt.Errorf("native engine is closed"))
+	}
+	session := e.currentSession
+	if session == nil {
+		<-e.gate
+		return nativeFailure(fmt.Errorf("ofd document is not opened"))
+	}
+	worker, err := e.renderSession(ctx)
+	if err != nil {
+		<-e.gate
+		return nativeFailure(err)
+	}
+	taskID := e.beginReadTask(ctx)
+	<-e.gate
+	retain := false
+	defer func() {
+		e.endReadTask(taskID, session, worker, retain)
+	}()
+	operation := &businessEngine{
+		resources:      e.resources,
+		currentSession: worker,
+		ctx:            ctx,
+		resolveInput:   e.resolveInput,
+		conversionPool: e.conversionPool,
+	}
+	fn := operation.businessCommands()[name]
+	if fn == nil {
+		return nativeFailure(fmt.Errorf("unknown operation: %s", name))
+	}
+	call := &nativeCall{engine: e, ctx: ctx, emit: emit}
+	prepared, err := call.prepare(name, append([]any(nil), args...))
+	if err != nil {
+		return nativeFailure(err)
+	}
+	values := make([]platformValue, len(prepared))
+	for i, arg := range prepared {
+		values[i] = platformValueOf(arg)
+	}
+	data, err := operation.safeCall(fn, values)
+	if err != nil {
+		return nativeFailure(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nativeFailure(err)
+	}
+	if wrapped, ok := data.(platformValue); ok {
+		result = nativePlain(wrapped).(map[string]any)
+	} else {
+		result = map[string]any{"ok": true, "data": nativePlain(data)}
+	}
+	retain = true
+	return result
 }
 
 // prepareRender 同步当前编辑页面的图元标识，避免并行访问编辑器缓存
@@ -1056,6 +1797,13 @@ func (e *NativeEngine) readerContextErr() error {
 	var canceled error
 	if e.ctx != nil {
 		err := e.ctx.Err()
+		if err == nil {
+			return nil
+		}
+		canceled = err
+	}
+	if e.pdfCtx != nil {
+		err := e.pdfCtx.Err()
 		if err == nil {
 			return nil
 		}

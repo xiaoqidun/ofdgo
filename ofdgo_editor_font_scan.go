@@ -268,11 +268,44 @@ func editorFontXMLText(value string) []byte {
 	return data.Bytes()
 }
 
+// editorDocumentViewContext 打开目标文档阅读视图，访问当前文档时继承所选版本
+// 入参: ctx 取消上下文, reader 包阅读器, index 文档索引
+// 返回: *Reader 文档视图, error 读取或取消错误
+func editorDocumentViewContext(ctx context.Context, reader *Reader, index int) (*Reader, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if index != reader.DocumentIndex() {
+		return reader.DocumentContext(ctx, index)
+	}
+	next := &Reader{
+		Path:            reader.Path,
+		Zip:             reader.Zip,
+		encrypted:       reader.encryptedSource(),
+		sourceFile:      reader.sourceFile,
+		archiveID:       reader.archiveID,
+		files:           reader.files,
+		encryption:      reader.encryption,
+		documentIndex:   index,
+		selectedVersion: cloneEditorData(reader.selectedVersion),
+		resources:       reader.resources,
+		pageReady:       reader.pageReady,
+		pdfDestinations: reader.pdfDestinations.clone(),
+	}
+	if err := next.initRootContext(ctx); err != nil {
+		return nil, err
+	}
+	if _, err := next.DocContext(ctx); err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
 // customTagsResourceSafe 按已知命名空间白名单核验自定义标引，未知行业命名空间不推定其资源引用语义
 // 入参: ctx 取消上下文, reader 包阅读器, index 文档索引
 // 返回: bool 是否满足已知命名空间资源引用完整性, error 读取或取消错误
 func customTagsResourceSafe(ctx context.Context, reader *Reader, index int) (bool, error) {
-	view, err := reader.DocumentContext(ctx, index)
+	view, err := editorDocumentViewContext(ctx, reader, index)
 	if err != nil {
 		return false, err
 	}

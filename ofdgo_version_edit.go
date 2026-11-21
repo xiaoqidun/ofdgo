@@ -233,11 +233,95 @@ func (r *Reader) versionSharedFiles(ctx context.Context) (map[string]bool, error
 	return shared, nil
 }
 
-// versionPreservedFiles 汇总当前文档封面、未选版本及原始入口依赖，不包含其他文档
+// currentVersioned 判断当前文档是否声明版本列表
+// 返回: bool 是否版本化文档
+func (r *Reader) currentVersioned() bool {
+	return r != nil && r.OFD != nil && r.documentIndex >= 0 && r.documentIndex < len(r.OFD.DocBody) && r.OFD.DocBody[r.documentIndex].versioned
+}
+
+// packageVersioned 判断包内是否存在声明版本列表的文档
+// 返回: bool 整包是否包含版本化文档
+func (r *Reader) packageVersioned() bool {
+	if r == nil || r.OFD == nil {
+		return false
+	}
+	for _, body := range r.OFD.DocBody {
+		if body.versioned {
+			return true
+		}
+	}
+	return false
+}
+
+// documentNonCurrentVersionFiles 收集指定版本化文档全部非当前版本及原始主入口依赖
+// 入参: ctx 取消上下文, index 文档索引
+// 返回: map[string]bool 受保护文件路径, error 读取、结构或取消错误
+func (r *Reader) documentNonCurrentVersionFiles(ctx context.Context, index int) (map[string]bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r == nil || r.OFD == nil || index < 0 || index >= len(r.OFD.DocBody) || !r.OFD.DocBody[index].versioned {
+		return nil, nil
+	}
+	view := *r
+	if index != r.documentIndex {
+		view.documentIndex, view.documentRoot = index, ""
+		view.selectedVersion, view.versionInfo = nil, nil
+	}
+	if _, err := view.DocumentRootContext(ctx); err != nil {
+		return nil, err
+	}
+	versions, err := view.DocumentVersionsContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	shared := make(map[string]bool)
+	for _, version := range versions {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if view.versionInfo != nil && version.ID == view.versionInfo.ID {
+			continue
+		}
+		shared[version.Location] = true
+		for _, file := range version.Files {
+			shared[file.Location] = true
+		}
+		if version.DocRoot != "" && view.fileNames[version.DocRoot] {
+			deps, depErr := view.versionFileDependencies(ctx, version.DocRoot, nil, nil)
+			if depErr != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+			} else {
+				maps.Copy(shared, deps)
+			}
+		}
+	}
+	if view.versionInfo != nil && view.OFD.DocBody[index].DocRoot != "" {
+		entry, err := versionFileLocation("OFD.xml", view.OFD.DocBody[index].DocRoot)
+		if err != nil {
+			return nil, err
+		}
+		files, err := view.versionFileDependencies(ctx, entry, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(shared, files)
+	}
+	return shared, ctx.Err()
+}
+
+// versionPreservedFiles 汇总当前文档封面、签章及全包所有版本化文档的非当前版本与原始入口依赖
 // 入参: ctx 取消上下文
 // 返回: map[string]bool 需要保留的文件, error 读取或取消错误
 func (r *Reader) versionPreservedFiles(ctx context.Context) (map[string]bool, error) {
 	shared := make(map[string]bool)
+	if r.documentRoot == "" && r.currentVersioned() {
+		if _, err := r.DocumentRootContext(ctx); err != nil {
+			return nil, err
+		}
+	}
 	data, err := r.readFileViewContext(ctx, "OFD.xml")
 	if err != nil {
 		return nil, err
@@ -291,28 +375,14 @@ func (r *Reader) versionPreservedFiles(ctx context.Context) (map[string]bool, er
 			}
 		}
 	}
-	versions, err := r.DocumentVersionsContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, version := range versions {
+	for index := range r.DocumentCount() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if r.versionInfo != nil && version.ID == r.versionInfo.ID {
+		if !r.OFD.DocBody[index].versioned {
 			continue
 		}
-		shared[version.Location] = true
-		for _, file := range version.Files {
-			shared[file.Location] = true
-		}
-	}
-	if r.versionInfo != nil && r.OFD.DocBody[r.documentIndex].DocRoot != "" {
-		entry, err := versionFileLocation("OFD.xml", r.OFD.DocBody[r.documentIndex].DocRoot)
-		if err != nil {
-			return nil, err
-		}
-		files, err := r.versionFileDependencies(ctx, entry, nil, nil)
+		files, err := r.documentNonCurrentVersionFiles(ctx, index)
 		if err != nil {
 			return nil, err
 		}
@@ -325,7 +395,7 @@ func (r *Reader) versionPreservedFiles(ctx context.Context) (map[string]bool, er
 // 入参: ctx 取消上下文, parts 待写入条目, generated 本次自产页面及引用
 // 返回: map[string]bool 当前入口依赖, map[string]bool 扫描范围，非版本文档均为nil, error 读取或结构错误
 func (r *Reader) versionResourceFiles(ctx context.Context, parts map[string][]byte, generated map[string]editorGeneratedReferences) (map[string]bool, map[string]bool, error) {
-	if r == nil || !r.OFD.DocBody[r.documentIndex].versioned {
+	if !r.currentVersioned() {
 		return nil, nil, nil
 	}
 	entry, err := r.DocumentRootContext(ctx)
@@ -436,7 +506,7 @@ func (r *Reader) versionOutputChanges(ctx context.Context, changes map[string][]
 	if err != nil {
 		return nil, err
 	}
-	if r.DocumentCount() == 1 && !r.OFD.DocBody[r.documentIndex].versioned || len(changes) == 0 && len(removed) == 0 {
+	if r.DocumentCount() == 1 && !r.currentVersioned() || len(changes) == 0 && len(removed) == 0 {
 		return changes, ctx.Err()
 	}
 	parts := maps.Clone(changes)

@@ -406,25 +406,74 @@ func (r *Reader) resolveAnnotPageID(pageID string) string {
 		return pageID
 	}
 	if key := editorResourceID(pageID); key != "" {
-		for _, candidate := range slices.Sorted(maps.Keys(r.pageAnnotFiles)) {
-			if editorResourceID(candidate) == key {
+		if len(r.pageAnnotFiles) > 0 {
+			if candidate, ok := r.resolvePageAnnotFileByCanon(key); ok {
 				return candidate
 			}
 		}
-		for _, candidate := range slices.Sorted(maps.Keys(r.Annots)) {
-			if editorResourceID(candidate) == key {
+		if len(r.Annots) > 0 {
+			if candidate, ok := r.resolveAnnotMapByCanon(key); ok {
 				return candidate
 			}
 		}
-		if r.doc != nil {
-			for _, page := range r.doc.Pages.Page {
-				if editorResourceID(page.ID) == key {
-					return page.ID
-				}
-			}
+		if id, ok := r.resolveDocPageIDByCanon(key); ok {
+			return id
 		}
 	}
 	return pageID
+}
+
+// resolvePageAnnotFileByCanon 按规范标识常数时间查找注释文件索引中的页面键
+// 入参: key 规范化十进制页面标识
+// 返回: string 匹配的页面键, bool 是否命中
+func (r *Reader) resolvePageAnnotFileByCanon(key string) (string, bool) {
+	if r.pageAnnotCanon == nil {
+		index := make(map[string]string, len(r.pageAnnotFiles))
+		for candidate := range r.pageAnnotFiles {
+			if canon := editorResourceID(candidate); canon != "" {
+				if prev, exists := index[canon]; !exists || candidate < prev {
+					index[canon] = candidate
+				}
+			}
+		}
+		r.pageAnnotCanon = index
+	}
+	candidate, ok := r.pageAnnotCanon[key]
+	if ok {
+		if _, exists := r.pageAnnotFiles[candidate]; exists {
+			return candidate, true
+		}
+		r.pageAnnotCanon = nil
+		return r.resolvePageAnnotFileByCanon(key)
+	}
+	return "", false
+}
+
+// resolveAnnotMapByCanon 按规范标识常数时间查找已加载注释映射中的页面键
+// 入参: key 规范化十进制页面标识
+// 返回: string 匹配的页面键, bool 是否命中
+func (r *Reader) resolveAnnotMapByCanon(key string) (string, bool) {
+	if r.annotCanon == nil || r.annotCanonLen != len(r.Annots) {
+		index := make(map[string]string, len(r.Annots))
+		for candidate := range r.Annots {
+			if canon := editorResourceID(candidate); canon != "" {
+				if prev, exists := index[canon]; !exists || candidate < prev {
+					index[canon] = candidate
+				}
+			}
+		}
+		r.annotCanon = index
+		r.annotCanonLen = len(r.Annots)
+	}
+	candidate, ok := r.annotCanon[key]
+	if ok {
+		if _, exists := r.Annots[candidate]; exists {
+			return candidate, true
+		}
+		r.annotCanon = nil
+		return r.resolveAnnotMapByCanon(key)
+	}
+	return "", false
 }
 
 // pageAnnotationsContext 按页面标识惰性加载并缓存单页注释
@@ -477,6 +526,14 @@ func (r *Reader) pageAnnotationsContext(ctx context.Context, pageID string) ([]A
 	}
 	if len(loaded) > 0 {
 		r.Annots[resolvedID] = append(r.Annots[resolvedID], loaded...)
+		if r.annotCanon != nil {
+			if canon := editorResourceID(resolvedID); canon != "" {
+				if prev, exists := r.annotCanon[canon]; !exists || resolvedID < prev {
+					r.annotCanon[canon] = resolvedID
+				}
+			}
+			r.annotCanonLen = len(r.Annots)
+		}
 	}
 	if r.pageAnnotsLoaded == nil {
 		r.pageAnnotsLoaded = make(map[string]bool)
@@ -552,6 +609,7 @@ func (r *Reader) annotationIndexContext(ctx context.Context, doc *Document) (Ann
 	}
 	r.annotationFiles = files
 	r.pageAnnotFiles = byPage
+	r.pageAnnotCanon = nil
 	return annotations, nil
 }
 

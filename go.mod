@@ -4,13 +4,13 @@ go 1.26.0
 
 require (
 	github.com/andybalholm/brotli v1.3.0
-	github.com/emmansun/gmsm v0.45.3
+	github.com/emmansun/gmsm v0.45.4
 	github.com/go-text/typesetting v0.3.5
 	github.com/tdewolff/canvas v0.0.0-20261118111642-891200a8cf2b
 	github.com/xiaoqidun/guigo v0.0.0-20261119185121-8562607287f4
-	github.com/xiaoqidun/j2kgo v1.0.3
-	github.com/xiaoqidun/jbig2 v1.1.10
-	github.com/xiaoqidun/pdfgo v0.0.0-20261120150128-56b9a18efb81
+	github.com/xiaoqidun/j2kgo v1.0.4
+	github.com/xiaoqidun/jbig2 v1.1.11
+	github.com/xiaoqidun/pdfgo v0.0.0-20261121080639-cee3e5ac89c1
 	golang.org/x/image v0.48.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/text v0.44.0
@@ -34,8 +34,8 @@ require (
 	github.com/tdewolff/minify/v2 v2.24.17 // indirect
 	github.com/tdewolff/parse/v2 v2.8.16 // indirect
 	github.com/yuin/goldmark v1.8.5 // indirect
-	golang.org/x/crypto v0.58.0 // indirect
-	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/crypto v0.59.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
 	modernc.org/knuth v0.6.0 // indirect
 	modernc.org/token v1.1.0 // indirect
 	star-tex.org/x/tex v0.7.1 // indirect

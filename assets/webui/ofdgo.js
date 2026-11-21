@@ -10,7 +10,11 @@ const DEFAULT_IMAGE_DPI = 300;
 const SEARCH_MATCH_LIMIT = 10000;
 const OBJECT_CLIPBOARD_TYPE = "application/x-ofdgo-objects";
 const RESOURCE_KINDS = [["Font", "字体"], ["Image", "图片"], ["Audio", "音频"], ["Video", "视频"], ["Attachment", "附件"], ["ColorSpace", "色彩"], ["DrawParam", "样式"]];
-const SETTINGS_KINDS = [["bookmarks", "书签"], ["actions", "动作"], ["templates", "模板"], ["layers", "图层"], ["extensions", "扩展"]];
+const SETTINGS_KINDS = [["bookmarks", "书签"], ["actions", "动作"], ["templates", "模板"], ["layers", "图层"], ["permissions", "权限"], ["vPreferences", "视图"], ["extensions", "扩展"]];
+const PAGE_MODE_OPTIONS = [["None", "默认"], ["FullScreen", "全屏"], ["UseOutlines", "大纲"], ["UseThumbs", "缩略"], ["UseBookmarks", "书签"], ["UseLayers", "图层"], ["UseAttatchs", "附件"], ["UseCustomTags", "标引"]];
+const PAGE_LAYOUT_OPTIONS = [["OneColumn", "单列连续"], ["OnePage", "单页显示"], ["TwoColumnL", "双列靠左"], ["TwoColumnR", "双列靠右"], ["TwoPageL", "双页靠左"], ["TwoPageR", "双页靠右"]];
+const TAB_DISPLAY_OPTIONS = [["DocTitle", "文档标题"], ["FileName", "文件名称"]];
+const ZOOM_MODE_OPTIONS = [["Default", "默认"], ["FitWidth", "适宽"], ["FitHeight", "适高"], ["FitRect", "区域"], ["Custom", "比例"]];
 const INFO_FIELDS = ["docId", "title", "author", "subject", "abstract", "creationDate", "modDate", "docUsage", "cover", "creator", "creatorVersion"];
 const STATUS = {
 	ready: "选择 OFD、PDF 文件",
@@ -909,6 +913,7 @@ async function openPrintPanel() {
 	tab.print ||= createPrintDialog(tab);
 	tab.print.open({tab, document:documentEntryKey(tab.state.doc.documents?.[tab.state.doc.documentIndex || 0]), call:(name, ...args) => callTabWASM(tab, name, ...args), page:tab.state.pageIndex,
 		selection:tab.state.pageSelection.size ? selectedPageIndexes() : [], annotations:tab.state.renderAnnotations,
+		permissions:tab.state.doc.permissions,
 		name:tab.state.fileName || tab.state.doc.title || "OFDGo"});
 }
 
@@ -3874,7 +3879,7 @@ async function switchDocument(index) {
 	setBusy(true, "正在切换文档", null, "", tab);
 	try {
 		const prevRevision = state.editorInfo?.revision;
-		const doc = await callTabWASM(tab, "ofdgoSelectDocument", index);
+		const doc = await callTabWASM(tab, "ofdgoSelectDocument", index, state.editing);
 		if (tab.closed || tab.state !== state || state.doc !== originalDocument) return;
 		openSeq = state.openSeq = workspace.sequence = Math.max(workspace.sequence, state.openSeq) + 1;
 		if (!state.editing) state.editorViews.clear();
@@ -7503,7 +7508,7 @@ async function openDocument(options = {}) {
 			return;
 		}
 		if (options.documentIndex !== undefined && options.documentIndex !== (doc.documentIndex || 0)) {
-			doc = await callWASM("ofdgoSelectDocument", options.documentIndex);
+			doc = await callWASM("ofdgoSelectDocument", options.documentIndex, state.editing);
 			if (openSeq !== state.openSeq) return;
 		}
 		if (options.versionID !== undefined && options.versionID !== (doc.documentVersion || "")) {
@@ -7695,8 +7700,14 @@ async function loadDocumentDetails(openSeq, details) {
 		if (openSeq !== state.openSeq) return;
 		Object.assign(state.doc, details, { detailsPending: false, detailsError: "" });
 		renderMeta();
+		let firstBatch = true;
 		while (openSeq === state.openSeq) {
-			await waitForPaint();
+			if (firstBatch) {
+				firstBatch = false;
+				await waitForPaint();
+			} else {
+				await new Promise(resolve => setTimeout(resolve, 64));
+			}
 			if (openSeq !== state.openSeq) return;
 			const info = await callWASM("ofdgoDocumentInfo", true);
 			if (openSeq !== state.openSeq) return;
@@ -7915,6 +7926,12 @@ function restoreSettingsDraft() {
 		const field = document.querySelector(`#settings${key}`);
 		if (field) field.closest("label").hidden = settingsValue(key + "Mode") !== "solid";
 	}
+	const zoomField = document.querySelector("#settingsZoom");
+	if (zoomField) {
+		const custom = settingsValue("ZoomMode") === "Custom";
+		zoomField.closest("label").hidden = !custom;
+		zoomField.disabled = !custom || !state.editing;
+	}
 	const body = document.querySelector("#settingsBody");
 	for (const [index, node] of [...settingsElements.Content.querySelectorAll("details")].entries()) node.open = draft.expanded?.[index] || false;
 	if (body) body.scrollTop = draft.scroll;
@@ -8008,7 +8025,7 @@ async function loadDocumentSettings() {
 		if (kind === "invoices") { await loadInvoiceSettings(sequence, openSeq); return; }
 		const data = ["bookmarks", "actions", "extensions"].includes(kind) ? await callWASM("ofdgoDocumentNavigation", kind) : {};
 		if (!isForegroundDocument(tab) || sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
-		data.resources = ["bookmarks", "extensions"].includes(kind) ? [] : await callWASM("ofdgoResources") || [];
+		data.resources = ["bookmarks", "extensions", "permissions", "vPreferences"].includes(kind) ? [] : await callWASM("ofdgoResources") || [];
 		if (!isForegroundDocument(tab) || sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
 		if (kind === "actions" && state.editing) {
 			if (settings.scope === "object") {
@@ -8084,6 +8101,8 @@ function renderDocumentSettings() {
 	}
 	if (kind === "actions") renderActionSettings();
 	else if (kind === "bookmarks") renderBookmarkSettings();
+	else if (kind === "permissions") renderPermissionsSettings();
+	else if (kind === "vPreferences") renderVPreferencesSettings();
 	else if (kind === "extensions") renderExtensionSettings();
 	else if (kind === "templates") renderTemplateSettings();
 	else if (kind === "layers") renderLayerSettings();
@@ -9439,6 +9458,121 @@ function renderBookmarkSettings() {
 	settingsButton("删除", () => commitSettings("ofdgoChangeBookmark", "delete", entry.Name, "{}"), !entry, "Delete");
 }
 
+function renderPermissionsSettings() {
+	const permissions = state.doc?.permissions || {
+		declared: false,
+		edit: true,
+		annot: true,
+		export: true,
+		signature: true,
+		watermark: true,
+		printScreen: true,
+		print: true,
+		copies: -1,
+		copy: true,
+		contentRegist: true,
+		validPeriod: null,
+	};
+	const group = settingsSection("权限声明");
+	appendInfoLine(group.section, "声明状态", permissions.declared ? "已声明" : "未声明");
+	settingsField(group.section, "允许修改", "PermEdit", permissions.edit, "checkbox");
+	settingsField(group.section, "允许批注", "PermAnnot", permissions.annot, "checkbox");
+	settingsField(group.section, "允许导出", "PermExport", permissions.export, "checkbox");
+	settingsField(group.section, "允许签章", "PermSignature", permissions.signature, "checkbox");
+	settingsField(group.section, "允许水印", "PermWatermark", permissions.watermark, "checkbox");
+	settingsField(group.section, "允许截屏", "PermPrintScreen", permissions.printScreen, "checkbox");
+	settingsField(group.section, "允许打印", "PermPrint", permissions.print, "checkbox");
+	const copies = settingsField(group.section, "打印份数", "PermCopies", permissions.copies ?? -1, "number");
+	copies.min = "-1";
+	copies.step = "1";
+	copies.placeholder = "-1 表示不限制";
+	const startDate = settingsField(group.section, "生效日期", "PermStartDate", permissions.validPeriod?.startDate || "");
+	startDate.placeholder = "YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS";
+	const endDate = settingsField(group.section, "失效日期", "PermEndDate", permissions.validPeriod?.endDate || "");
+	endDate.placeholder = "YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS";
+	group.section.querySelectorAll("input,select").forEach(field => { field.disabled = !state.editing; });
+	group.section.append(group.actions);
+	if (!state.editing) return;
+	settingsButton("应用", async () => {
+		const rawCopies = String(settingsValue("PermCopies")).trim();
+		const parsedCopies = rawCopies === "" ? -1 : Number(rawCopies);
+		if (!Number.isInteger(parsedCopies) || parsedCopies < -1) {
+			settingsElements.Status.textContent = "打印份数须为不小于 -1 的整数";
+			return;
+		}
+		const start = String(settingsValue("PermStartDate")).trim();
+		const end = String(settingsValue("PermEndDate")).trim();
+		const payload = {
+			edit: Boolean(settingsValue("PermEdit")),
+			annot: Boolean(settingsValue("PermAnnot")),
+			export: Boolean(settingsValue("PermExport")),
+			signature: Boolean(settingsValue("PermSignature")),
+			watermark: Boolean(settingsValue("PermWatermark")),
+			printScreen: Boolean(settingsValue("PermPrintScreen")),
+			print: Boolean(settingsValue("PermPrint")),
+			copies: parsedCopies,
+			copy: permissions.copy ?? true,
+			contentRegist: permissions.contentRegist ?? true,
+			...(start || end ? { validPeriod: { startDate: start, endDate: end } } : {}),
+		};
+		await commitSettings("ofdgoUpdatePermissions", JSON.stringify(payload));
+	}, false, "ApplyPermissions", group.actions);
+	settingsButton("清除", () => commitSettings("ofdgoUpdatePermissions", ""), !permissions.declared, "ClearPermissions", group.actions);
+}
+
+function renderVPreferencesSettings() {
+	const prefs = state.doc?.vPreferences || null;
+	const group = settingsSection("视图选项");
+	appendInfoLine(group.section, "声明状态", prefs ? "已声明" : "未声明");
+	settingsSelect(group.section, "页面布局", "PageLayout", PAGE_LAYOUT_OPTIONS, prefs?.pageLayout || "OneColumn");
+	const initialZoomMode = prefs?.zoom != null ? "Custom" : (prefs?.zoomMode || "Default");
+	const zoomModeField = settingsSelect(group.section, "缩放模式", "ZoomMode", ZOOM_MODE_OPTIONS, initialZoomMode, value => {
+		const zoomInput = document.querySelector("#settingsZoom");
+		if (!zoomInput) return;
+		const custom = value === "Custom";
+		zoomInput.closest("label").hidden = !custom;
+		zoomInput.disabled = !custom || !state.editing;
+	});
+	const zoomField = settingsField(group.section, "缩放比例", "Zoom", prefs?.zoom != null ? String(prefs.zoom) : "1", "number");
+	zoomField.min = "0.01";
+	zoomField.step = "any";
+	zoomField.placeholder = "例如 1.0 表示 100%";
+	const customZoom = zoomModeField.value === "Custom";
+	zoomField.closest("label").hidden = !customZoom;
+	settingsSelect(group.section, "窗口模式", "PageMode", PAGE_MODE_OPTIONS, prefs?.pageMode || "None");
+	settingsSelect(group.section, "标题显示", "TabDisplay", TAB_DISPLAY_OPTIONS, prefs?.tabDisplay || "DocTitle");
+	settingsField(group.section, "隐藏工具", "HideToolbar", Boolean(prefs?.hideToolbar), "checkbox");
+	settingsField(group.section, "隐藏菜单", "HideMenubar", Boolean(prefs?.hideMenubar), "checkbox");
+	settingsField(group.section, "隐藏组件", "HideWindowUI", Boolean(prefs?.hideWindowUI), "checkbox");
+	group.section.querySelectorAll("input,select").forEach(field => { field.disabled = !state.editing; });
+	if (!customZoom) zoomField.disabled = true;
+	group.section.append(group.actions);
+	if (!state.editing) return;
+	settingsButton("应用", async () => {
+		const mode = String(settingsValue("ZoomMode"));
+		const payload = {
+			pageMode: String(settingsValue("PageMode")),
+			pageLayout: String(settingsValue("PageLayout")),
+			tabDisplay: String(settingsValue("TabDisplay")),
+			hideToolbar: Boolean(settingsValue("HideToolbar")),
+			hideMenubar: Boolean(settingsValue("HideMenubar")),
+			hideWindowUI: Boolean(settingsValue("HideWindowUI")),
+		};
+		if (mode === "Custom") {
+			const zoom = Number(settingsValue("Zoom"));
+			if (!Number.isFinite(zoom) || zoom <= 0) {
+				settingsElements.Status.textContent = "缩放比例须为大于 0 的数值";
+				return;
+			}
+			payload.zoom = zoom;
+		} else {
+			payload.zoomMode = mode;
+		}
+		await commitSettings("ofdgoUpdateVPreferences", JSON.stringify(payload));
+	}, false, "ApplyVPreferences", group.actions);
+	settingsButton("清除", () => commitSettings("ofdgoUpdateVPreferences", ""), !prefs, "ClearVPreferences", group.actions);
+}
+
 function renderExtensionSettings() {
 	const entries = settings.data.extensions || [];
 	if (!entries.length) settingsElements.Status.textContent = "暂无扩展";
@@ -10217,9 +10351,11 @@ async function applyEncryption(event) {
 	try {
 		if (mode === "certificate") options.recipients = await encryptionRecipients(certificates);
 		if (!valid()) return;
+		const prevRevision = state.editorInfo?.revision;
 		const doc = await callTabWASM(tab, "ofdgoSetEncryption", options);
 		if (!valid()) return;
-		if (!state.editorInfo) state.savedRevision = doc.revision;
+		if (!state.editorInfo || prevRevision === state.savedRevision) state.savedRevision = doc.revision;
+		if (prevRevision !== undefined && prevRevision !== doc.revision && state.savedRevision === doc.revision) state.editorViews.set(doc.revision, { reading: true });
 		state.encryptionDirty = state.savedEncrypted || Boolean(doc.encryption?.encrypted);
 		state.editorInfo = { revision: doc.revision, canUndo: doc.canUndo, canRedo: doc.canRedo,
 			pageCapabilities: doc.pageCapabilities, editWarnings: doc.editWarnings || [] };
@@ -11039,6 +11175,12 @@ async function runBatch() {
 		batchElements.Status.textContent = "正在准备";
 		const first = await startBatchWorker();
 		const fonts = await fontManager.files(fontManager.records());
+		const batchFontKey = fonts.length ? randomID() : "";
+		const batchFontArg = batchFontKey || null;
+		if (batchFontKey) {
+			await batchCall(first, "ofdgoSetBatchFonts", [fonts, batchFontKey]);
+			first.fontsReady = true;
+		}
 		const names = new Set();
 		const plans = jobs.map(item => {
 			item.details = [];
@@ -11067,9 +11209,13 @@ async function runBatch() {
 				scheduleBatchProgress();
 				try {
 					if (!slot || slot.error) slot = await startBatchWorker();
+					if (!nativeHost && batchFontKey && !slot.fontsReady) {
+						await batchCall(slot, "ofdgoSetBatchFonts", [fonts, batchFontKey]);
+						slot.fontsReady = true;
+					}
 					for (;;) {
 						try {
-							const result = await batchCall(slot, "ofdgoConvertFile", [item.file, options, fonts, destination], progress => batchProgress(item, position, jobs.length, progress));
+							const result = await batchCall(slot, "ofdgoConvertFile", [item.file, options, batchFontArg, destination], progress => batchProgress(item, position, jobs.length, progress));
 							results[position] = result.files;
 							item.details = (result.pdf?.Warnings || []).map(conversionWarningText);
 							for (const font of result.fonts || []) item.details.push(`${font.name}：${font.changed ? options.fontMode === 1 ? "已嵌入" : "已外置" : `未处理 · ${fontBindingError(font.reason)}`}`);
@@ -11113,7 +11259,7 @@ async function runBatch() {
 			}
 		};
 		const running = Array.from({ length: parallel }, (_, index) => (async () => {
-			if (index) await new Promise(resolve => window.setTimeout(resolve, index * 200));
+			if (index && !nativeHost) await new Promise(resolve => window.setTimeout(resolve, Math.min(index * 40, 120)));
 			await run(index === 0 ? first : null);
 		})());
 		const settled = await Promise.allSettled(running);
@@ -11126,6 +11272,10 @@ async function runBatch() {
 			if (result.blob) downloadBytes(result.blob, "application/zip", "转换结果.zip");
 			packed = true;
 			for (const item of jobs) if (item.status === "ready") batchStatus(item, "done", "完成");
+		}
+		if (batchFontKey && !batch.canceled) {
+			const slot = [...batch.workers].find(slot => !slot.error);
+			if (slot) await batchCall(slot, "ofdgoSetBatchFonts", [null, batchFontKey]).catch(() => {});
 		}
 		const unchanged = batch.items.reduce((total, item) => total + (item.status === "unchanged" ? 1 : 0), 0);
 		batchElements.Status.textContent = `${batch.canceled ? "取消 · " : ""}完成 ${batch.counts.done}${batch.counts.failed ? ` · 失败 ${batch.counts.failed}` : ""}${unchanged ? ` · 原样 ${unchanged}` : ""}`;

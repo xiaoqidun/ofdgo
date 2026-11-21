@@ -222,7 +222,7 @@ func SanitizeCFF(data []byte) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
-			return rebuildNamedCFF(data, font, font.chars, nil)
+			return rebuildNamedCFF(data, font, font.chars, nil, false)
 		}
 		return data, nil
 	}
@@ -353,7 +353,16 @@ func GetCFFCIDRuneMap(data []byte) map[uint16]rune {
 // 入参: data CFF或OpenType字体数据
 // 返回: map[uint16]uint16 CID到GID映射
 func CFFCIDToGID(data []byte) map[uint16]uint16 {
-	cffData := getCFFData(data)
+	return cffCIDToGIDFromCFF(getCFFData(data))
+}
+
+// cffDict 使用float64存储所有数值，以统一处理整数和实数
+type cffDict map[int][]float64
+
+// cffCIDToGIDFromCFF 从已提取的CFF表构造CID到GID反查表，非CID字体返回nil
+// 入参: cffData 裸CFF数据
+// 返回: map[uint16]uint16 CID到GID映射
+func cffCIDToGIDFromCFF(cffData []byte) map[uint16]uint16 {
 	if cffData == nil {
 		return nil
 	}
@@ -373,9 +382,6 @@ func CFFCIDToGID(data []byte) map[uint16]uint16 {
 	}
 	return result
 }
-
-// cffDict 使用float64存储所有数值，以统一处理整数和实数
-type cffDict map[int][]float64
 
 // normalizeCFFCharstrings 展开预定义字符集并规范化Type2提示编码，保留轮廓和字宽
 // 入参: data CFF字体数据

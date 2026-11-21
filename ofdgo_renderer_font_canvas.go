@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"sync"
 
@@ -86,27 +87,30 @@ func (r *Renderer) loadFont(fontID string) *canvas.FontFamily {
 	if ctx == nil {
 		ctx = r.outputContext()
 	}
-	sfntData, err := r.canvasFontData().load(ctx, resolved.digest, func() ([]byte, int, error) {
-		decoded, decodeErr := decodeFontContainer(fontData)
-		if decodeErr != nil {
-			return nil, 0, decodeErr
+	family, err := r.canvasFontFamilies().load(ctx, key, func() (*canvas.FontFamily, int, error) {
+		sfntData, dataErr := r.canvasFontData().load(ctx, resolved.digest, func() ([]byte, int, error) {
+			decoded, decodeErr := decodeFontContainer(fontData)
+			if decodeErr != nil {
+				return nil, 0, decodeErr
+			}
+			cost := 256
+			if len(decoded) > 0 && &decoded[0] != &fontData[0] {
+				cost += len(decoded)
+			}
+			return decoded, cost, nil
+		})
+		if dataErr != nil {
+			return nil, 0, dataErr
 		}
-		cost := 256
-		if len(decoded) > 0 && &decoded[0] != &fontData[0] {
-			cost += len(decoded)
+		built := canvas.NewFontFamily(fmt.Sprintf("ofdgo-%x-%d", resolved.digest, fontStyle))
+		if err := loadCanvasFontFamily(built, sfntData, 0, fontStyle); err != nil {
+			return nil, 0, err
 		}
-		return decoded, cost, nil
+		cost := min(max(4096, len(sfntData)), r.canvasFontFamilies().limit)
+		return built, cost, nil
 	})
 	if err != nil {
 		r.renderError = err
-		return nil
-	}
-	family := canvas.NewFontFamily(fmt.Sprintf("ofdgo-%x-%d", resolved.digest, fontStyle))
-	canvasFontLoadMu.Lock()
-	loadErr := family.LoadFont(sfntData, 0, fontStyle)
-	canvasFontLoadMu.Unlock()
-	if loadErr != nil {
-		r.renderError = loadErr
 		return nil
 	}
 	if face := family.Face(10, canvas.Black, fontStyle, canvas.FontNormal); face != nil && face.Font != nil {
@@ -133,10 +137,11 @@ func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (
 		direction:  face.Direction,
 		glyph:      glyph,
 	}
-	state := r.canvasState()
-	if cached, ok := state.textGlyphPathCache.get(key); ok {
+	glyphCache := r.canvasTextGlyphPaths()
+	if cached, ok := glyphCache.get(key); ok {
 		return cached.path, cached.width
 	}
+	state := r.canvasState()
 	outlines := state.fontOutlines[face.Font]
 	if outlines == nil {
 		digest, ok := state.fontDigests[face.Font]
@@ -173,17 +178,107 @@ func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (
 		r.renderError = err
 		return &canvas.Path{}, 0
 	}
-	state.textGlyphPathCache.put(key, textGlyphPathCacheValue{path: path, width: width}, 256+len(path.Data())*8+len(glyph.Text)+len(face.Language))
+	glyphCache.put(key, textGlyphPathCacheValue{path: path, width: width}, 256+len(path.Data())*8+len(glyph.Text)+len(face.Language))
 	return path, width
 }
 
-// loadCanvasFont 串行加载绘图字体，不改动原始字体数据
+// loadCanvasFontFamily 加载绘图字体族，含标准名称记录时无锁并行加载
+// 入参: family 目标字体族, data 字体数据, index 集合索引, style 字体样式
+// 返回: error 加载错误
+func loadCanvasFontFamily(family *canvas.FontFamily, data []byte, index int, style canvas.FontStyle) error {
+	if index == 0 && sfntHasNameRecord(data) {
+		return family.LoadFont(data, index, style)
+	}
+	canvasFontLoadMu.Lock()
+	defer canvasFontLoadMu.Unlock()
+	return family.LoadFont(data, index, style)
+}
+
+// loadCanvasFont 加载绘图字体，含标准名称记录时无锁并行加载，不改动原始字体数据
 // 入参: data 字体数据, index 集合索引, style 字体样式
 // 返回: *canvas.Font 绘图字体, error 加载错误
 func loadCanvasFont(data []byte, index int, style canvas.FontStyle) (*canvas.Font, error) {
+	if index == 0 && sfntHasNameRecord(data) {
+		return canvas.LoadFont(data, index, style)
+	}
 	canvasFontLoadMu.Lock()
 	defer canvasFontLoadMu.Unlock()
 	return canvas.LoadFont(data, index, style)
+}
+
+// sfntHasNameRecord 快速检查OpenType字体是否包含非空标准名称记录
+// 入参: data SFNT字体字节
+// 返回: bool 是否确保存在非空字体名称
+func sfntHasNameRecord(data []byte) bool {
+	if len(data) < 12 {
+		return false
+	}
+	switch string(data[:4]) {
+	case "\x00\x01\x00\x00", "OTTO", "true":
+	default:
+		return false
+	}
+	numTables := int(binary.BigEndian.Uint16(data[4:6]))
+	if 12+numTables*16 > len(data) {
+		return false
+	}
+	var nameOff, nameLen int
+	for i := range numTables {
+		rec := data[12+i*16:]
+		if string(rec[:4]) == "name" {
+			nameOff = int(binary.BigEndian.Uint32(rec[8:12]))
+			nameLen = int(binary.BigEndian.Uint32(rec[12:16]))
+			break
+		}
+	}
+	if nameLen < 6 || nameOff < 0 || nameOff+nameLen > len(data) {
+		return false
+	}
+	table := data[nameOff : nameOff+nameLen]
+	count := int(binary.BigEndian.Uint16(table[2:4]))
+	strOff := int(binary.BigEndian.Uint16(table[4:6]))
+	if 6+count*12 > len(table) || strOff > len(table) {
+		return false
+	}
+	for _, wantID := range [3]uint16{6, 4, 1} {
+		found := false
+		for i := range count {
+			rec := table[6+i*12:]
+			if binary.BigEndian.Uint16(rec[6:8]) != wantID {
+				continue
+			}
+			found = true
+			platform := binary.BigEndian.Uint16(rec[0:2])
+			encoding := binary.BigEndian.Uint16(rec[2:4])
+			length := int(binary.BigEndian.Uint16(rec[8:10]))
+			offset := int(binary.BigEndian.Uint16(rec[10:12]))
+			if length == 0 || strOff+offset+length > len(table) {
+				return false
+			}
+			raw := table[strOff+offset : strOff+offset+length]
+			if platform == 3 && encoding == 1 && length >= 2 && length%2 == 0 {
+				for j := 0; j+1 < len(raw); j += 2 {
+					if raw[j] != 0 || raw[j+1] != 0 {
+						return true
+					}
+				}
+				return false
+			}
+			if platform == 1 && encoding == 0 {
+				for _, b := range raw {
+					if b != 0 {
+						return true
+					}
+				}
+				return false
+			}
+			return false
+		}
+		if found {
+			return false
+		}
+	}
+	return false
 }
 
 // decodeFontContainer 展开字体封装，保留原始OpenType表及CFF2轮廓

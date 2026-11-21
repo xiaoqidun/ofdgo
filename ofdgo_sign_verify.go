@@ -34,7 +34,10 @@ import (
 	"io"
 	"math/big"
 	"path"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/emmansun/gmsm/sm2"
@@ -55,6 +58,7 @@ var signatureCSTZone = time.FixedZone("CST", 8*3600)
 type SignatureVerifyReport struct {
 	signerCerts          [][]byte
 	DocIndex             int
+	VersionID            string
 	DocRoot              string
 	ID                   string
 	BaseLoc              string
@@ -281,67 +285,26 @@ func (r *Reader) VerifyDocumentSignatures(index int, opts ...SignatureVerifyOpti
 // 入参: ctx 取消上下文, index 文档索引, opts 验证选项
 // 返回: []SignatureVerifyReport 验证报告, error 验证或取消错误
 func (r *Reader) VerifyDocumentSignaturesContext(ctx context.Context, index int, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if r.OFD == nil || index < 0 || index >= len(r.OFD.DocBody) {
-		return nil, fmt.Errorf("document index out of range: %d", index)
-	}
-	options := signatureVerifyOptions{}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&options)
-		}
-	}
-	if options.digestCache == nil {
-		options.digestCache = make(map[[2]string][]byte)
-	}
-	body := r.OFD.DocBody[index]
-	if index == r.documentIndex && r.doc != nil && r.doc.Signatures == "" {
-		return nil, nil
-	}
-	view := &Reader{Zip: r.Zip, files: r.files, encryption: r.encryption, documentIndex: index, resources: r.resources}
+	var selectedVersion *string
 	if index == r.documentIndex {
-		view.selectedVersion = r.selectedVersion
+		selectedVersion = r.selectedVersion
 	}
-	if err := view.initRootContext(ctx); err != nil {
-		return nil, err
-	}
-	docRoot, err := view.DocumentRootContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	options.DocIndex, options.DocRoot = index, docRoot
-	data, err := view.readFileViewContext(ctx, docRoot)
-	if err != nil {
-		return nil, err
-	}
-	var doc Document
-	if err := xml.Unmarshal(data, &doc); err != nil {
-		return nil, err
-	}
-	doc.Signatures = view.versionSignatures(body.Signatures)
-	if doc.Signatures == "" {
-		return nil, nil
-	}
-	view.doc, view.RootDir = &doc, path.Dir(docRoot)
-	sigListPath := view.ResPath(doc.Signatures)
-	data, err = view.readFileViewContext(ctx, sigListPath)
-	if err != nil {
-		return nil, err
-	}
-	var signatures Signatures
-	if err := xml.Unmarshal(data, &signatures); err != nil {
-		return nil, err
-	}
-	reports := make([]SignatureVerifyReport, 0, len(signatures.List))
-	for _, sigRef := range signatures.List {
-		if err := ctx.Err(); err != nil {
-			return reports, err
-		}
-		reports = append(reports, view.verifySignature(ctx, sigListPath, sigRef, &options))
-	}
-	return reports, ctx.Err()
+	return r.verifyDocumentSignaturesContext(ctx, index, selectedVersion, opts...)
+}
+
+// VerifyDocumentVersionSignatures 验证指定文档指定版本的签名且不切换阅读器当前文档
+// 入参: docIndex 从0开始的文档索引, versionID 版本标识，空值选择主入口, opts 签名验证选项
+// 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
+func (r *Reader) VerifyDocumentVersionSignatures(docIndex int, versionID string, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	return r.VerifyDocumentVersionSignaturesContext(context.Background(), docIndex, versionID, opts...)
+}
+
+// VerifyDocumentVersionSignaturesContext 验证指定文档指定版本的签名并在读取和摘要阶段响应取消
+// 入参: ctx 取消上下文, docIndex 从0开始的文档索引, versionID 版本标识，空值选择主入口, opts 签名验证选项
+// 返回: []SignatureVerifyReport 签名验证报告, error 验证或取消错误
+func (r *Reader) VerifyDocumentVersionSignaturesContext(ctx context.Context, docIndex int, versionID string, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	id := versionID
+	return r.verifyDocumentSignaturesContext(ctx, docIndex, &id, opts...)
 }
 
 // VerifySignatures 验证输入源中的OFD签名，不接管输入源生命周期
@@ -375,8 +338,107 @@ type signatureVerifyOptions struct {
 	Timestamp   *SignatureTimestampOptions
 	Revocation  *SignatureRevocationOptions
 	DocIndex    int
+	VersionID   string
 	DocRoot     string
 	digestCache map[[2]string][]byte
+}
+
+// verifyDocumentSignaturesContext 按指定文档索引与版本选择执行签名验证
+// 入参: ctx 取消上下文, index 文档索引, selectedVersion 显式版本选择，nil表示按默认规则选择, opts 签名验证选项
+// 返回: []SignatureVerifyReport 签名验证报告, error 验证或取消错误
+func (r *Reader) verifyDocumentSignaturesContext(ctx context.Context, index int, selectedVersion *string, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r.OFD == nil || index < 0 || index >= len(r.OFD.DocBody) {
+		return nil, fmt.Errorf("document index out of range: %d", index)
+	}
+	options := signatureVerifyOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
+	if options.digestCache == nil {
+		options.digestCache = make(map[[2]string][]byte)
+	}
+	body := r.OFD.DocBody[index]
+	var view *Reader
+	var docRoot string
+	var err error
+	sameVersion := r.selectedVersion == nil && selectedVersion == nil || r.selectedVersion != nil && selectedVersion != nil && *r.selectedVersion == *selectedVersion
+	if index == r.documentIndex && sameVersion && r.doc != nil && r.fileIndex != nil && r.fileNames != nil {
+		if r.doc.Signatures == "" {
+			return nil, nil
+		}
+		snapshot := *r
+		docRoot = snapshot.documentRoot
+		if docRoot == "" {
+			docRoot, err = snapshot.DocumentRootContext(ctx)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if snapshot.RootDir == "" {
+			snapshot.RootDir = path.Dir(docRoot)
+		}
+		view = &snapshot
+	} else {
+		view = r.deriveView(nil, index, selectedVersion)
+		if r.fileIndex != nil && r.fileNames != nil && r.OFD != nil {
+			view.fileIndex, view.fileNames, view.OFD = r.fileIndex, r.fileNames, r.OFD
+		} else if err := view.initRootContext(ctx); err != nil {
+			return nil, err
+		}
+		docRoot, err = view.DocumentRootContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		data, err := view.readFileViewContext(ctx, docRoot)
+		if err != nil {
+			return nil, err
+		}
+		var doc Document
+		if err := xml.Unmarshal(data, &doc); err != nil {
+			return nil, err
+		}
+		view.doc, view.RootDir = &doc, path.Dir(docRoot)
+		doc.Signatures = view.versionSignaturesContext(ctx, body.Signatures)
+		if doc.Signatures == "" {
+			return nil, nil
+		}
+	}
+	options.DocIndex, options.DocRoot = index, docRoot
+	if view.versionInfo != nil {
+		options.VersionID = view.versionInfo.ID
+	}
+	sigListPath := view.ResPath(view.doc.Signatures)
+	data, err := view.readFileViewContext(ctx, sigListPath)
+	if err != nil {
+		return nil, err
+	}
+	var signatures Signatures
+	if err := xml.Unmarshal(data, &signatures); err != nil {
+		return nil, err
+	}
+	var scope *versionSignatureScope
+	if view.versionInfo != nil {
+		scope, err = view.buildVersionSignatureScope(ctx, sigListPath, signatures)
+		if err != nil {
+			return nil, err
+		}
+	}
+	reports := make([]SignatureVerifyReport, 0, len(signatures.List))
+	for _, sigRef := range signatures.List {
+		if err := ctx.Err(); err != nil {
+			return reports, err
+		}
+		if scope != nil && !view.versionSignatureMatches(ctx, scope, sigRef) {
+			continue
+		}
+		reports = append(reports, view.verifySignature(ctx, sigListPath, sigRef, &options))
+	}
+	return reports, ctx.Err()
 }
 
 // applySignatureCertificatePolicy 分别按签署校验时间与印章制章时间验证签署证书和制章证书
@@ -497,6 +559,7 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigRef
 	sigPath := signatureRefPath(sigListPath, sigRef.BaseLoc)
 	report := SignatureVerifyReport{
 		DocIndex:    options.DocIndex,
+		VersionID:   options.VersionID,
 		DocRoot:     options.DocRoot,
 		ID:          sigRef.ID,
 		BaseLoc:     sigRef.BaseLoc,
@@ -662,24 +725,64 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigRef
 	return report
 }
 
-// verifySignatureReferences 验证签名保护文件列表
+// verifySignatureReferences 验证签名保护文件列表，引用较多时使用有限并发计算摘要
 // 入参: ctx 取消上下文, sigPath 签名文件路径, refs 签名保护文件列表, cache 共享摘要缓存
 // 返回: []SignatureReferenceVerify 保护文件验证结果
 func (r *Reader) verifySignatureReferences(ctx context.Context, sigPath string, refs SignatureReferences, cache map[[2]string][]byte) []SignatureReferenceVerify {
-	results := make([]SignatureReferenceVerify, 0, len(refs.Reference))
-	for _, ref := range refs.Reference {
-		if ctx.Err() != nil {
-			break
-		}
-		results = append(results, r.verifySignatureReference(ctx, sigPath, refs.CheckMethod, ref, cache))
+	count := len(refs.Reference)
+	workers := min(runtime.GOMAXPROCS(0), 4)
+	if r.resources != nil && r.resources.options.Parallelism > 0 && r.resources.options.Parallelism < workers {
+		workers = r.resources.options.Parallelism
 	}
-	return results
+	if workers <= 1 || count < 4 {
+		results := make([]SignatureReferenceVerify, 0, count)
+		for _, ref := range refs.Reference {
+			if ctx.Err() != nil {
+				break
+			}
+			results = append(results, r.verifySignatureReference(ctx, sigPath, refs.CheckMethod, ref, cache, nil))
+		}
+		return results
+	}
+	if workers > count {
+		workers = count
+	}
+	results := make([]SignatureReferenceVerify, count)
+	completed := make([]bool, count)
+	var cacheMu sync.Mutex
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for {
+				idx := int(next.Add(1) - 1)
+				if idx >= count || ctx.Err() != nil {
+					return
+				}
+				results[idx] = r.verifySignatureReference(ctx, sigPath, refs.CheckMethod, refs.Reference[idx], cache, &cacheMu)
+				completed[idx] = true
+			}
+		}()
+	}
+	wg.Wait()
+	if ctx.Err() == nil {
+		return results
+	}
+	out := make([]SignatureReferenceVerify, 0, count)
+	for i := range count {
+		if completed[i] {
+			out = append(out, results[i])
+		}
+	}
+	return out
 }
 
 // verifySignatureReference 验证签名保护文件并在单次会话内复用流式哈希结果
-// 入参: ctx 取消上下文, sigPath 签名文件路径, method 摘要算法, ref 保护文件引用, cache 共享摘要缓存
+// 入参: ctx 取消上下文, sigPath 签名文件路径, method 摘要算法, ref 保护文件引用, cache 共享摘要缓存, cacheMu 缓存互斥锁
 // 返回: SignatureReferenceVerify 保护文件验证结果
-func (r *Reader) verifySignatureReference(ctx context.Context, sigPath, method string, ref SignatureReference, cache map[[2]string][]byte) SignatureReferenceVerify {
+func (r *Reader) verifySignatureReference(ctx context.Context, sigPath, method string, ref SignatureReference, cache map[[2]string][]byte, cacheMu *sync.Mutex) SignatureReferenceVerify {
 	refPath := signatureRefPath(sigPath, ref.FileRef)
 	result := SignatureReferenceVerify{
 		FileRef: ref.FileRef,
@@ -699,8 +802,14 @@ func (r *Reader) verifySignatureReference(ctx context.Context, sigPath, method s
 	cacheKey := [2]string{cleanPath, algKey}
 	var actual []byte
 	if cache != nil {
+		if cacheMu != nil {
+			cacheMu.Lock()
+		}
 		if cached, found := cache[cacheKey]; found {
 			actual = bytes.Clone(cached)
+		}
+		if cacheMu != nil {
+			cacheMu.Unlock()
 		}
 	}
 	if actual == nil {
@@ -710,7 +819,14 @@ func (r *Reader) verifySignatureReference(ctx context.Context, sigPath, method s
 			return result
 		}
 		if cache != nil {
-			cache[cacheKey] = bytes.Clone(actual)
+			cloned := bytes.Clone(actual)
+			if cacheMu != nil {
+				cacheMu.Lock()
+			}
+			cache[cacheKey] = cloned
+			if cacheMu != nil {
+				cacheMu.Unlock()
+			}
 		}
 	}
 	result.CheckValue = checkValue
@@ -1027,12 +1143,7 @@ func verifyECDSASignature(pub *ecdsa.PublicKey, digest, sig []byte) bool {
 // 入参: basePath 基准路径, refPath 引用路径
 // 返回: string 包内文件路径
 func signatureRefPath(basePath, refPath string) string {
-	p := strings.TrimSpace(refPath)
-	p = strings.ReplaceAll(p, "\\", "/")
-	if strings.HasPrefix(p, "/") {
-		return cleanPackagePath(p)
-	}
-	return path.Clean(resolveResourcePath(basePath, "", p))
+	return resolveResourcePath(basePath, "", refPath)
 }
 
 // referencesOK 判断保护文件摘要是否全部通过

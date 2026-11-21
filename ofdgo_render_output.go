@@ -17,7 +17,9 @@ package ofdgo
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"image"
@@ -26,6 +28,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/xiaoqidun/pdfgo"
 	"golang.org/x/image/draw"
@@ -75,9 +78,6 @@ func (r *Renderer) RenderToZIP(writer io.Writer, format string, indices ...int) 
 	if err != nil {
 		return err
 	}
-	var countWritten int64
-	archive := zip.NewWriter(convertWriter{ctx: ctx, writer: writer, count: &countWritten})
-	configureArchive(archive, r.Compression)
 	method := zip.Deflate
 	if extension == "png" || extension == "jpg" {
 		method = zip.Store
@@ -86,6 +86,13 @@ func (r *Renderer) RenderToZIP(writer io.Writer, format string, indices ...int) 
 	if err := r.exportProgress(0, len(indices)); err != nil {
 		return err
 	}
+	workers := min(len(indices), conversionWorkers(ctx))
+	if workers > 1 {
+		return r.renderToZIPParallel(ctx, writer, doc, format, extension, method, width, indices, workers)
+	}
+	var countWritten int64
+	archive := zip.NewWriter(convertWriter{ctx: ctx, writer: writer, count: &countWritten})
+	configureArchive(archive, r.Compression)
 	for i, index := range indices {
 		page, err := r.Reader.readPageContent(ctx, doc.Pages.Page[index], extension == "txt", false)
 		if err != nil {
@@ -218,11 +225,15 @@ func (r *Renderer) RenderToPNG(page *PageContent, writer io.Writer) error {
 	if r.Compression.Mode == CompressionUnchanged {
 		return png.Encode(&imageMetadataWriter{writer: writer, skip: 33, data: chunk}, img)
 	}
-	var encoded bytes.Buffer
-	if err := png.Encode(&encoded, img); err != nil {
+	optimized, err := pdfgo.OptimizeImageFromPixels(r.outputContext(), img, r.Compression)
+	if errors.Is(err, io.ErrShortBuffer) {
+		return png.Encode(&imageMetadataWriter{writer: writer, skip: 33, data: chunk}, img)
+	}
+	if err != nil {
 		return err
 	}
-	return r.writeCompressedImage(&imageMetadataWriter{writer: writer, skip: 33, data: chunk}, encoded.Bytes())
+	_, err = io.Copy(&imageMetadataWriter{writer: writer, skip: 33, data: chunk}, bytes.NewReader(optimized))
+	return err
 }
 
 // RenderToJPEG 渲染为白底JPEG，像素尺寸由DPI决定
@@ -404,6 +415,150 @@ func (w *imageMetadataWriter) Write(data []byte) (int, error) {
 	return n + written, err
 }
 
+// renderToZIPParallel 使用有界多核Renderer.Fork流水线并行渲染页面并按页序写入ZIP
+// 入参: ctx 取消上下文, writer 输出流, doc 文档对象, format 原始格式, extension 扩展名, method ZIP压缩方法, width 页码补零宽度, indices 零基页索引, workers 并行度
+// 返回: error 渲染、写入或取消错误
+func (r *Renderer) renderToZIPParallel(ctx context.Context, writer io.Writer, doc *Document, format, extension string, method uint16, width int, indices []int, workers int) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type zipWorker struct {
+		renderer *Renderer
+		render   func(*PageContent, io.Writer) error
+	}
+	poolWorkers := make([]zipWorker, 0, workers)
+	for range workers {
+		clone, err := r.Fork(runCtx)
+		if err != nil {
+			return err
+		}
+		clone.pageContext = runCtx
+		_, fn, err := clone.outputRenderer(format)
+		if err != nil {
+			return err
+		}
+		poolWorkers = append(poolWorkers, zipWorker{renderer: clone, render: fn})
+	}
+	pool, _ := ctx.Value(conversionPoolKey{}).(*ConversionPool)
+	raster := extension == "png" || extension == "jpg"
+	window := workers * 2
+	jobs := make(chan *convertPageTask, window)
+	inflight := make(chan *convertPageTask, window)
+	var wg sync.WaitGroup
+	for _, worker := range poolWorkers {
+		wg.Add(1)
+		go func(w zipWorker) {
+			defer wg.Done()
+			for task := range jobs {
+				if err := runCtx.Err(); err != nil {
+					task.err = err
+					close(task.done)
+					continue
+				}
+				page, readErr := w.renderer.Reader.readPageContent(runCtx, doc.Pages.Page[task.index], extension == "txt", false)
+				if readErr != nil {
+					task.err = fmt.Errorf("failed to read page %d: %w", task.index+1, readErr)
+					close(task.done)
+					continue
+				}
+				var estimated int64
+				acquired := false
+				if pool != nil && raster {
+					estimated = estimateRasterPageBytes(w.renderer, page)
+					if err := pool.acquire(runCtx, true, estimated); err != nil {
+						task.err = err
+						close(task.done)
+						continue
+					}
+					acquired = true
+				}
+				if renderErr := w.render(page, &task.buf); renderErr != nil {
+					task.err = fmt.Errorf("failed to export page %d: %w", task.index+1, renderErr)
+				}
+				if acquired {
+					pool.release(true, estimated)
+				}
+				close(task.done)
+			}
+		}(worker)
+	}
+	var producerWG sync.WaitGroup
+	producerWG.Add(1)
+	go func() {
+		defer producerWG.Done()
+		defer close(jobs)
+		defer close(inflight)
+		for _, index := range indices {
+			task := &convertPageTask{index: index, done: make(chan struct{})}
+			select {
+			case <-runCtx.Done():
+				return
+			case inflight <- task:
+			}
+			select {
+			case <-runCtx.Done():
+				task.err = runCtx.Err()
+				close(task.done)
+				return
+			case jobs <- task:
+			}
+		}
+	}()
+	finish := func() {
+		cancel()
+		producerWG.Wait()
+		wg.Wait()
+	}
+	var countWritten int64
+	archive := zip.NewWriter(convertWriter{ctx: ctx, writer: writer, count: &countWritten})
+	configureArchive(archive, r.Compression)
+	for i := range indices {
+		task, ok := <-inflight
+		if !ok {
+			finish()
+			return runCtx.Err()
+		}
+		select {
+		case <-task.done:
+		case <-ctx.Done():
+			finish()
+			return ctx.Err()
+		}
+		if task.err != nil {
+			finish()
+			return task.err
+		}
+		entry, err := archive.CreateHeader(&zip.FileHeader{
+			Name:   fmt.Sprintf("%0*d.%s", width, task.index+1, extension),
+			Method: method,
+		})
+		if err != nil {
+			finish()
+			return err
+		}
+		if _, err := io.Copy(entry, bytes.NewReader(task.buf.Bytes())); err != nil {
+			finish()
+			return err
+		}
+		task.buf.Reset()
+		if err := ctx.Err(); err != nil {
+			finish()
+			return err
+		}
+		if err := r.exportProgress(i+1, len(indices)); err != nil {
+			finish()
+			return err
+		}
+	}
+	finish()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := archive.Close(); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
 // outputRenderer 获取格式扩展名和渲染方法
 // 入参: format 输出格式
 // 返回: string 扩展名, func 渲染方法, error 错误信息
@@ -438,6 +593,29 @@ func (r *Renderer) exportProgress(completed, total int) error {
 	return nil
 }
 
+// renderPDFPages 将已解析页面交给指定PDF后端
+// 入参: pages 页面列表, writer 输出流, progress 页面处理进度
+// 返回: error 错误信息
+func (r *Renderer) renderPDFPages(pages []RenderDocumentPage, writer io.Writer, progress func(int, int) error) error {
+	ctx := r.outputContext()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := r.Compression.Validate(); err != nil {
+		return err
+	}
+	if r.backends.PDF == nil {
+		return fmt.Errorf("pdf: %w", ErrBackendUnavailable)
+	}
+	renderer := *r
+	renderer.pageContext = ctx
+	renderer.OutputContext = ctx
+	if err := renderer.backends.PDF.RenderPDF(&renderer, pages, writer, progress); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
 // fillWhiteBackground 填充白色背景，复用当前导出图片的RGBA像素
 // 入参: img 图片对象
 // 返回: image.Image 图片对象
@@ -461,27 +639,4 @@ func fillWhiteBackground(img image.Image) image.Image {
 	draw.Draw(dst, bounds, image.White, image.Point{}, draw.Src)
 	draw.Draw(dst, bounds, img, bounds.Min, draw.Over)
 	return dst
-}
-
-// renderPDFPages 将已解析页面交给指定PDF后端
-// 入参: pages 页面列表, writer 输出流, progress 页面处理进度
-// 返回: error 错误信息
-func (r *Renderer) renderPDFPages(pages []RenderDocumentPage, writer io.Writer, progress func(int, int) error) error {
-	ctx := r.outputContext()
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := r.Compression.Validate(); err != nil {
-		return err
-	}
-	if r.backends.PDF == nil {
-		return fmt.Errorf("pdf: %w", ErrBackendUnavailable)
-	}
-	renderer := *r
-	renderer.pageContext = ctx
-	renderer.OutputContext = ctx
-	if err := renderer.backends.PDF.RenderPDF(&renderer, pages, writer, progress); err != nil {
-		return err
-	}
-	return ctx.Err()
 }

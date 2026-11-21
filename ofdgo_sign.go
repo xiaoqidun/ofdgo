@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
@@ -247,10 +248,47 @@ func (src stampSealSource) load(ctx context.Context, r *Reader) (string, []byte,
 	return sealType, bytes.Clone(sealData), nil
 }
 
-// loadedStampMedia 缓存单次按需加载内的同源印章媒体
+// loadedStampMedia 缓存文档内同源印章媒体，Data为只读共享切片
 type loadedStampMedia struct {
 	sealType string
 	sealData []byte
+}
+
+// stampSealCache 在文档及其派生只读视图间并发共享已提取的只读印章媒体
+type stampSealCache struct {
+	mu    sync.RWMutex
+	items map[stampSealSource]loadedStampMedia
+}
+
+// load 并发复用或按需提取同源印章媒体，返回只读媒体数据
+// 入参: ctx 取消上下文, r 阅读器, src 印章数据源
+// 返回: loadedStampMedia 印章媒体, error 取消错误
+func (c *stampSealCache) load(ctx context.Context, r *Reader, src stampSealSource) (loadedStampMedia, error) {
+	if err := ctx.Err(); err != nil {
+		return loadedStampMedia{}, err
+	}
+	c.mu.RLock()
+	media, ok := c.items[src]
+	c.mu.RUnlock()
+	if ok {
+		return media, nil
+	}
+	sealType, sealData, err := src.load(ctx, r)
+	if err != nil {
+		return loadedStampMedia{}, err
+	}
+	media = loadedStampMedia{sealType: sealType, sealData: sealData}
+	c.mu.Lock()
+	if existing, exists := c.items[src]; exists {
+		c.mu.Unlock()
+		return existing, nil
+	}
+	if c.items == nil {
+		c.items = make(map[stampSealSource]loadedStampMedia)
+	}
+	c.items[src] = media
+	c.mu.Unlock()
+	return media, nil
 }
 
 // parsedStampEntry 暂存已校验几何范围的单条签章注释
@@ -297,25 +335,73 @@ func (r *Reader) resolveStampPageID(pageID string) string {
 		return pageID
 	}
 	if key := editorResourceID(pageID); key != "" {
-		for _, candidate := range slices.Sorted(maps.Keys(r.Stamps)) {
-			if editorResourceID(candidate) == key {
+		if len(r.Stamps) > 0 {
+			if candidate, ok := r.resolveStampMapByCanon(key); ok {
 				return candidate
 			}
 		}
-		for _, candidate := range slices.Sorted(maps.Keys(r.pendingStamps)) {
-			if editorResourceID(candidate) == key {
-				return candidate
+		if len(r.pendingStamps) > 0 {
+			if candidates := r.pendingStampCandidates(key); len(candidates) > 0 {
+				return candidates[0]
 			}
 		}
-		if r.doc != nil {
-			for _, page := range r.doc.Pages.Page {
-				if editorResourceID(page.ID) == key {
-					return page.ID
-				}
-			}
+		if id, ok := r.resolveDocPageIDByCanon(key); ok {
+			return id
 		}
 	}
 	return pageID
+}
+
+// resolveStampMapByCanon 按规范标识常数时间查找已加载印章映射中的页面键
+// 入参: key 规范化十进制页面标识
+// 返回: string 匹配的页面键, bool 是否命中
+func (r *Reader) resolveStampMapByCanon(key string) (string, bool) {
+	if r.stampCanon == nil || r.stampCanonLen != len(r.Stamps) {
+		index := make(map[string]string, len(r.Stamps))
+		for candidate := range r.Stamps {
+			if canon := editorResourceID(candidate); canon != "" {
+				if prev, exists := index[canon]; !exists || candidate < prev {
+					index[canon] = candidate
+				}
+			}
+		}
+		r.stampCanon = index
+		r.stampCanonLen = len(r.Stamps)
+	}
+	candidate, ok := r.stampCanon[key]
+	if ok {
+		if _, exists := r.Stamps[candidate]; exists {
+			return candidate, true
+		}
+		r.stampCanon = nil
+		return r.resolveStampMapByCanon(key)
+	}
+	return "", false
+}
+
+// pendingStampCandidates 按规范标识常数时间获取待加载印章的所有排序页面键
+// 入参: key 规范化十进制页面标识
+// 返回: []string 匹配的页面键列表
+func (r *Reader) pendingStampCandidates(key string) []string {
+	if len(r.pendingStamps) == 0 || key == "" {
+		return nil
+	}
+	if r.pendingStampKeys == nil {
+		index := make(map[string][]string, len(r.pendingStamps))
+		for candidate := range r.pendingStamps {
+			if canon := editorResourceID(candidate); canon != "" {
+				index[canon] = append(index[canon], candidate)
+			}
+		}
+		for canon, list := range index {
+			if len(list) > 1 {
+				slices.Sort(list)
+				index[canon] = list
+			}
+		}
+		r.pendingStampKeys = index
+	}
+	return r.pendingStampKeys[key]
 }
 
 // ensurePageStampsContext 按页面标识惰性加载并填充单页印章二进制数据
@@ -343,11 +429,13 @@ func (r *Reader) ensurePageStampsContext(ctx context.Context, pageID string) err
 		pendingKeys = append(pendingKeys, resolvedID)
 		pending = append(pending, list...)
 	}
-	if key := editorResourceID(resolvedID); key != "" {
-		for _, candidate := range slices.Sorted(maps.Keys(r.pendingStamps)) {
-			if candidate != resolvedID && editorResourceID(candidate) == key {
-				pendingKeys = append(pendingKeys, candidate)
-				pending = append(pending, r.pendingStamps[candidate]...)
+	if key := editorResourceID(resolvedID); key != "" && len(r.pendingStamps) > 0 {
+		for _, candidate := range r.pendingStampCandidates(key) {
+			if candidate != resolvedID {
+				if list, ok := r.pendingStamps[candidate]; ok {
+					pendingKeys = append(pendingKeys, candidate)
+					pending = append(pending, list...)
+				}
 			}
 		}
 	}
@@ -360,7 +448,9 @@ func (r *Reader) ensurePageStampsContext(ctx context.Context, pageID string) err
 		r.pageStampsLoaded[pageID] = true
 		return nil
 	}
-	cache := make(map[stampSealSource]loadedStampMedia)
+	if r.stampSealCache == nil {
+		r.stampSealCache = &stampSealCache{items: make(map[stampSealSource]loadedStampMedia)}
+	}
 	loaded := make([]Stamp, 0, len(existing)+len(pending))
 	for _, stamp := range existing {
 		if len(stamp.Data) > 0 {
@@ -380,20 +470,15 @@ func (r *Reader) ensurePageStampsContext(ctx context.Context, pageID string) err
 		if stamp.sealSource == (stampSealSource{}) {
 			continue
 		}
-		media, ok := cache[stamp.sealSource]
-		if !ok {
-			sealType, sealData, err := stamp.sealSource.load(ctx, r)
-			if err != nil {
-				return err
-			}
-			media = loadedStampMedia{sealType: sealType, sealData: sealData}
-			cache[stamp.sealSource] = media
+		media, err := r.stampSealCache.load(ctx, r, stamp.sealSource)
+		if err != nil {
+			return err
 		}
 		if len(media.sealData) == 0 {
 			continue
 		}
 		stamp.Type = media.sealType
-		stamp.Data = bytes.Clone(media.sealData)
+		stamp.Data = media.sealData
 		stamp.sealSource = stampSealSource{}
 		loaded = append(loaded, stamp)
 	}
@@ -405,11 +490,25 @@ func (r *Reader) ensurePageStampsContext(ctx context.Context, pageID string) err
 			r.Stamps = make(map[string][]Stamp)
 		}
 		r.Stamps[resolvedID] = loaded
+		if r.stampCanon != nil {
+			if canon := editorResourceID(resolvedID); canon != "" {
+				if prev, exists := r.stampCanon[canon]; !exists || resolvedID < prev {
+					r.stampCanon[canon] = resolvedID
+				}
+			}
+			r.stampCanonLen = len(r.Stamps)
+		}
 	} else if hasExisting {
 		delete(r.Stamps, resolvedID)
+		r.stampCanon = nil
 	}
 	for _, k := range pendingKeys {
 		delete(r.pendingStamps, k)
+	}
+	if len(pendingKeys) > 0 && r.pendingStampKeys != nil {
+		if canon := editorResourceID(resolvedID); canon != "" {
+			delete(r.pendingStampKeys, canon)
+		}
 	}
 	if r.pageStampsLoaded == nil {
 		r.pageStampsLoaded = make(map[string]bool)
@@ -537,6 +636,7 @@ func (r *Reader) parseSignatures(ctx context.Context, doc *Document) error {
 		return err
 	}
 	r.pendingStamps = pending
+	r.pendingStampKeys = nil
 	return nil
 }
 

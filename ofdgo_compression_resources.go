@@ -118,13 +118,15 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 	if err != nil || !safe {
 		return err
 	}
-	if selected != nil && reader.DocumentCount() > 1 {
+	currentVersioned := reader != nil && reader.currentVersioned()
+	packageVersioned := reader != nil && reader.packageVersioned()
+	if packageVersioned {
 		preserved, err := reader.versionPreservedFiles(e.output.ctx)
 		if err != nil {
 			return err
 		}
 		for name := range preserved {
-			if !selected[name] {
+			if !currentVersioned || !selected[name] {
 				refs.files[name], refs.versions[name] = true, true
 			}
 		}
@@ -214,6 +216,7 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 	sizes := make(map[string]uint64, len(files))
 	largeCounts := make(map[resourceSize]int)
 	var imageKeys []string
+	var fontKeys []string
 	for _, key := range ordered {
 		if err := e.output.ctx.Err(); err != nil {
 			return err
@@ -235,6 +238,10 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 			largeCounts[resourceSize{role, size}]++
 		} else if media {
 			imageKeys = append(imageKeys, key)
+		} else if font && e.backends.FontResources != nil {
+			if usage := fontUsage[key]; usage != nil && !usage.unsafe && len(usage.chars)+len(usage.glyphs) > 0 {
+				fontKeys = append(fontKeys, key)
+			}
 		}
 	}
 	load := func(key string) ([]byte, error) {
@@ -247,6 +254,10 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 		return err
 	}
 	var fontCache editorSourceFontCache
+	fontErrors, err := e.prepareOutputFonts(fontKeys, fontUsage, load, &fontCache)
+	if err != nil {
+		return err
+	}
 	var hashBuffer []byte
 	for _, key := range ordered {
 		if refs.files[key] || files[resourceFile{key, "FontFile"}] && files[resourceFile{key, "MediaFile"}] {
@@ -289,6 +300,9 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 				}
 			}
 			if optimizable && subset {
+				if fontErr := fontErrors[key]; fontErr != nil {
+					return fmt.Errorf("subset font %s: %w", key, fontErr)
+				}
 				candidate, err := fontCache.subset(e.output.ctx, e.backends.FontResources, data, usage)
 				if err != nil {
 					return fmt.Errorf("subset font %s: %w", key, err)
@@ -437,6 +451,93 @@ func (e *Editor) compressResourceReferences(parts map[string][]byte, reader *Rea
 	return e.output.ctx.Err()
 }
 
+// prepareOutputFonts 有界并发预裁剪独立字体并填充缓存，读取与错误归属保持确定顺序
+// 入参: keys 待裁剪字体路径, usages 用字表, load 串行读取方法, cache 字体裁剪缓存
+// 返回: map[string]error 各字体路径对应的裁剪错误, error 读取或取消错误
+func (e *Editor) prepareOutputFonts(keys []string, usages map[string]*editorFontUsage, load func(string) ([]byte, error), cache *editorSourceFontCache) (map[string]error, error) {
+	ctx := e.output.ctx
+	workers := conversionWorkers(ctx)
+	if len(keys) < 2 || workers <= 1 || e.backends.FontResources == nil {
+		return nil, ctx.Err()
+	}
+	batchLimit := int64(min(int64(workers)*(64<<20), int64(outputImageWorkingSetLimit)))
+	var errs map[string]error
+	seen := make(map[editorSourceFontKey]bool, len(keys))
+	var batch []editorSourceFontTask
+	batchOwners := make(map[editorSourceFontKey][]string)
+	var batchBytes int64
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if len(batch) >= 2 {
+			taskErrs, err := cache.prepareBatch(ctx, e.backends.FontResources, batch)
+			if err != nil {
+				return err
+			}
+			for key, taskErr := range taskErrs {
+				if errs == nil {
+					errs = make(map[string]error)
+				}
+				for _, owner := range batchOwners[key] {
+					errs[owner] = taskErr
+				}
+			}
+		} else {
+			task := batch[0]
+			if _, err := cache.subset(ctx, e.backends.FontResources, task.data, usages[task.name]); err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return ctxErr
+				}
+				if errs == nil {
+					errs = make(map[string]error)
+				}
+				for _, owner := range batchOwners[task.key] {
+					errs[owner] = err
+				}
+			}
+		}
+		batch = batch[:0]
+		clear(batchOwners)
+		batchBytes = 0
+		return nil
+	}
+	for _, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		data, err := load(key)
+		if err != nil {
+			return nil, err
+		}
+		if len(data) == 0 {
+			continue
+		}
+		usage := usages[key]
+		cacheKey, characters, glyphs := buildEditorSourceFontKey(data, usage)
+		if _, cached := (*cache)[cacheKey]; cached {
+			continue
+		}
+		if seen[cacheKey] {
+			batchOwners[cacheKey] = append(batchOwners[cacheKey], key)
+			continue
+		}
+		if len(batch) > 0 && batchBytes+int64(len(data)) > batchLimit {
+			if err := flush(); err != nil {
+				return nil, err
+			}
+		}
+		seen[cacheKey] = true
+		batch = append(batch, editorSourceFontTask{name: key, key: cacheKey, data: data, characters: characters, glyphs: glyphs})
+		batchOwners[cacheKey] = append(batchOwners[cacheKey], key)
+		batchBytes += int64(len(data))
+	}
+	if err := flush(); err != nil {
+		return nil, err
+	}
+	return errs, ctx.Err()
+}
+
 // outputResourceSize 获取资源的实际输出大小，优先使用本次改动及已加载数据
 // 入参: reader 原包，可为空, parts 输出改动, name 资源路径
 // 返回: uint64 未压缩字节数, error 文件不存在
@@ -497,7 +598,7 @@ func outputResourceDigest(ctx context.Context, reader *Reader, parts map[string]
 // 返回: map[string]*editorFontUsage 各字体文件的用字，无法确定作用域时为空, error 读取或取消错误
 func (r *Reader) compressionFontUsage(ctx context.Context, documents map[string]bool, resources []string, references map[string]*editorResourceRefs, read func(string) ([]byte, error)) (map[string]*editorFontUsage, error) {
 	selected := ""
-	if r.OFD.DocBody[r.documentIndex].versioned {
+	if r.currentVersioned() {
 		var err error
 		selected, err = r.DocumentRootContext(ctx)
 		if err != nil {

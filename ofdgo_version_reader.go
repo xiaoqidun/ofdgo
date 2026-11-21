@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"archive/zip"
 	"context"
+	"encoding/xml"
 	"fmt"
 )
 
@@ -113,7 +114,8 @@ func (r *Reader) DocumentVersion(id string) (*Reader, error) {
 // 入参: ctx 取消上下文, id 版本标识，空值选择主入口
 // 返回: *Reader 版本阅读器, error 读取或取消错误
 func (r *Reader) DocumentVersionContext(ctx context.Context, id string) (*Reader, error) {
-	next := &Reader{Path: r.Path, Zip: r.Zip, encrypted: r.encryptedSource(), sourceFile: r.sourceFile, archiveID: r.archiveID, files: r.files, encryption: r.encryption, documentIndex: r.documentIndex, selectedVersion: &id, pageReady: r.pageReady, pageContents: r.pageContents, pdfDestinations: r.pdfDestinations.clone(), resources: r.resources}
+	next := r.deriveView(nil, r.documentIndex, &id)
+	next.pdfDestinations = r.pdfDestinations.clone()
 	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}
@@ -219,6 +221,18 @@ func (r *Reader) ExtractVersionContext(ctx context.Context, id string) (*Reader,
 	return next, nil
 }
 
+// versionSignatureScope 保存多版本签章归属判定的文件与页面索引
+type versionSignatureScope struct {
+	listPath          string
+	listInVersion     bool
+	versionLoc        string
+	versionDocRoot    string
+	versionFiles      map[string]bool
+	versionPages      map[string]bool
+	otherVersionRoots map[string]bool
+	hasExplicitSig    bool
+}
+
 // documentEntryContext 解析指定文档的阅读入口，当前文档保留显式选择
 // 入参: ctx 取消上下文, index 文档索引
 // 返回: string 包内路径, error 选择、读取或取消错误
@@ -232,23 +246,201 @@ func (r *Reader) documentEntryContext(ctx context.Context, index int) (string, e
 	return view.DocumentRootContext(ctx)
 }
 
-// versionSignatures 按OFD入口解析包级签名路径，选中版本仅使用文件清单内的签名入口
+// versionSignatures 按OFD入口解析包级签名路径，选中版本时结合文件清单与签章归属判定
 // 入参: location OFD入口中的签名路径
 // 返回: string 签名路径，不属于该版本时为空
 func (r *Reader) versionSignatures(location string) string {
+	return r.versionSignaturesContext(context.Background(), location)
+}
+
+// versionSignaturesContext 按OFD入口解析包级签名路径并在读取归属信息时响应取消
+// 入参: ctx 取消上下文, location OFD入口中的签名路径
+// 返回: string 签名路径，不属于该版本时为空
+func (r *Reader) versionSignaturesContext(ctx context.Context, location string) string {
 	if location == "" {
 		return ""
 	}
 	name := resolveResourcePath("OFD.xml", "", location)
+	if !validPackagePath(name) {
+		return ""
+	}
 	if r.versionInfo == nil {
 		return "/" + name
 	}
 	for _, file := range r.versionInfo.Files {
-		if file.Location == name {
+		if cleanPackagePath(file.Location) == name {
+			return "/" + name
+		}
+	}
+	data, err := r.readFileViewContext(ctx, name)
+	if err != nil {
+		return ""
+	}
+	var list Signatures
+	if err := xml.Unmarshal(data, &list); err != nil || len(list.List) == 0 {
+		return ""
+	}
+	scope, err := r.buildVersionSignatureScope(ctx, name, list)
+	if err != nil {
+		return ""
+	}
+	for _, sigRef := range list.List {
+		if r.versionSignatureMatches(ctx, scope, sigRef) {
 			return "/" + name
 		}
 	}
 	return ""
+}
+
+// buildVersionSignatureScope 构建当前版本的签章归属判定上下文
+// 入参: ctx 取消上下文, listPath 规范化签名列表路径, list 签名列表
+// 返回: *versionSignatureScope 归属上下文, error 读取或取消错误
+func (r *Reader) buildVersionSignatureScope(ctx context.Context, listPath string, list Signatures) (*versionSignatureScope, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cleanList := cleanPackagePath(listPath)
+	versionLoc := cleanPackagePath(r.versionInfo.Location)
+	versionDocRoot := cleanPackagePath(r.versionInfo.DocRoot)
+	scope := &versionSignatureScope{
+		listPath:          cleanList,
+		versionLoc:        versionLoc,
+		versionDocRoot:    versionDocRoot,
+		versionFiles:      make(map[string]bool, len(r.versionInfo.Files)+2),
+		versionPages:      make(map[string]bool),
+		otherVersionRoots: make(map[string]bool),
+	}
+	if versionLoc != "" && versionLoc != "." {
+		scope.versionFiles[versionLoc] = true
+	}
+	if versionDocRoot != "" && versionDocRoot != "." {
+		scope.versionFiles[versionDocRoot] = true
+	}
+	for _, file := range r.versionInfo.Files {
+		clean := cleanPackagePath(file.Location)
+		if clean == "" || clean == "." {
+			continue
+		}
+		scope.versionFiles[clean] = true
+		if clean == cleanList {
+			scope.listInVersion = true
+		}
+	}
+	for _, sigRef := range list.List {
+		sigPath := cleanPackagePath(signatureRefPath(cleanList, sigRef.BaseLoc))
+		if scope.versionFiles[sigPath] {
+			scope.hasExplicitSig = true
+			break
+		}
+	}
+	if r.doc != nil && cleanPackagePath(r.documentRoot) == versionDocRoot {
+		for _, page := range r.doc.Pages.Page {
+			if id := editorResourceID(page.ID); id != "" {
+				scope.versionPages[id] = true
+			}
+		}
+	} else if versionDocRoot != "" && versionDocRoot != "." {
+		if data, err := r.readFileViewContext(ctx, versionDocRoot); err == nil {
+			var doc documentPageList
+			if xml.Unmarshal(data, &doc) == nil {
+				for _, page := range doc.Pages.Page {
+					if id := editorResourceID(page.ID); id != "" {
+						scope.versionPages[id] = true
+					}
+				}
+			}
+		}
+	}
+	if versions, err := r.DocumentVersionsContext(ctx); err == nil {
+		for _, v := range versions {
+			if v.ID == r.versionInfo.ID {
+				continue
+			}
+			if loc := cleanPackagePath(v.Location); loc != "" && loc != "." && loc != versionLoc {
+				scope.otherVersionRoots[loc] = true
+			}
+			if dr := cleanPackagePath(v.DocRoot); dr != "" && dr != "." && dr != versionDocRoot {
+				scope.otherVersionRoots[dr] = true
+			}
+		}
+	}
+	if r.OFD != nil && r.documentIndex >= 0 && r.documentIndex < len(r.OFD.DocBody) {
+		if mainDoc := r.OFD.DocBody[r.documentIndex].DocRoot; mainDoc != "" {
+			if dr := cleanPackagePath(resolveResourcePath("OFD.xml", "", mainDoc)); dr != "" && dr != "." && dr != versionDocRoot {
+				scope.otherVersionRoots[dr] = true
+			}
+		}
+	}
+	return scope, ctx.Err()
+}
+
+// versionSignatureMatches 判断单条签名是否归属当前选中版本
+// 入参: ctx 取消上下文, scope 归属判定上下文, sigRef 签名条目
+// 返回: bool 是否归属当前版本
+func (r *Reader) versionSignatureMatches(ctx context.Context, scope *versionSignatureScope, sigRef Signature) bool {
+	if scope == nil {
+		return true
+	}
+	sigPath := cleanPackagePath(signatureRefPath(scope.listPath, sigRef.BaseLoc))
+	if scope.versionFiles[sigPath] {
+		return true
+	}
+	data, err := r.readFileViewContext(ctx, sigPath)
+	if err != nil {
+		return scope.listInVersion && !scope.hasExplicitSig
+	}
+	sigFile, err := parseSignatureFile(data)
+	if err != nil {
+		return scope.listInVersion && !scope.hasExplicitSig
+	}
+	ownValue := ""
+	if sigFile.SignedValue != "" {
+		ownValue = cleanPackagePath(signatureRefPath(sigPath, sigFile.SignedValue))
+	}
+	ownSeal := ""
+	if sigFile.SignedInfo.Seal.BaseLoc != "" {
+		ownSeal = cleanPackagePath(signatureRefPath(sigPath, sigFile.SignedInfo.Seal.BaseLoc))
+	}
+	hitsCurrentRoot := false
+	hitsOtherRoot := false
+	hitsVersionFile := false
+	nonSharedRefs := 0
+	for _, ref := range sigFile.SignedInfo.References.Reference {
+		refPath := cleanPackagePath(signatureRefPath(sigPath, ref.FileRef))
+		if refPath == "" || refPath == "." || refPath == "OFD.xml" || refPath == scope.listPath || refPath == sigPath || refPath == ownValue || refPath == ownSeal {
+			continue
+		}
+		nonSharedRefs++
+		if refPath == scope.versionLoc || refPath == scope.versionDocRoot {
+			hitsCurrentRoot = true
+		}
+		if scope.otherVersionRoots[refPath] {
+			hitsOtherRoot = true
+		}
+		if scope.versionFiles[refPath] {
+			hitsVersionFile = true
+		}
+	}
+	if hitsCurrentRoot {
+		return true
+	}
+	if hitsOtherRoot {
+		return false
+	}
+	if scope.listInVersion && !scope.hasExplicitSig {
+		return true
+	}
+	if hitsVersionFile {
+		return true
+	}
+	if nonSharedRefs == 0 {
+		for _, stamp := range sigFile.SignedInfo.StampAnnot {
+			if scope.versionPages[editorResourceID(stamp.PageRef)] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // extractedVersionRoot 重建版本副本入口，保留元数据及命名空间，移除其他文档与版本列表

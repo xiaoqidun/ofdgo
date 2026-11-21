@@ -17,13 +17,30 @@ package ofdgo
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"image"
+	"sync"
 
 	"github.com/tdewolff/canvas"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
-// renderStamp 渲染印章
+// cachedStampOFD 保存按内容摘要共享的OFD印章解析结果
+type cachedStampOFD struct {
+	mu     sync.Mutex
+	reader *Reader
+	pages  []*PageContent
+	boxes  []Box
+}
+
+// cachedStampSession 保存当前渲染器独占的OFD印章子渲染器与预解析页面
+type cachedStampSession struct {
+	renderer *Renderer
+	pages    []*PageContent
+	boxes    []Box
+}
+
+// renderStamp 渲染印章并按内容摘要跨页复用OFD及图像印章资源
 // 入参: ctx 画布上下文, s 印章对象, pageH 页面高度, parentClip 父级裁剪路径
 func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64, parentClip *canvas.Path) {
 	if r.textOnly {
@@ -44,40 +61,22 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64, pare
 	}
 	validBox := rasterPositive(s.Box.W) && rasterPositive(s.Box.H) && (s.Clip == nil || rasterPositive(s.Clip.W) && rasterPositive(s.Clip.H))
 	if s.Type == "ofd" && len(s.Data) > 0 {
-		reader, err := NewReader(&Input{reader: bytes.NewReader(s.Data), size: int64(len(s.Data))})
+		session, err := r.loadStampOFD(pageContext, s.Data)
 		if err != nil {
-			r.renderError = err
-			return
-		}
-		defer reader.Close()
-		doc, err := reader.DocContext(pageContext)
-		if err != nil {
-			r.renderError = err
+			if pageContext.Err() == nil {
+				r.renderError = err
+			}
 			return
 		}
 		if !validBox {
 			return
 		}
-		renderer := r.childRenderer(reader)
-		renderer.TransparentBackground = true
-		for _, pageRef := range doc.Pages.Page {
-			content, err := reader.PageContentContext(pageContext, pageRef)
-			if err != nil {
-				if pageContext.Err() != nil {
-					return
-				}
-				r.renderError = err
-				return
-			}
-			sealBox, err := renderer.GetPageBox(content)
-			if err != nil {
-				r.renderError = err
-				return
-			}
+		for i, content := range session.pages {
+			sealBox := session.boxes[i]
 			childClip := canvas.Rectangle(sealBox.W, sealBox.H)
 			if parentClip != nil {
 				parentInSeal := parentClip.Copy().Translate(-s.Box.X, -(pageH-s.Box.Y-s.Box.H)).Scale(sealBox.W/s.Box.W, sealBox.H/s.Box.H)
-				childClip = renderer.intersectCachedClipPath(childClip, parentInSeal)
+				childClip = session.renderer.intersectCachedClipPath(childClip, parentInSeal)
 			}
 			if s.Clip != nil {
 				clipW := s.Clip.W * sealBox.W / s.Box.W
@@ -85,12 +84,17 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64, pare
 				clipX := s.Clip.X * sealBox.W / s.Box.W
 				clipY := sealBox.H - (s.Clip.Y+s.Clip.H)*sealBox.H/s.Box.H
 				rect := canvas.Rectangle(clipW, clipH).Translate(clipX, clipY)
-				childClip = renderer.intersectCachedClipPath(childClip, rect)
+				childClip = session.renderer.intersectCachedClipPath(childClip, rect)
 			}
 			if childClip.Empty() {
 				continue
 			}
-			pageRenderer := *renderer
+			pageRenderer := *session.renderer
+			pageRenderer.DPI = r.DPI
+			pageRenderer.printing = r.printing
+			pageRenderer.decodeImages = r.decodeImages
+			pageRenderer.pageContext = pageContext
+			pageRenderer.renderError = nil
 			if scale := max(s.Box.W/sealBox.W, s.Box.H/sealBox.H); scale > 1 {
 				limit := 4096 * 25.4 / max(sealBox.W, sealBox.H)
 				if pageRenderer.DPI < limit {
@@ -110,7 +114,16 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64, pare
 		return
 	}
 	if len(s.Data) > 0 {
-		img, _, err := baseimage.DecodeContext(pageContext, s.Data)
+		digest := sha256.Sum256(s.Data)
+		cache := r.stampImageCache()
+		img, err := cache.load(pageContext, digest, func() (image.Image, int, error) {
+			cloned := bytes.Clone(s.Data)
+			decoded, _, decodeErr := baseimage.DecodeContext(pageContext, cloned)
+			if decodeErr != nil {
+				return nil, 0, decodeErr
+			}
+			return decoded, baseimage.StorageCost(decoded, cache.limit), nil
+		})
 		if err != nil {
 			r.renderError = err
 			return
@@ -119,6 +132,67 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64, pare
 			r.renderStampImage(ctx, img, s, pageH, parentClip)
 		}
 	}
+}
+
+// loadStampOFD 按内容摘要缓存并复用OFD印章解析结果与当前渲染器独占子渲染器
+// 入参: ctx 取消上下文, data 印章OFD字节
+// 返回: *cachedStampSession 印章渲染会话, error 解析或派生错误
+func (r *Renderer) loadStampOFD(ctx context.Context, data []byte) (*cachedStampSession, error) {
+	digest := sha256.Sum256(data)
+	state := r.canvasState()
+	if session, ok := state.stampSessions[digest]; ok {
+		return session, nil
+	}
+	cache := r.stampOFDCache()
+	shared, err := cache.load(ctx, digest, func() (*cachedStampOFD, int, error) {
+		cloned := bytes.Clone(data)
+		var opts []ReaderOption
+		if r.Reader != nil && r.Reader.resources != nil {
+			opts = append(opts, WithResources(r.Reader.resources))
+		}
+		reader, openErr := NewReader(&Input{reader: bytes.NewReader(cloned), size: int64(len(cloned))}, opts...)
+		if openErr != nil {
+			return nil, 0, openErr
+		}
+		doc, docErr := reader.DocContext(ctx)
+		if docErr != nil {
+			_ = reader.Close()
+			return nil, 0, docErr
+		}
+		probe := r.childRenderer(reader)
+		pages := make([]*PageContent, 0, len(doc.Pages.Page))
+		boxes := make([]Box, 0, len(doc.Pages.Page))
+		for _, pageRef := range doc.Pages.Page {
+			content, pageErr := reader.PageContentContext(ctx, pageRef)
+			if pageErr != nil {
+				_ = reader.Close()
+				return nil, 0, pageErr
+			}
+			box, boxErr := probe.GetPageBox(content)
+			if boxErr != nil {
+				_ = reader.Close()
+				return nil, 0, boxErr
+			}
+			pages = append(pages, content)
+			boxes = append(boxes, box)
+		}
+		cost := min(len(cloned)+len(pages)*4096+1024, cache.limit)
+		return &cachedStampOFD{reader: reader, pages: pages, boxes: boxes}, cost, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	shared.mu.Lock()
+	forkReader, forkErr := shared.reader.Fork(ctx)
+	shared.mu.Unlock()
+	if forkErr != nil {
+		return nil, forkErr
+	}
+	child := r.childRenderer(forkReader)
+	child.TransparentBackground = true
+	session := &cachedStampSession{renderer: child, pages: shared.pages, boxes: shared.boxes}
+	state.stampSessions[digest] = session
+	return session, nil
 }
 
 // renderStampImage 渲染印章图像

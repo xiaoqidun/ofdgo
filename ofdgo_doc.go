@@ -25,19 +25,20 @@ import (
 // Document 文档结构
 // Signatures由阅读器按主入口和所选版本解析，不属于文档根节点的XML内容
 type Document struct {
-	XMLName      xml.Name      `xml:"Document"`
-	CommonData   CommonData    `xml:"CommonData"`
-	Pages        Pages         `xml:"Pages"`
-	Outlines     Outlines      `xml:"Outlines"`
-	Permissions  Permissions   `xml:"Permissions"`
-	Actions      []Action      `xml:"Actions>Action"`
-	VPreferences *VPreferences `xml:"VPreferences,omitempty"`
-	Bookmarks    Bookmarks     `xml:"Bookmarks"`
-	Annotations  string        `xml:"Annotations"`
-	Signatures   string        `xml:"-"`
-	Attachments  Attachments   `xml:"Attachments"`
-	CustomTags   CustomTags    `xml:"CustomTags"`
-	Extensions   Extensions    `xml:"Extensions"`
+	XMLName        xml.Name      `xml:"Document"`
+	CommonData     CommonData    `xml:"CommonData"`
+	Pages          Pages         `xml:"Pages"`
+	Outlines       Outlines      `xml:"Outlines"`
+	Permissions    Permissions   `xml:"Permissions"`
+	Actions        []Action      `xml:"Actions>Action"`
+	VPreferences   *VPreferences `xml:"VPreferences,omitempty"`
+	Bookmarks      Bookmarks     `xml:"Bookmarks"`
+	Annotations    string        `xml:"Annotations"`
+	Signatures     string        `xml:"-"`
+	Attachments    Attachments   `xml:"Attachments"`
+	CustomTags     CustomTags    `xml:"CustomTags"`
+	Extensions     Extensions    `xml:"Extensions"`
+	hasPermissions bool
 }
 
 // Extensions 扩展集合
@@ -180,35 +181,35 @@ type OutlineInfo struct {
 
 // VPreferences 文档视图首选项
 type VPreferences struct {
-	PageMode     string   `xml:"PageMode,omitempty"`
-	PageLayout   string   `xml:"PageLayout,omitempty"`
-	TabDisplay   string   `xml:"TabDisplay,omitempty"`
-	HideToolbar  *bool    `xml:"HideToolbar,omitempty"`
-	HideMenubar  *bool    `xml:"HideMenubar,omitempty"`
-	HideWindowUI *bool    `xml:"HideWindowUI,omitempty"`
-	ZoomMode     string   `xml:"ZoomMode,omitempty"`
-	Zoom         *float64 `xml:"Zoom,omitempty"`
+	PageMode     string   `xml:"PageMode,omitempty" json:"pageMode,omitempty"`
+	PageLayout   string   `xml:"PageLayout,omitempty" json:"pageLayout,omitempty"`
+	TabDisplay   string   `xml:"TabDisplay,omitempty" json:"tabDisplay,omitempty"`
+	HideToolbar  *bool    `xml:"HideToolbar,omitempty" json:"hideToolbar,omitempty"`
+	HideMenubar  *bool    `xml:"HideMenubar,omitempty" json:"hideMenubar,omitempty"`
+	HideWindowUI *bool    `xml:"HideWindowUI,omitempty" json:"hideWindowUI,omitempty"`
+	ZoomMode     string   `xml:"ZoomMode,omitempty" json:"zoomMode,omitempty"`
+	Zoom         *float64 `xml:"Zoom,omitempty" json:"zoom,omitempty"`
 }
 
 // Permissions 权限声明
 type Permissions struct {
-	Edit          bool         `xml:"Edit"`
-	Annot         bool         `xml:"Annot"`
-	Export        bool         `xml:"Export"`
-	Signature     bool         `xml:"Signature"`
-	Watermark     bool         `xml:"Watermark"`
-	PrintScreen   bool         `xml:"PrintScreen"`
-	Print         bool         `xml:"-"`
-	Copies        int          `xml:"-"`
-	Copy          bool         `xml:"CopyText"`
-	ContentRegist bool         `xml:"ContentRegist"`
-	ValidPeriod   *ValidPeriod `xml:"ValidPeriod"`
+	Edit          bool         `xml:"Edit" json:"edit"`
+	Annot         bool         `xml:"Annot" json:"annot"`
+	Export        bool         `xml:"Export" json:"export"`
+	Signature     bool         `xml:"Signature" json:"signature"`
+	Watermark     bool         `xml:"Watermark" json:"watermark"`
+	PrintScreen   bool         `xml:"PrintScreen" json:"printScreen"`
+	Print         bool         `xml:"-" json:"print"`
+	Copies        int          `xml:"-" json:"copies"`
+	Copy          bool         `xml:"CopyText" json:"copy"`
+	ContentRegist bool         `xml:"ContentRegist" json:"contentRegist"`
+	ValidPeriod   *ValidPeriod `xml:"ValidPeriod" json:"validPeriod,omitempty"`
 }
 
 // ValidPeriod 文档访问有效期
 type ValidPeriod struct {
-	StartDate string `xml:"StartDate,attr"`
-	EndDate   string `xml:"EndDate,attr"`
+	StartDate string `xml:"StartDate,attr" json:"startDate,omitempty"`
+	EndDate   string `xml:"EndDate,attr" json:"endDate,omitempty"`
 }
 
 // UnmarshalXML 按命名空间读取文档结构，扩展数据仍由原解码器保留原文
@@ -218,7 +219,7 @@ func (doc *Document) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 	if start.Name.Local != "Document" {
 		return fmt.Errorf("expected Document root, got %s", start.Name.Local)
 	}
-	*doc = Document{XMLName: start.Name, Permissions: defaultPermissions()}
+	*doc = Document{XMLName: start.Name, Permissions: DefaultPermissions()}
 	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
 		var target any
 		switch node.Name.Local {
@@ -229,6 +230,7 @@ func (doc *Document) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 		case "Outlines":
 			target = &doc.Outlines
 		case "Permissions":
+			doc.hasPermissions = true
 			target = &doc.Permissions
 		case "Actions":
 			return decodeOFDActions(d, node, &doc.Actions)
@@ -250,6 +252,12 @@ func (doc *Document) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 		}
 		return d.DecodeElement(target, &node)
 	})
+}
+
+// HasPermissions 判断文档是否显式声明了Permissions节点
+// 返回: bool 是否显式声明权限
+func (doc *Document) HasPermissions() bool {
+	return doc != nil && doc.hasPermissions
 }
 
 // PageIndex 按标识查找页面，优先匹配原文和标准十进制写法，等价编号有歧义时不匹配
@@ -622,27 +630,29 @@ func (v *VPreferences) UnmarshalXML(d *xml.Decoder, start xml.StartElement) erro
 	err := decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
 		switch node.Name.Local {
 		case "PageMode":
-			return d.DecodeElement(&v.PageMode, &node)
+			return decodeOFDTrimmedString(d, node, &v.PageMode)
 		case "PageLayout":
-			return d.DecodeElement(&v.PageLayout, &node)
+			return decodeOFDTrimmedString(d, node, &v.PageLayout)
 		case "TabDisplay":
-			return d.DecodeElement(&v.TabDisplay, &node)
+			return decodeOFDTrimmedString(d, node, &v.TabDisplay)
 		case "HideToolbar":
 			v.HideToolbar = new(bool)
-			return d.DecodeElement(v.HideToolbar, &node)
+			return decodeOFDTrimmedBool(d, node, v.HideToolbar)
 		case "HideMenubar":
 			v.HideMenubar = new(bool)
-			return d.DecodeElement(v.HideMenubar, &node)
+			return decodeOFDTrimmedBool(d, node, v.HideMenubar)
 		case "HideWindowUI":
 			v.HideWindowUI = new(bool)
-			return d.DecodeElement(v.HideWindowUI, &node)
+			return decodeOFDTrimmedBool(d, node, v.HideWindowUI)
 		case "ZoomMode":
 			zoomSet = true
-			return d.DecodeElement(&v.ZoomMode, &node)
+			v.Zoom = nil
+			return decodeOFDTrimmedString(d, node, &v.ZoomMode)
 		case "Zoom":
 			zoomSet = true
+			v.ZoomMode = ""
 			v.Zoom = new(float64)
-			return d.DecodeElement(v.Zoom, &node)
+			return decodeOFDTrimmedFloat(d, node, v.Zoom)
 		default:
 			return d.Skip()
 		}
@@ -656,29 +666,46 @@ func (v *VPreferences) UnmarshalXML(d *xml.Decoder, start xml.StartElement) erro
 	return nil
 }
 
+// DefaultPermissions 获取GB/T 33190标准默认文档权限
+// 返回: Permissions 默认文档权限
+func DefaultPermissions() Permissions {
+	return Permissions{
+		Edit:          true,
+		Annot:         true,
+		Export:        true,
+		Signature:     true,
+		Watermark:     true,
+		PrintScreen:   true,
+		Print:         true,
+		Copies:        -1,
+		Copy:          true,
+		ContentRegist: true,
+	}
+}
+
 // UnmarshalXML 解析文档权限并应用默认值
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
 func (p *Permissions) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	*p = defaultPermissions()
+	*p = DefaultPermissions()
 	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
 		switch node.Name.Local {
 		case "Edit":
-			return d.DecodeElement(&p.Edit, &node)
+			return decodeOFDTrimmedBool(d, node, &p.Edit)
 		case "Annot":
-			return d.DecodeElement(&p.Annot, &node)
+			return decodeOFDTrimmedBool(d, node, &p.Annot)
 		case "Export":
-			return d.DecodeElement(&p.Export, &node)
+			return decodeOFDTrimmedBool(d, node, &p.Export)
 		case "Signature":
-			return d.DecodeElement(&p.Signature, &node)
+			return decodeOFDTrimmedBool(d, node, &p.Signature)
 		case "Watermark":
-			return d.DecodeElement(&p.Watermark, &node)
+			return decodeOFDTrimmedBool(d, node, &p.Watermark)
 		case "PrintScreen":
-			return d.DecodeElement(&p.PrintScreen, &node)
+			return decodeOFDTrimmedBool(d, node, &p.PrintScreen)
 		case "CopyText":
-			return d.DecodeElement(&p.Copy, &node)
+			return decodeOFDTrimmedBool(d, node, &p.Copy)
 		case "ContentRegist":
-			return d.DecodeElement(&p.ContentRegist, &node)
+			return decodeOFDTrimmedBool(d, node, &p.ContentRegist)
 		case "Print":
 			var pr print
 			node = ofdXMLStart(node)
@@ -698,6 +725,8 @@ func (p *Permissions) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error
 			if err := d.DecodeElement(&vp, &node); err != nil {
 				return err
 			}
+			vp.StartDate = strings.TrimSpace(vp.StartDate)
+			vp.EndDate = strings.TrimSpace(vp.EndDate)
 			p.ValidPeriod = &vp
 			return nil
 		default:
@@ -710,6 +739,52 @@ func (p *Permissions) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error
 type print struct {
 	Printable *bool `xml:"Printable,attr"`
 	Copies    *int  `xml:"Copies,attr"`
+}
+
+// decodeOFDTrimmedString 解析并裁剪节点文本前后空白
+// 入参: d XML解码器, start 起始节点, target 目标字符串指针
+// 返回: error 解析错误
+func decodeOFDTrimmedString(d *xml.Decoder, start xml.StartElement, target *string) error {
+	var raw string
+	if err := d.DecodeElement(&raw, &start); err != nil {
+		return err
+	}
+	if value := strings.TrimSpace(raw); value != "" {
+		*target = value
+	}
+	return nil
+}
+
+// decodeOFDTrimmedBool 解析忽略前后空白的布尔子节点
+// 入参: d XML解码器, start 起始节点, target 目标布尔指针
+// 返回: error 解析错误
+func decodeOFDTrimmedBool(d *xml.Decoder, start xml.StartElement, target *bool) error {
+	var raw string
+	if err := d.DecodeElement(&raw, &start); err != nil {
+		return err
+	}
+	value, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return err
+	}
+	*target = value
+	return nil
+}
+
+// decodeOFDTrimmedFloat 解析忽略前后空白的浮点子节点
+// 入参: d XML解码器, start 起始节点, target 目标浮点指针
+// 返回: error 解析错误
+func decodeOFDTrimmedFloat(d *xml.Decoder, start xml.StartElement, target *float64) error {
+	var raw string
+	if err := d.DecodeElement(&raw, &start); err != nil {
+		return err
+	}
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil {
+		return err
+	}
+	*target = value
+	return nil
 }
 
 // decodeDocumentIndex 读取索引的直接条目及路径文本，不提升外部扩展中的节点
@@ -766,21 +841,4 @@ func outlineInfos(outlines []OutlineElem, bookmarks map[string]Dest, pages map[s
 		infos = append(infos, info)
 	}
 	return infos
-}
-
-// defaultPermissions 获取默认文档权限
-// 返回: Permissions 文档权限
-func defaultPermissions() Permissions {
-	return Permissions{
-		Edit:          true,
-		Annot:         true,
-		Export:        true,
-		Signature:     true,
-		Watermark:     true,
-		PrintScreen:   true,
-		Print:         true,
-		Copies:        -1,
-		Copy:          true,
-		ContentRegist: true,
-	}
 }

@@ -34,7 +34,7 @@ type pageReferenceNode struct {
 
 // pruneDocumentReferences 在输出快照中清理已删除页面和附件的引用，不修改历史快照或其他文档
 // 沿当前文档、页面、模板、资源、注释和签名索引检查，不进入附件、私有扩展和签名原始凭据
-// 版本包保留原签名及其页面引用，避免改写其他版本共用的签名数据
+// 版本包通过独立副本隔离更新当前版本可见的签名列表与签名描述，保留历史版本原始签名快照
 // 入参: ctx 取消上下文, parts 输出覆盖条目, generated 本次自产页面及引用，可为nil
 // 返回: error 读取、解析或取消错误
 func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][]byte, generated map[string]editorGeneratedReferences) error {
@@ -203,7 +203,124 @@ func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][
 			delete(generated, name)
 		}
 	}
+	if len(removed) != 0 && e.source.document.Signatures != "" && reader.OFD.DocBody[reader.documentIndex].versioned {
+		if err := e.pruneVersionSignatureReferences(ctx, parts, removed); err != nil {
+			return err
+		}
+	}
 	return ctx.Err()
+}
+
+// pruneVersionSignatureReferences 在多版本文档删页时隔离更新当前版本可见签名中的悬空印章引用
+// 入参: ctx 取消上下文, parts 输出覆盖条目, removed 已删除页面规范标识集合
+// 返回: error 读取、解析或取消错误
+func (e *Editor) pruneVersionSignatureReferences(ctx context.Context, parts map[string][]byte, removed map[string]bool) error {
+	reader := e.source.reader
+	listPath := cleanPackagePath(reader.ResPath(e.source.document.Signatures))
+	if !validPackagePath(listPath) {
+		return nil
+	}
+	listData, ok := parts[listPath]
+	if !ok {
+		var err error
+		listData, err = reader.readFileViewContext(ctx, listPath)
+		if err != nil {
+			return err
+		}
+	}
+	listRoot, err := parseEditorXMLContext(ctx, listData)
+	if err != nil {
+		return err
+	}
+	var scope *versionSignatureScope
+	if reader.versionInfo != nil {
+		var list Signatures
+		if xml.Unmarshal(listData, &list) == nil {
+			scope, err = reader.buildVersionSignatureScope(ctx, listPath, list)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	var listPatches []editorXMLPatch
+	for _, node := range listRoot.children {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !node.matchesOFD("Signature") {
+			continue
+		}
+		sigRef := Signature{ID: node.attr("ID"), BaseLoc: node.attr("BaseLoc"), Type: SignType(node.attr("Type"))}
+		if scope != nil && !reader.versionSignatureMatches(ctx, scope, sigRef) {
+			continue
+		}
+		sigPath := cleanPackagePath(signatureRefPath(listPath, sigRef.BaseLoc))
+		if !validPackagePath(sigPath) {
+			continue
+		}
+		sigData, exists := parts[sigPath]
+		if !exists {
+			sigData, err = reader.readFileViewContext(ctx, sigPath)
+			if err != nil {
+				return err
+			}
+		}
+		sigRoot, err := parseEditorXMLContext(ctx, sigData)
+		if err != nil {
+			return err
+		}
+		var sigPatches []editorXMLPatch
+		var walkSig func(*editorXML)
+		walkSig = func(current *editorXML) {
+			if classifyOFDNamespace(current.name.Space) == ofdXMLUnknown {
+				return
+			}
+			if current.name.Local == "StampAnnot" && removed[editorResourceID(current.attr("PageRef"))] {
+				sigPatches = append(sigPatches, editorXMLPatch{start: current.start, end: current.end})
+				return
+			}
+			for _, child := range current.children {
+				walkSig(child)
+			}
+		}
+		walkSig(sigRoot)
+		if len(sigPatches) == 0 {
+			continue
+		}
+		newSigPath := packageAvailableName(reader, parts, sigPath)
+		parts[newSigPath] = editorPatchXML(sigData, sigPatches)
+		patch, err := editorXMLAttributePatch(listData, node, "BaseLoc", "/"+newSigPath)
+		if err != nil {
+			return err
+		}
+		listPatches = append(listPatches, patch)
+	}
+	if len(listPatches) == 0 {
+		return nil
+	}
+	newListPath := packageAvailableName(reader, parts, listPath)
+	parts[newListPath] = editorPatchXML(listData, listPatches)
+	ofdName := "OFD.xml"
+	if file, ok := reader.packageFile(ofdName); ok {
+		ofdName = cleanPackagePath(file.Name)
+	}
+	ofdData, ok := parts[ofdName]
+	if !ok {
+		ofdData, err = reader.readFileViewContext(ctx, ofdName)
+		if err != nil {
+			return err
+		}
+	}
+	ofdRoot, err := parseEditorXMLContext(ctx, ofdData)
+	if err != nil {
+		return err
+	}
+	body := ofdRoot.childAt("DocBody", reader.documentIndex)
+	if body == nil {
+		return fmt.Errorf("missing document body")
+	}
+	parts[ofdName], err = editorXMLSetText(ofdData, body, [][2]string{{"Signatures", "/" + newListPath}})
+	return err
 }
 
 // pruneCreatedPageReferences 清理创作文档中被明确删除页面的直接跳转，不检查其他目标是否可达

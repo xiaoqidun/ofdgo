@@ -25,7 +25,7 @@ import (
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
-// canvasGeometryMu 保护底层路径运算的共享扫描线对象池
+// canvasGeometryMu 保护开启路径求交调试开关时的全局状态
 var canvasGeometryMu sync.Mutex
 
 // Curves 在输出边界转换椭圆弧，其他曲线保持原样
@@ -211,21 +211,25 @@ func (CanvasBackend) Clip(r *Renderer, clips *Clips, matrix Matrix, parent *Geom
 	return geometryFromCanvasPath(r.intersectCachedClipPath(p, clip)), nil
 }
 
-// settleCanvasPath 在共享对象池保护下归整路径
+// settleCanvasPath 归整路径并在开启调试模式时加锁保护全局调试状态
 // 入参: path 路径, rule 填充规则
 // 返回: *canvas.Path 归整路径
 func settleCanvasPath(path *canvas.Path, rule canvas.FillRule) *canvas.Path {
-	canvasGeometryMu.Lock()
-	defer canvasGeometryMu.Unlock()
+	if canvas.DebugPathIntersection {
+		canvasGeometryMu.Lock()
+		defer canvasGeometryMu.Unlock()
+	}
 	return path.Settle(rule)
 }
 
-// combineCanvasPaths 在共享对象池保护下计算路径布尔运算
+// combineCanvasPaths 计算路径布尔运算并在开启调试模式时加锁保护全局调试状态
 // 入参: left 左路径, right 右路径, operation 运算名称
 // 返回: *canvas.Path 运算结果
 func combineCanvasPaths(left, right *canvas.Path, operation string) *canvas.Path {
-	canvasGeometryMu.Lock()
-	defer canvasGeometryMu.Unlock()
+	if canvas.DebugPathIntersection {
+		canvasGeometryMu.Lock()
+		defer canvasGeometryMu.Unlock()
+	}
 	switch operation {
 	case "or":
 		return left.Or(right)
@@ -238,12 +242,14 @@ func combineCanvasPaths(left, right *canvas.Path, operation string) *canvas.Path
 	}
 }
 
-// strokeCanvasPath 在共享对象池保护下生成描边轮廓
+// strokeCanvasPath 生成描边轮廓并在开启调试模式时加锁保护全局调试状态
 // 入参: path 路径, width 线宽, cap 端点, join 连接, tolerance 容差
 // 返回: *canvas.Path 描边轮廓
 func strokeCanvasPath(path *canvas.Path, width float64, cap canvas.Capper, join canvas.Joiner, tolerance float64) *canvas.Path {
-	canvasGeometryMu.Lock()
-	defer canvasGeometryMu.Unlock()
+	if canvas.DebugPathIntersection {
+		canvasGeometryMu.Lock()
+		defer canvasGeometryMu.Unlock()
+	}
 	return path.Stroke(width, cap, join, tolerance)
 }
 
@@ -349,22 +355,22 @@ func canvasStrokePath(geometry GeometryBackend, path *canvas.Path, options Strok
 	return geometryToCanvasPath(&outline)
 }
 
-// canvasStrokeFillPath 为直接非零填充展开复杂描边，不将重叠轮廓交给区域运算
+// canvasStrokeFillPath 为直接非零填充展开描边轮廓，优先走无锁纯Go路径描边
 // 入参: geometry 几何后端, path Canvas路径, options 描边样式
 // 返回: *canvas.Path 描边轮廓, error 几何错误
 func canvasStrokeFillPath(geometry GeometryBackend, path *canvas.Path, options StrokeOptions) (*canvas.Path, error) {
-	if canvasNativeStroke(geometry) && !slices.Contains(options.Dashes, 0) {
+	if canvasNativeStroke(geometry) {
 		if options.Tolerance == 0 {
 			options.Tolerance = canvas.Tolerance
 		}
 		if err := basegeom.ValidateStroke(options); err != nil {
 			return nil, err
 		}
-		if len(path.Dash(options.DashOffset, options.Dashes...).Data()) > 256 {
-			outline, err := geometryFromCanvasPath(path).Stroke(options)
-			if err != nil {
-				return canvasStrokePath(geometry, path, options)
-			}
+		source := *geometryFromCanvasPath(path)
+		if options.Cap == "Round" {
+			source, _ = canvasPointPath(source)
+		}
+		if outline, err := source.Stroke(options); err == nil {
 			return geometryToCanvasPath(&outline)
 		}
 	}

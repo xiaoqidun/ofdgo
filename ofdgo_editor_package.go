@@ -24,7 +24,6 @@ import (
 	"hash/crc32"
 	"io"
 	"maps"
-	"path"
 	"reflect"
 	"slices"
 	"strings"
@@ -46,6 +45,19 @@ func (p *editorStagedPage) open() io.ReadCloser {
 // editorPageStager 复用单次保存的页面压缩器，不跨文档共享状态
 type editorPageStager struct {
 	compressor *flate.Writer
+	pooled     bool
+}
+
+// release 释放输出引用并按需归还对象池中的压缩器
+func (s *editorPageStager) release() {
+	if s.compressor == nil {
+		return
+	}
+	if s.pooled {
+		releaseOutputDeflater(s.compressor)
+	}
+	s.compressor = nil
+	s.pooled = false
 }
 
 // encode 边编码边压缩自产页面，同步收集引用及用字
@@ -54,14 +66,15 @@ type editorPageStager struct {
 func (s *editorPageStager) encode(editor *Editor, page PageContent, references *editorReferenceScan) (*editorStagedPage, error) {
 	var data bytes.Buffer
 	if s.compressor == nil {
-		level := flate.DefaultCompression
 		if editor.output != nil && editor.output.options.Mode != CompressionUnchanged {
-			level = flate.BestCompression
-		}
-		var err error
-		s.compressor, err = flate.NewWriter(&data, level)
-		if err != nil {
-			return nil, err
+			s.compressor = acquireOutputDeflater(&data)
+			s.pooled = true
+		} else {
+			var err error
+			s.compressor, err = flate.NewWriter(&data, flate.DefaultCompression)
+			if err != nil {
+				return nil, err
+			}
 		}
 	} else {
 		s.compressor.Reset(&data)
@@ -114,6 +127,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 	progress = progress.withContext(ctx)
 	parts := make(map[string][]byte)
 	var stager editorPageStager
+	defer stager.release()
 	source := e.source
 	reader := source.reader
 	pageRefs := make([]Page, len(e.pages))
@@ -160,7 +174,7 @@ func (e *Editor) sourceParts(ctx context.Context, progress editorProgress, gener
 					known.objects = scan.graphicIDs
 				}
 				generated[name] = known
-				if (reader.DocumentCount() > 1 || reader.OFD.DocBody[reader.documentIndex].versioned) && !known.stagedLeaf(nil) || bound && known.objects == nil {
+				if (reader.DocumentCount() > 1 || reader.currentVersioned()) && !known.stagedLeaf(nil) || bound && known.objects == nil {
 					input := imageInput{ReadCloser: data.open(), ctx: ctx}
 					parts[name], err = io.ReadAll(input)
 					input.Close()
@@ -809,6 +823,101 @@ func (e *Editor) sourcePagePreserved(page PageContent) bool {
 	return false
 }
 
+// outputProtection 惰性获取细粒度签章保护边界，仅在包内声明签章时构建并复用本次输出缓存
+// 入参: ctx 取消上下文, reader 原包阅读器
+// 返回: map[int]bool 受签名文档索引, map[string]bool 受保护文件路径, bool 是否整包受保护, error 取消错误
+func (e *Editor) outputProtection(ctx context.Context, reader *Reader) (map[int]bool, map[string]bool, bool, error) {
+	if reader == nil {
+		return nil, nil, false, ctx.Err()
+	}
+	if e.output != nil && (e.output.protected || len(e.output.protectedDocs) != 0) {
+		return e.output.protectedDocs, e.output.protectedFiles, e.output.protected, ctx.Err()
+	}
+	hasSig, err := reader.hasOutputSignatures(ctx)
+	if err != nil || !hasSig {
+		return nil, nil, false, err
+	}
+	protectedDocs, protectedFiles, protected, err := reader.outputSignatureProtection(ctx)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if e.output != nil {
+		e.output.protectedDocs = protectedDocs
+		e.output.protectedFiles = protectedFiles
+		e.output.protected = protected
+	}
+	return protectedDocs, protectedFiles, protected, ctx.Err()
+}
+
+// isolateCompressedChanges 将非版本多文档压缩对共享资源产生的改动与删除做写时复制隔离
+// 入参: ctx 取消上下文, reader 原包阅读器, beforeParts 压缩前条目, beforeRemoved 压缩前删除集, parts 当前输出条目, removed 当前删除集, generated 自产页面引用
+// 返回: error 读取、结构或取消错误
+func (e *Editor) isolateCompressedChanges(ctx context.Context, reader *Reader, beforeParts map[string][]byte, beforeRemoved map[string]bool, parts map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
+	deltaParts := make(map[string][]byte)
+	changedKeys := make(map[string]bool)
+	for name, data := range parts {
+		prev, existed := beforeParts[name]
+		if !existed || !sameByteSlice(prev, data) {
+			deltaParts[name] = data
+			changedKeys[name] = true
+		}
+	}
+	deltaRemoved := make(map[string]bool)
+	for name := range removed {
+		if !beforeRemoved[name] {
+			deltaRemoved[name] = true
+		}
+	}
+	if len(changedKeys) == 0 && len(deltaRemoved) == 0 {
+		return ctx.Err()
+	}
+	stagedPlaceholders := make(map[string]bool)
+	for name, data := range beforeParts {
+		if data == nil && generated[name].staged != nil && !changedKeys[name] {
+			deltaParts[name] = nil
+			stagedPlaceholders[name] = true
+		}
+	}
+	baseView := *reader
+	baseView.files = maps.Clone(reader.files)
+	if baseView.files == nil {
+		baseView.files = make(map[string][]byte, len(beforeParts))
+	}
+	for name, data := range beforeParts {
+		if data != nil {
+			baseView.files[name] = data
+		}
+	}
+	baseView.doc, baseView.documentRoot, baseView.versionInfo = nil, "", nil
+	if err := baseView.initRootContext(ctx); err != nil {
+		return err
+	}
+	originalDeltaRemoved := maps.Clone(deltaRemoved)
+	isolated, err := baseView.versionOutputChanges(ctx, deltaParts, deltaRemoved, generated)
+	if err != nil {
+		return err
+	}
+	for name := range changedKeys {
+		if prev, existed := beforeParts[name]; existed {
+			parts[name] = prev
+		} else {
+			delete(parts, name)
+		}
+	}
+	for name, data := range isolated {
+		if stagedPlaceholders[name] && data == nil {
+			continue
+		}
+		parts[name] = data
+	}
+	for name := range originalDeltaRemoved {
+		if !deltaRemoved[name] {
+			delete(removed, name)
+		}
+	}
+	return ctx.Err()
+}
+
 // writeSource 将未修改ZIP条目直接复制到新包，逐项写入改动，不持有原资源解压副本
 // 入参: writer 输出流, fonts 新增字体子集, progress 保存进度回调
 // 返回: int64 写入字节数, error 错误信息
@@ -831,8 +940,8 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		}
 		maps.Copy(retired, retiredParts)
 	}
-	versioned := reader.OFD.DocBody[reader.documentIndex].versioned
-	if !versioned && reader.DocumentCount() > 1 {
+	currentVersioned := reader.currentVersioned()
+	if !currentVersioned && reader.DocumentCount() > 1 {
 		parts, err = reader.versionOutputChanges(ctx, parts, retired, generated)
 		if err != nil {
 			return 0, err
@@ -846,11 +955,11 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		removed = make(map[string]bool)
 	}
 	if len(retired) != 0 && (e.output == nil || !e.output.protected) {
-		protected, sigErr := reader.hasOutputSignatures(ctx)
+		protectedDocs, protectedFiles, protected, sigErr := e.outputProtection(ctx, reader)
 		if sigErr != nil {
 			return 0, sigErr
 		}
-		if !protected {
+		if !protected && !protectedDocs[reader.documentIndex] {
 			shared, shErr := reader.versionSharedFiles(ctx)
 			docRoot, rootErr := reader.DocumentRootContext(ctx)
 			var currentUsed map[string]bool
@@ -860,19 +969,30 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 			}
 			if shErr == nil && rootErr == nil && depErr == nil {
 				for itemPath := range retired {
-					if !currentUsed[itemPath] && parts[itemPath] == nil && (versioned || !shared[itemPath]) {
+					if !protectedFiles[itemPath] && !currentUsed[itemPath] && parts[itemPath] == nil && (currentVersioned || !shared[itemPath]) {
 						removed[itemPath] = true
 					}
 				}
 			}
 		}
 	}
+	isolateCompressed := !currentVersioned && reader.DocumentCount() > 1 && e.output != nil && e.output.options.Mode != CompressionUnchanged && !e.output.protected
+	var beforeParts map[string][]byte
+	var beforeRemoved map[string]bool
+	if isolateCompressed {
+		beforeParts = maps.Clone(parts)
+		beforeRemoved = maps.Clone(removed)
+	}
 	if err := e.compressResourceReferences(parts, reader, removed, generated); err != nil {
 		return 0, err
 	}
-	if versioned {
+	if currentVersioned {
 		parts, err = reader.versionOutputChanges(ctx, parts, removed, generated)
 		if err != nil {
+			return 0, err
+		}
+	} else if isolateCompressed {
+		if err := e.isolateCompressedChanges(ctx, reader, beforeParts, beforeRemoved, parts, removed, generated); err != nil {
 			return 0, err
 		}
 	}
@@ -884,7 +1004,11 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		if file, ok := reader.packageFile(name); ok {
 			name = cleanPackagePath(file.Name)
 		}
-		if e.output == nil || !e.output.protectedFiles[name] {
+		_, protectedFiles, protected, sigErr := e.outputProtection(ctx, reader)
+		if sigErr != nil {
+			return 0, sigErr
+		}
+		if !protected && !protectedFiles[name] {
 			data, ok := parts[name]
 			if !ok {
 				data, err = reader.readFile(name)
@@ -917,13 +1041,22 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 	if e.output != nil && e.output.options.Mode != CompressionUnchanged {
 		configureArchive(archive, e.output.options)
 	}
+	pipeline := newZipParallelWriter(e, archive, ctx)
+	defer pipeline.close()
 	if reader.Zip != nil {
 		_ = archive.SetComment(reader.Zip.Comment)
-		buffer := make([]byte, 32*1024)
+		var buffer []byte
+		if pipeline == nil {
+			buffer = make([]byte, 32*1024)
+		}
 		for _, file := range reader.Zip.File {
 			if file.FileInfo().IsDir() {
 				header := file.FileHeader
-				if _, err := archive.CreateHeader(&header); err != nil {
+				if pipeline != nil {
+					if err := pipeline.submitDir(header); err != nil {
+						return output.count, err
+					}
+				} else if _, err := archive.CreateHeader(&header); err != nil {
 					return output.count, err
 				}
 				continue
@@ -935,13 +1068,25 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 			if data, ok := remaining[name]; ok {
 				header := file.FileHeader
 				if staged := generated[name].staged; data == nil && staged != nil {
-					if err := e.writeStagedPage(archive, header, staged); err != nil {
+					if pipeline != nil {
+						if err := pipeline.submitStaged(header, staged); err != nil {
+							return output.count, err
+						}
+					} else if err := e.writeStagedPage(archive, header, staged); err != nil {
+						return output.count, err
+					}
+				} else if pipeline != nil {
+					if err := pipeline.submitEntry(header, data); err != nil {
 						return output.count, err
 					}
 				} else if err := e.writeOutputEntry(archive, header, data); err != nil {
 					return output.count, err
 				}
 				delete(remaining, name)
+			} else if pipeline != nil {
+				if err := pipeline.submitFile(file); err != nil {
+					return output.count, err
+				}
 			} else if e.output != nil && e.output.options.Mode != CompressionUnchanged {
 				if err := e.writeOutputFile(archive, file, buffer); err != nil {
 					return output.count, err
@@ -990,17 +1135,25 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 						if closeErr != nil {
 							return output.count, closeErr
 						}
-						if err := e.writeOutputEntry(archive, zip.FileHeader{Name: name, Method: zip.Deflate}, data); err != nil {
+						header := zip.FileHeader{Name: name, Method: zip.Deflate}
+						if pipeline != nil {
+							if err := pipeline.submitEntry(header, data); err != nil {
+								return output.count, err
+							}
+						} else if err := e.writeOutputEntry(archive, header, data); err != nil {
 							return output.count, err
 						}
 						continue
 					}
 				}
+				if pipeline != nil {
+					if err := pipeline.flush(); err != nil {
+						return output.count, err
+					}
+				}
 				method := uint16(zip.Store)
 				if compress {
-					switch strings.ToLower(path.Ext(name)) {
-					case ".jpg", ".jpeg", ".png", ".jp2", ".jb2", ".zip", ".pdf", ".ofd":
-					default:
+					if !isPrecompressedOutputExt(name) {
 						method = zip.Deflate
 					}
 				} else if strings.HasSuffix(strings.ToLower(name), ".xml") {
@@ -1034,12 +1187,26 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		}
 		header := zip.FileHeader{Name: name, Method: method}
 		if staged := generated[name].staged; remaining[name] == nil && staged != nil {
-			if err := e.writeStagedPage(archive, header, staged); err != nil {
+			if pipeline != nil {
+				if err := pipeline.submitStaged(header, staged); err != nil {
+					return output.count, err
+				}
+			} else if err := e.writeStagedPage(archive, header, staged); err != nil {
+				return output.count, err
+			}
+		} else if pipeline != nil {
+			if err := pipeline.submitEntry(header, remaining[name]); err != nil {
 				return output.count, err
 			}
 		} else if err := e.writeOutputEntry(archive, header, remaining[name]); err != nil {
 			return output.count, err
 		}
+	}
+	if pipeline != nil {
+		if err := pipeline.flush(); err != nil {
+			return output.count, err
+		}
+		pipeline.close()
 	}
 	err = archive.Close()
 	return output.count, err

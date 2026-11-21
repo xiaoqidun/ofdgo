@@ -53,11 +53,18 @@ type svgResourceRenderer struct {
 	objectStack   []svgObjectGroup
 	embeddedFonts bool
 	pathData      []byte
+	imageClip     *canvas.Path
+	clipDefs      []svgClipDef
+	collectClips  bool
+	hasSVGDefs    bool
 }
 
 // RenderPath 直接序列化纯色填充轮廓，其余画笔保留后端处理
 // 入参: path 几何路径, style 绘制样式, m 页面变换
 func (s *svgResourceRenderer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix) {
+	if style.Fill.IsGradient() || style.Stroke.IsGradient() || style.Fill.IsPattern() || style.Stroke.IsPattern() {
+		s.hasSVGDefs = true
+	}
 	if !style.HasFill() || !style.Fill.IsColor() || style.HasStroke() {
 		s.SVG.RenderPath(path, style, m)
 		return
@@ -113,7 +120,7 @@ func (s *svgResourceRenderer) RenderPath(path *canvas.Path, style canvas.Style, 
 	s.pathData = output
 }
 
-// RenderImage 按输出策略编码图片，分离资源时保持尺寸和变换
+// RenderImage 按输出策略编码图片，分离资源时保持尺寸和变换并支持原生SVG裁剪路径
 // 入参: img 图片对象, m 变换矩阵
 func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 	if s.err != nil {
@@ -125,6 +132,18 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 	}
 	if s.err = ctx.Err(); s.err != nil {
 		return
+	}
+	_, height := s.Size()
+	var clipID, clipData string
+	if s.imageClip != nil {
+		if s.imageClip.Empty() {
+			return
+		}
+		clipData = svgClipPathData(s.imageClip, height)
+		if clipData == "" {
+			return
+		}
+		clipID = svgClipID(clipData)
 	}
 	var target image.Point
 	if s.renderer != nil && s.renderer.Compression.ImageDPI() > 0 {
@@ -142,17 +161,35 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 		if s.imageNames != nil {
 			name = resource.Name
 			s.imageNames[key] = name
+			if s.seen == nil {
+				s.seen = make(map[string]bool)
+			}
 			if !s.seen[name] {
 				s.seen[name] = true
 				s.images = append(s.images, resource)
 			}
 		}
 	}
-	_, height := s.Size()
 	size := img.Bounds().Size()
 	m = m.Translate(0, float64(size.Y))
 	matrix := Matrix{a: m[0][0], b: -m[1][0], c: -m[0][1], d: m[1][1], e: m[0][2], f: height - m[1][2]}
 	writer := imageOutput{ctx: ctx, writer: s.writer}
+	if clipID != "" {
+		if s.seen == nil {
+			s.seen = make(map[string]bool)
+		}
+		if !s.seen[clipID] {
+			s.seen[clipID] = true
+			if s.collectClips {
+				s.clipDefs = append(s.clipDefs, svgClipDef{id: clipID, path: clipData})
+			} else if _, s.err = fmt.Fprintf(writer, `<defs><clipPath id="%s"><path d="%s"/></clipPath></defs>`, clipID, clipData); s.err != nil {
+				return
+			}
+		}
+		if _, s.err = fmt.Fprintf(writer, `<g clip-path="url(#%s)">`, clipID); s.err != nil {
+			return
+		}
+	}
 	if _, s.err = fmt.Fprintf(writer, `<image transform="matrix(%s)" width="%d" height="%d" xlink:href="`, matrix.String(), size.X, size.Y); s.err != nil {
 		return
 	}
@@ -174,7 +211,11 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 			return
 		}
 	}
-	_, s.err = io.WriteString(writer, `"/>`)
+	if clipID != "" {
+		_, s.err = io.WriteString(writer, `"/></g>`)
+	} else {
+		_, s.err = io.WriteString(writer, `"/>`)
+	}
 	if s.err == nil {
 		s.err = ctx.Err()
 	}
@@ -236,7 +277,7 @@ func (s *svgResourceRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
 	s.SetClass()
 }
 
-// imageResource 复用相同像素的编码结果，不持有源图像或改变输出策略
+// imageResource 复用相同编码或像素的输出结果，原始编码图零解码直出并避免无谓克隆
 // 入参: ctx 取消上下文, img 原图, target 压缩像素需求
 // 返回: SVGImage 图片资源, error 编码或取消错误
 func (s *svgResourceRenderer) imageResource(ctx context.Context, img image.Image, target image.Point) (SVGImage, error) {
@@ -244,19 +285,41 @@ func (s *svgResourceRenderer) imageResource(ctx context.Context, img image.Image
 		return SVGImage{}, err
 	}
 	if s.renderer != nil {
+		if encoded, ok := img.(*EncodedImage); ok && s.renderer.Compression.Mode == CompressionUnchanged {
+			meta, err := s.renderer.svgEncodedImageMeta().load(ctx, encoded, func() (svgEncodedMeta, int, error) {
+				raw := encoded.Bytes()
+				sum := sha256.Sum256(raw)
+				mime := encoded.MIME()
+				if bytes.HasPrefix(raw, []byte{255, 216}) {
+					mime = "image/jpeg"
+				}
+				return svgEncodedMeta{name: fmt.Sprintf("ofdgo-image-%x", sum), mime: mime, digest: sum}, 256, nil
+			})
+			if err != nil {
+				return SVGImage{}, err
+			}
+			result := SVGImage{Name: meta.name, MIME: meta.mime}
+			if s.imageNames == nil || !s.renderer.knownSVGResources[result.Name] {
+				result.Data = bytes.Clone(encoded.Bytes())
+			}
+			return result, nil
+		}
 		cache := s.renderer.svgImageResources()
-		if digest, ok := svgPixelDigest(ctx, img, cache.limit); ok {
+		if digest, ok := svgPixelDigest(ctx, img, max(cache.limit*4, 64<<20)); ok {
 			key := svgImageResourceKey{digest: digest, options: s.renderer.Compression, target: target}
 			result, err := cache.load(ctx, key, func() (SVGImage, int, error) {
 				result, err := s.encodeImageResource(ctx, img, target)
 				return result, cap(result.Data) + 256, err
 			})
+			if err != nil {
+				return SVGImage{}, err
+			}
 			if s.imageNames != nil && s.renderer.knownSVGResources[result.Name] {
 				result.Data = nil
 			} else {
 				result.Data = bytes.Clone(result.Data)
 			}
-			return result, err
+			return result, nil
 		}
 	}
 	result, err := s.encodeImageResource(ctx, img, target)
@@ -382,6 +445,59 @@ func (s *svgResourceRenderer) skipObjects(count int) {
 	}
 }
 
+// appendTemplateFragment 将缓存的模板页SVG片段及其字体、图片与裁剪定义合并到当前渲染器
+// 入参: frag 模板页SVG片段
+// 返回: error 写入错误
+func (s *svgResourceRenderer) appendTemplateFragment(frag *svgTemplateFragment) error {
+	if s.err != nil {
+		return s.err
+	}
+	if s.seen == nil {
+		s.seen = make(map[string]bool)
+	}
+	for _, def := range frag.clipDefs {
+		if s.seen[def.id] {
+			continue
+		}
+		s.seen[def.id] = true
+		if s.collectClips {
+			s.clipDefs = append(s.clipDefs, def)
+		} else if _, err := fmt.Fprintf(s.writer, `<defs><clipPath id="%s"><path d="%s"/></clipPath></defs>`, def.id, def.path); err != nil {
+			s.err = err
+			return err
+		}
+	}
+	for _, font := range frag.fonts {
+		if s.seen[font.Name] {
+			continue
+		}
+		s.seen[font.Name] = true
+		s.fonts = append(s.fonts, font)
+		fmt.Fprintf(&s.styles, ".%s{font-family:%s!important}", font.Name, font.Name)
+	}
+	if s.imageNames != nil {
+		for _, img := range frag.images {
+			if s.seen[img.Name] {
+				continue
+			}
+			s.seen[img.Name] = true
+			if s.renderer != nil && s.renderer.knownSVGResources[img.Name] {
+				img.Data = nil
+			} else {
+				img.Data = bytes.Clone(img.Data)
+			}
+			s.images = append(s.images, img)
+		}
+	}
+	if len(frag.markup) != 0 {
+		if _, err := s.writer.Write(frag.markup); err != nil {
+			s.err = err
+			return err
+		}
+	}
+	return nil
+}
+
 // svgImageKey 按原图及输出精度复用图片编码，避免不同显示尺寸共用低清结果
 type svgImageKey struct {
 	image image.Image
@@ -391,8 +507,45 @@ type svgImageKey struct {
 // svgResourceCacheKey 区分共享的图片编码缓存
 type svgResourceCacheKey struct{}
 
+// svgEncodedMetaCacheKey 区分共享的编码图元数据摘要缓存
+type svgEncodedMetaCacheKey struct{}
+
 // svgFontCacheKey 区分共享的SVG序列化字体缓存
 type svgFontCacheKey struct{}
+
+// svgEncodedMeta 保存编码图的名称、媒体类型与原始字节摘要
+type svgEncodedMeta struct {
+	name   string
+	mime   string
+	digest [32]byte
+}
+
+// svgClipDef 保存原生SVG裁剪路径标识与路径数据
+type svgClipDef struct {
+	id   string
+	path string
+}
+
+// svgTemplateKey 按模板页、视口、压缩与资源模式区分共享SVG片段
+type svgTemplateKey struct {
+	template       *PageContent
+	width          float64
+	height         float64
+	offsetX        float64
+	offsetY        float64
+	printing       bool
+	printContents  string
+	externalImages bool
+	compression    CompressionOptions
+}
+
+// svgTemplateFragment 保存可复用的模板页SVG片段及关联外部资源与裁剪定义
+type svgTemplateFragment struct {
+	markup   []byte
+	fonts    []SVGFont
+	images   []SVGImage
+	clipDefs []svgClipDef
+}
 
 // svgFontResourceKey 按字体内容摘要与样式区分共享的SVG字体缓存
 type svgFontResourceKey struct {
@@ -417,31 +570,70 @@ type svgObjectGroup struct {
 // svgImageResources 获取派生渲染器共享的图片编码缓存
 // 返回: *renderCache 图片编码缓存
 func (r *Renderer) svgImageResources() *renderCache[svgImageResourceKey, SVGImage] {
-	key := svgResourceCacheKey{}
-	if state, ok := r.sharedBackendStates[key]; ok {
-		return state.(*renderCache[svgImageResourceKey, SVGImage])
-	}
-	cache := resourceCache[svgImageResourceKey, SVGImage](r.Reader.resources, 4<<20)
-	r.sharedBackendStates[key] = cache
-	return cache
+	return sharedCanvasCache[svgImageResourceKey, SVGImage](r, svgResourceCacheKey{}, 64<<20)
+}
+
+// svgEncodedImageMeta 获取派生渲染器共享的原始编码图摘要缓存
+// 返回: *renderCache 编码图元数据缓存
+func (r *Renderer) svgEncodedImageMeta() *renderCache[*EncodedImage, svgEncodedMeta] {
+	return sharedCanvasCache[*EncodedImage, svgEncodedMeta](r, svgEncodedMetaCacheKey{}, 4<<20)
 }
 
 // svgFontResources 获取派生渲染器共享的SVG字体数据缓存
 // 返回: *renderCache 字体数据缓存
 func (r *Renderer) svgFontResources() *renderCache[svgFontResourceKey, SVGFont] {
-	key := svgFontCacheKey{}
-	if state, ok := r.sharedBackendStates[key]; ok {
-		return state.(*renderCache[svgFontResourceKey, SVGFont])
-	}
-	cache := resourceCache[svgFontResourceKey, SVGFont](r.Reader.resources, 32<<20)
-	r.sharedBackendStates[key] = cache
-	return cache
+	return sharedCanvasCache[svgFontResourceKey, SVGFont](r, svgFontCacheKey{}, 32<<20)
 }
 
-// svgPixelDigest 对标准像素缓冲计算完整摘要，不展开延迟图像
+// svgTemplateFragments 获取派生渲染器共享的模板页SVG片段缓存
+// 返回: *renderCache 模板页SVG片段缓存
+func (r *Renderer) svgTemplateFragments() *renderCache[svgTemplateKey, *svgTemplateFragment] {
+	return sharedCanvasCache[svgTemplateKey, *svgTemplateFragment](r, svgTemplateCacheKey{}, 32<<20)
+}
+
+// svgClipPathData 将画布坐标裁剪路径转换为SVG用户坐标系路径数据
+// 入参: path 画布坐标裁剪路径, height 页面高度
+// 返回: string SVG路径d属性
+func svgClipPathData(path *canvas.Path, height float64) string {
+	if path == nil || path.Empty() {
+		return ""
+	}
+	return path.Copy().Transform(canvas.Identity.ReflectYAbout(height / 2)).ToSVG()
+}
+
+// svgClipID 按裁剪路径数据生成稳定的内容寻址标识
+// 入参: pathData SVG路径d属性
+// 返回: string 裁剪路径标识
+func svgClipID(pathData string) string {
+	sum := sha256.Sum256([]byte(pathData))
+	return fmt.Sprintf("ofdgo-clip-%x", sum[:8])
+}
+
+// svgPixelDigest 对编码图像或标准像素缓冲计算完整摘要，不展开延迟图像
 // 入参: ctx 取消上下文, img 原始图像, limit 可参与缓存的像素字节上限
-// 返回: [32]byte 像素摘要, bool 是否为支持的像素布局
+// 返回: [32]byte 内容摘要, bool 是否为支持的图像布局
 func svgPixelDigest(ctx context.Context, img image.Image, limit int) ([32]byte, bool) {
+	if encoded, ok := img.(*EncodedImage); ok {
+		raw := encoded.Bytes()
+		if len(raw) == 0 {
+			return [32]byte{}, false
+		}
+		hash := sha256.New()
+		hash.Write([]byte("encoded:"))
+		hash.Write([]byte(encoded.MIME()))
+		hash.Write([]byte{0})
+		for len(raw) > 0 {
+			if ctx.Err() != nil {
+				return [32]byte{}, false
+			}
+			count := min(len(raw), 256<<10)
+			hash.Write(raw[:count])
+			raw = raw[count:]
+		}
+		var digest [32]byte
+		hash.Sum(digest[:0])
+		return digest, true
+	}
 	var pixels []byte
 	var stride, kind int
 	switch source := img.(type) {
@@ -509,15 +701,9 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 				s.objects[object] = editorObjectID(*object)
 			}
 		}
-		if err := r.renderCanvasPageToContext(canvas.NewContext(s), page, !r.TransparentBackground); err != nil {
-			return SVGResources{}, err
-		}
-	} else {
-		c, err := r.renderCanvasPage(page)
-		if err != nil {
-			return SVGResources{}, err
-		}
-		c.RenderTo(s)
+	}
+	if err := r.renderCanvasPageToContext(canvas.NewContext(s), page, !r.TransparentBackground); err != nil {
+		return SVGResources{}, err
 	}
 	if s.err != nil {
 		return SVGResources{}, s.err

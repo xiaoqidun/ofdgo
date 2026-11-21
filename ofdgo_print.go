@@ -23,7 +23,7 @@ import (
 	"sync"
 )
 
-// ErrPrintDenied 表示文档不允许打印或请求份数超出声明上限
+// ErrPrintDenied 表示打印被拒绝的错误标识
 var ErrPrintDenied = errors.New("document printing is not permitted")
 
 // PrintOptions 设置内容排版，长度以毫米为单位，比例1表示100%
@@ -176,7 +176,7 @@ func (p *PrintDocument) Layout() PrintLayout {
 
 // Reconfigure 在相同文档快照上创建新的打印任务，不改变原任务的布局
 // 入参: ctx 准备上下文, options 新排版选项
-// 返回: *PrintDocument 独立打印任务, error 权限、布局或读取错误
+// 返回: *PrintDocument 独立打印任务, error 布局或读取错误
 func (p *PrintDocument) Reconfigure(ctx context.Context, options PrintOptions) (*PrintDocument, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -207,7 +207,7 @@ func (p *PrintDocument) Close() error {
 
 // PreparePrint 固定当前阅读入口、版本及配置，底层输入由调用方保持存活
 // 入参: ctx 准备上下文, options 内容排版选项
-// 返回: *PrintDocument 独立打印任务, error 权限、布局或读取错误
+// 返回: *PrintDocument 独立打印任务, error 布局或读取错误
 func (r *Renderer) PreparePrint(ctx context.Context, options PrintOptions) (*PrintDocument, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("nil print context")
@@ -226,12 +226,6 @@ func (r *Renderer) PreparePrint(ctx context.Context, options PrintOptions) (*Pri
 	doc, err := view.Reader.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
-	}
-	if !doc.Permissions.Print || doc.Permissions.Copies == 0 {
-		return nil, ErrPrintDenied
-	}
-	if doc.Permissions.Copies > 0 && o.Copies > doc.Permissions.Copies {
-		return nil, ErrPrintDenied
 	}
 	needed, err := selectedPrintPageSet(len(doc.Pages.Page), o)
 	if err != nil {

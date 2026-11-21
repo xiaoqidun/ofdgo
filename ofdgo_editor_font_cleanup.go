@@ -30,16 +30,13 @@ import (
 // 返回: error 读取、结构或取消错误
 func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
 	reader := e.source.reader
-	versioned := false
-	for _, body := range reader.OFD.DocBody {
-		versioned = versioned || body.versioned
-	}
+	versioned := reader.packageVersioned()
 	if !versioned {
 		if reader.DocumentCount() <= 1 || e.backends.FontResources == nil || e.output != nil && e.output.options.Mode != CompressionUnchanged {
 			return nil
 		}
 	}
-	protected, err := reader.hasOutputSignatures(ctx)
+	protectedDocs, protectedFiles, protected, err := e.outputProtection(ctx, reader)
 	if err != nil || protected {
 		return err
 	}
@@ -47,7 +44,7 @@ func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byt
 	if resources == nil {
 		resources = reader.resources
 	}
-	view := &Reader{Zip: reader.Zip, encrypted: reader.encryptedSource(), sourceFile: reader.sourceFile, files: maps.Clone(reader.files), resources: resources}
+	view := &Reader{Zip: reader.Zip, encrypted: reader.encryptedSource(), sourceFile: reader.sourceFile, files: maps.Clone(reader.files), documentIndex: reader.documentIndex, selectedVersion: cloneEditorData(reader.selectedVersion), resources: resources}
 	if view.files == nil {
 		view.files = make(map[string][]byte)
 	}
@@ -64,11 +61,17 @@ func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byt
 		return err
 	}
 	candidates, seen := make(map[string]bool), make(map[string]bool)
+	docIndex := 0
 	for _, body := range root.children {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if !body.matchesOFD("DocBody") {
+			continue
+		}
+		currentDoc := docIndex
+		docIndex++
+		if protectedDocs[currentDoc] {
 			continue
 		}
 		versions, err := parseVersionEntries(ctx, body)
@@ -85,7 +88,7 @@ func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byt
 					return err
 				}
 				name := file.Location
-				if seen[name] || removed[name] {
+				if seen[name] || removed[name] || protectedFiles[cleanPackagePath(name)] {
 					continue
 				}
 				seen[name] = true
@@ -102,15 +105,21 @@ func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byt
 	if err := pruneUnreferencedFiles(ctx, view, slices.Collect(maps.Keys(candidates))...); err != nil {
 		return err
 	}
-	if err := e.subsetPackageFonts(ctx, view, parts, removed, generated); err != nil {
+	if err := e.subsetPackageFonts(ctx, view, parts, removed, generated, protectedFiles); err != nil {
 		return err
 	}
 	for name, data := range view.files {
+		if protectedFiles[cleanPackagePath(name)] {
+			continue
+		}
 		if original, ok := reader.files[name]; !ok || !bytes.Equal(original, data) {
 			parts[name] = data
 		}
 	}
 	for name := range candidates {
+		if protectedFiles[cleanPackagePath(name)] {
+			continue
+		}
 		if !view.fileNames[name] {
 			removed[name] = true
 			delete(parts, name)
@@ -208,10 +217,10 @@ func fontCleanupDirectory(input io.Reader, size uint64) (bool, error) {
 	return true, nil
 }
 
-// subsetPackageFonts 按文档作用域收集用字，复用引用缓存并跳过已裁剪收敛字体
-// 入参: ctx 取消上下文, view 独立输出快照, parts 前序输出改动, removed 待删除条目, generated 本次编码的页面引用
+// subsetPackageFonts 按文档作用域收集用字，复用引用缓存并跳过已裁剪收敛及受签章保护字体
+// 入参: ctx 取消上下文, view 独立输出快照, parts 前序输出改动, removed 待删除条目, generated 本次编码的页面引用, protectedFiles 受签章保护的文件路径
 // 返回: error 读取、裁剪或取消错误
-func (e *Editor) subsetPackageFonts(ctx context.Context, view *Reader, parts map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences) error {
+func (e *Editor) subsetPackageFonts(ctx context.Context, view *Reader, parts map[string][]byte, removed map[string]bool, generated map[string]editorGeneratedReferences, protectedFiles map[string]bool) error {
 	if e.backends.FontResources == nil {
 		return nil
 	}
@@ -270,26 +279,51 @@ func (e *Editor) subsetPackageFonts(ctx context.Context, view *Reader, parts map
 		}
 	}
 	var cache editorSourceFontCache
-	for index, name := range slices.Sorted(maps.Keys(usage)) {
+	orderedNames := slices.Sorted(maps.Keys(usage))
+	type packageFontEntry struct {
+		name  string
+		key   editorSourceFontKey
+		data  []byte
+		usage *editorFontUsage
+	}
+	entries := make([]packageFontEntry, 0, len(orderedNames))
+	tasks := make([]editorSourceFontTask, 0, len(orderedNames))
+	seenKeys := make(map[editorSourceFontKey]bool, len(orderedNames))
+	for index, name := range orderedNames {
 		if err := progress.report("fonts", index, len(usage)); err != nil {
 			return err
 		}
-		if usage[name].unsafe || len(usage[name].chars)+len(usage[name].glyphs) == 0 {
+		if usage[name].unsafe || protectedFiles[cleanPackagePath(name)] || len(usage[name].chars)+len(usage[name].glyphs) == 0 {
 			continue
 		}
 		data, err := read(name)
 		if err != nil {
 			return err
 		}
-		if converged[sha256.Sum256(data)] {
+		key, characters, glyphs := buildEditorSourceFontKey(data, usage[name])
+		if converged[key.source] {
 			continue
 		}
-		subset, err := cache.subset(ctx, e.backends.FontResources, data, usage[name])
+		entries = append(entries, packageFontEntry{name: name, key: key, data: data, usage: usage[name]})
+		if !seenKeys[key] {
+			seenKeys[key] = true
+			tasks = append(tasks, editorSourceFontTask{name: name, key: key, data: data, characters: characters, glyphs: glyphs})
+		}
+	}
+	taskErrs, err := cache.prepareBatch(ctx, e.backends.FontResources, tasks)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if taskErr := taskErrs[entry.key]; taskErr != nil {
+			return taskErr
+		}
+		subset, err := cache.subset(ctx, e.backends.FontResources, entry.data, entry.usage)
 		if err != nil {
 			return err
 		}
 		if subset != nil {
-			view.files[name] = subset
+			view.files[entry.name] = subset
 		}
 	}
 	if err := progress.report("fonts", len(usage), len(usage)); err != nil {

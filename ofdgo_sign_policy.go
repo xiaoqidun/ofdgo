@@ -16,10 +16,12 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"maps"
 	"path"
 	"sort"
 	"strings"
@@ -159,6 +161,18 @@ func (r *Reader) applySignatureCoverage(report *SignatureVerifyReport, listPath 
 					report.CoverageOK, report.CoverageError = false, err.Error()
 				}
 			}
+		} else if r.OFD != nil && o.DocIndex >= 0 && o.DocIndex < len(r.OFD.DocBody) && r.OFD.DocBody[o.DocIndex].versioned {
+			if versions, err := r.DocumentVersionsContext(context.Background()); err == nil {
+				for _, ver := range versions {
+					verPath := cleanPackagePath(ver.Location)
+					if validPackagePath(verPath) {
+						docRequired[verPath] = true
+						if err := r.signatureCoverageReferences(verPath, docRequired); err != nil && report.CoverageError == "" {
+							report.CoverageOK, report.CoverageError = false, err.Error()
+						}
+					}
+				}
+			}
 		}
 		cleanList := cleanPackagePath(listPath)
 		excluded := make(map[string]bool)
@@ -190,9 +204,29 @@ func (r *Reader) applySignatureCoverage(report *SignatureVerifyReport, listPath 
 		if listData, err := r.readFile(cleanList); err == nil {
 			var list Signatures
 			if xml.Unmarshal(listData, &list) == nil {
+				var versionScope *versionSignatureScope
+				if r.versionInfo != nil {
+					versionScope, _ = r.buildVersionSignatureScope(context.Background(), cleanList, list)
+				}
 				after := false
 				for _, entry := range list.List {
 					entryPath := cleanPackagePath(signatureRefPath(listPath, entry.BaseLoc))
+					if versionScope != nil && !r.versionSignatureMatches(context.Background(), versionScope, entry) {
+						if validPackagePath(entryPath) && !contentRequired[entryPath] {
+							excluded[entryPath] = true
+							if entryData, err := r.readFile(entryPath); err == nil {
+								if entryFile, err := parseSignatureFile(entryData); err == nil {
+									if valPath := cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedValue)); validPackagePath(valPath) && !contentRequired[valPath] {
+										excluded[valPath] = true
+									}
+									if sealPath := cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedInfo.Seal.BaseLoc)); validPackagePath(sealPath) && !contentRequired[sealPath] {
+										excluded[sealPath] = true
+									}
+								}
+							}
+						}
+						continue
+					}
 					if !after {
 						if entryPath == name && (report.ID == "" || entry.ID == report.ID) {
 							after = true
@@ -227,18 +261,42 @@ func (r *Reader) applySignatureCoverage(report *SignatureVerifyReport, listPath 
 				required[item] = true
 			}
 		}
-		include := func(item string) {
-			if (root == "." || strings.HasPrefix(item, root+"/")) && !excluded[item] && !strings.HasSuffix(item, "/") {
-				required[item] = true
+		if r.versionInfo == nil {
+			otherOwned := make(map[string]bool)
+			multiDoc := r.OFD != nil && len(r.OFD.DocBody) > 1
+			if multiDoc {
+				var otherIndexes []int
+				for idx := range r.OFD.DocBody {
+					if idx != o.DocIndex {
+						otherIndexes = append(otherIndexes, idx)
+					}
+				}
+				if deps, _, err := r.documentDependencies(context.Background(), otherIndexes...); err == nil {
+					maps.Copy(otherOwned, deps)
+				}
 			}
-		}
-		for item, fileInfo := range r.fileIndex {
-			if !fileInfo.FileInfo().IsDir() {
+			include := func(item string) {
+				clean := cleanPackagePath(item)
+				if clean == "" || clean == "." || strings.HasSuffix(item, "/") || excluded[clean] || otherOwned[clean] {
+					return
+				}
+				if !multiDoc || root != "." && strings.HasPrefix(clean, root+"/") {
+					required[clean] = true
+				}
+			}
+			for item, fileInfo := range r.fileIndex {
+				if !fileInfo.FileInfo().IsDir() {
+					include(item)
+				}
+			}
+			for item := range r.files {
 				include(item)
 			}
-		}
-		for item := range r.files {
-			include(item)
+			if src := r.encryptedSource(); src != nil {
+				for _, item := range src.names() {
+					include(item)
+				}
+			}
 		}
 	}
 	for name := range required {

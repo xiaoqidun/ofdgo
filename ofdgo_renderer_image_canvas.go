@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"image/color"
 	"math"
 
 	"github.com/tdewolff/canvas"
@@ -59,28 +60,25 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		borderObj.Alpha = nil
 	}
 	var img image.Image
-	if pdfOutput, isPDF := ctx.Renderer.(*pdfRenderer); isPDF {
+	pdfOutput, isPDF := ctx.Renderer.(*pdfRenderer)
+	if isPDF {
 		if raw := pdfOutput.rawImageResource(r, obj); raw != nil {
 			img = raw
 		}
 	}
+	var effectKey imageEffectKey
+	hasEffectKey := false
 	if img == nil {
 		var err error
-		img, err = r.imageObjectResource(obj)
+		img, effectKey, hasEffectKey, err = r.imageObjectWithEffects(obj, imgAlpha)
 		if err != nil {
 			r.renderError = err
 			return
 		}
-		mask, err := r.imageObjectMask(obj, img)
-		if err != nil {
-			r.renderError = err
-			return
-		}
-		img, err = imageWithEffects(r.pageContext, img, mask, imgAlpha)
-		if err != nil {
-			r.renderError = err
-			return
-		}
+	}
+	if isPDF && hasEffectKey {
+		pdfOutput.imageKey = effectKey
+		defer func() { pdfOutput.imageKey = nil }()
 	}
 	imgBounds := img.Bounds()
 	imgW, imgH := float64(imgBounds.Dx()), float64(imgBounds.Dy())
@@ -119,20 +117,21 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	}
 }
 
-// drawClippedImage 共用图像及签章的几何裁剪，编译和PDF输出保留原图及独立裁剪
+// drawClippedImage 共用图像及签章的几何裁剪，编译、SVG和PDF输出保留原图及独立裁剪
 // 入参: ctx 画布上下文, img 原图, clipPath 页面裁剪，可为空, m 像素到画布的变换
 func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPath *canvas.Path, m canvas.Matrix) {
 	imgW, imgH := float64(img.Bounds().Dx()), float64(img.Bounds().Dy())
 	imageClip := clipPath
 	compiler, compiled := ctx.Renderer.(*canvasPageCompiler)
 	pdfOutput, pdf := ctx.Renderer.(*pdfRenderer)
-	if pdf && imageClip != nil && imageClip.Empty() {
+	svgOutput, isSVG := ctx.Renderer.(*svgResourceRenderer)
+	if (pdf || isSVG) && imageClip != nil && imageClip.Empty() {
 		return
 	}
-	if (compiled || pdf) && imageClip != nil && imageClipContains(img, imageClip, m) {
+	if (compiled || pdf || isSVG) && imageClip != nil && imageClipContains(img, imageClip, m) {
 		imageClip = nil
 	}
-	if !compiled && !pdf {
+	if !compiled && !pdf && !isSVG {
 		v := ctx.CoordSystemView().Mul(ctx.View())
 		dpi := 96 * max(1, math.Hypot(v[0][0], v[1][0]), math.Hypot(v[0][1], v[1][1]))
 		img = r.imageWithClip(img, clipPath, m, dpi)
@@ -141,7 +140,7 @@ func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPa
 		return
 	}
 	m = m.Scale(imgW/float64(img.Bounds().Dx()), imgH/float64(img.Bounds().Dy()))
-	if _, pdf := ctx.Renderer.(*pdfRenderer); !pdf {
+	if !pdf && !(isSVG && isOpaqueEncodedImage(img)) {
 		var pad int
 		var err error
 		img, pad, err = baseimage.WithTransparentEdge(r.pageContext, img)
@@ -161,6 +160,12 @@ func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPa
 		}
 		defer func() { pdfOutput.imageClip = nil }()
 	}
+	if isSVG {
+		if imageClip != nil {
+			svgOutput.imageClip = imageClip.Copy().Transform(ctx.CoordSystemView().Mul(ctx.View()))
+		}
+		defer func() { svgOutput.imageClip = nil }()
+	}
 	ctx.RenderImage(img, ctx.CoordSystemView().Mul(ctx.View()).Mul(m))
 	if compiled && imageClip != nil && compiler.err == nil {
 		view := (canvas.Matrix{{1, 0, 0}, {0, -1, compiler.page.Height}}).Mul(ctx.CoordSystemView()).Mul(ctx.View())
@@ -170,6 +175,22 @@ func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPa
 			return
 		}
 		compiler.page.Commands[len(compiler.page.Commands)-1].Clip = segments
+	}
+}
+
+// isOpaqueEncodedImage 判断惰性编码图像是否不含透明通道与额外色彩转换，避免SVG输出触发像素解码
+// 入参: img 图像对象
+// 返回: bool 是否为可直接输出的不透明编码图像
+func isOpaqueEncodedImage(img image.Image) bool {
+	encoded, ok := img.(*EncodedImage)
+	if !ok {
+		return false
+	}
+	switch encoded.ColorModel() {
+	case color.YCbCrModel, color.GrayModel, color.Gray16Model, color.RGBAModel, color.RGBA64Model:
+		return true
+	default:
+		return false
 	}
 }
 

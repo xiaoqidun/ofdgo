@@ -25,9 +25,7 @@ import (
 
 	"github.com/tdewolff/canvas"
 	canvastext "github.com/tdewolff/canvas/text"
-	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
-	"github.com/xiaoqidun/pdfgo"
 )
 
 // pdfFontSubset 保存独立CFF输出字体及实际用字，包含缺省字形
@@ -43,97 +41,64 @@ type pdfGlyphItem struct {
 	x     float64
 }
 
-// RenderText 记录后端文字区段，写出时校验数量并关联原文
+// RenderText 向单遍内容流写入文字并同步span计数以供原地包裹ActualText、伪粗体与矢量裁剪
 // 入参: text 画布文字, matrix 文字变换
 func (r *pdfRenderer) RenderText(text *canvas.Text, matrix canvas.Matrix) {
+	if r.imageError != nil || r.textClipEmpty {
+		return
+	}
 	if len(r.text) == 0 {
 		r.text = append(r.text, codecpdf.TextPage{})
 	}
-	page := &r.text[len(r.text)-1]
-	text.WalkSpans(func(_, _ float64, span canvas.TextSpan) {
-		if span.IsText() {
-			page.Count++
-		}
+	r.content.RenderText(text, matrix, func(c *canvas.Canvas, view canvas.Matrix) {
+		c.RenderViewTo(r, view)
 	})
-	r.PDF.RenderText(text, matrix)
+	r.text[len(r.text)-1].Count = r.content.SpanCount()
 }
 
-// preserveText 将一个OFD文字对象关联到完整PDF文字区段
-// 入参: first 起始文字对象序号, text 原文
+// preserveText 在当前文字对象结束时原地包裹ActualText标记，无需二次解析内容流
+// 入参: first 起始文字span序号, text 原文
 func (r *pdfRenderer) preserveText(first int, text string) {
-	page := &r.text[len(r.text)-1]
-	if page.Count > first {
-		page.Replacements = append(page.Replacements, pdfgo.TextReplacement{First: first, Count: page.Count - first, Text: text})
-		r.exactText = true
+	if r.textClipEmpty || r.content.SpanCount() <= first {
+		return
 	}
+	r.content.WrapActualText(first, text)
 }
 
-// preserveFauxBold 记录需要Tr=2填充并描边伪粗体的PDF文字对象区段
-// 入参: first 起始文字对象序号, lineWidth 描边线宽(点), fillColor 填充纯色
+// preserveFauxBold 在当前文字对象结束时原地包裹Tr=2伪粗体描边状态
+// 入参: first 起始文字span序号, lineWidth 描边线宽(点), fillColor 填充纯色
 func (r *pdfRenderer) preserveFauxBold(first int, lineWidth float64, fillColor color.RGBA) {
-	if len(r.text) == 0 || lineWidth <= 0 {
+	if r.textClipEmpty || lineWidth <= 0 || r.content.SpanCount() <= first {
 		return
 	}
-	last := len(r.text) - 1
-	count := r.text[last].Count - first
-	if count <= 0 {
-		return
-	}
-	for len(r.textFauxBold) <= last {
-		r.textFauxBold = append(r.textFauxBold, nil)
-	}
-	r.textFauxBold[last] = append(r.textFauxBold[last], codecpdf.TextFauxBold{First: first, Count: count, LineWidth: lineWidth, Color: fillColor})
+	r.content.WrapFauxBold(first, lineWidth, fillColor)
 }
 
-// outputFontBytes 缓存源字体序列化后的SFNT字节，避免CFF子集切分时重复拼接整套字库
-// 入参: src 源画布字体
-// 返回: []byte SFNT字体字节
-func (r *pdfRenderer) outputFontBytes(src *canvas.Font) []byte {
-	if r.fontData != nil {
-		if data, ok := r.fontData[src]; ok {
-			return data
-		}
-	}
-	data := basefont.SFNTData(src.Tables)
-	if r.fontData == nil {
-		r.fontData = make(map[*canvas.Font][]byte)
-	}
-	r.fontData[src] = data
-	return data
+// setPendingTextClip 记录即将绘制的文字对象原生PDF裁剪路径并隔离前驱BT块
+// 入参: clip 页面坐标系裁剪路径
+func (r *pdfRenderer) setPendingTextClip(clip *canvas.Path) {
+	r.content.IsolateNextText()
+	r.textClip = clip
+	r.textClipFirst = r.content.SpanCount()
+	r.textClipEmpty = false
 }
 
-// outputFont 获取或创建与源字体隔离的独立输出字体
-// 入参: src 源画布字体
-// 返回: *canvas.Font 独立输出字体, error 字体解析错误
-func (r *pdfRenderer) outputFont(src *canvas.Font) (*canvas.Font, error) {
-	if font := r.fonts[src]; font != nil {
-		return font, nil
+// finishTextObject 在文字对象渲染完毕后原地应用原生PDF矢量裁剪并清理隔离状态
+func (r *pdfRenderer) finishTextObject() {
+	if r.textClip != nil && !r.textClipEmpty && r.content.SpanCount() > r.textClipFirst {
+		r.content.WrapClip(r.textClipFirst, r.textClip)
 	}
-	loaded, err := loadCanvasFont(r.outputFontBytes(src), 0, src.Style())
-	if err != nil {
-		return nil, err
-	}
-	copy := *src
-	copy.SFNT = loaded.SFNT
-	font := &copy
-	if r.fonts == nil {
-		r.fonts = make(map[*canvas.Font]*canvas.Font)
-	}
-	r.fonts[src] = font
-	return font, nil
+	r.textClip = nil
+	r.textClipEmpty = false
+	r.content.ClearTextIsolation()
 }
 
-// glyphText 使用独立输出字体和既定字形建立PDF文字，不改变字体缓存及定位
+// glyphText 使用共享或隔离输出字体和既定字形建立PDF文字，不改变字体缓存及定位
 // 入参: face 字体, glyph 字形
 // 返回: *canvas.Text 画布文字, error 字体解析错误
 func (r *pdfRenderer) glyphText(face *canvas.FontFace, glyph textGlyph) (*canvas.Text, error) {
 	srcFont := face.Font
-	font, err := r.outputFont(srcFont)
-	if err != nil {
-		return nil, err
-	}
 	outputFace := *face
-	outputFace.Font = font
 	outputFace.FauxBold = 0
 	outputFace.FauxItalic = 0
 	face = &outputFace
@@ -150,8 +115,8 @@ func (r *pdfRenderer) glyphText(face *canvas.FontFace, glyph textGlyph) (*canvas
 			}
 		})
 	}
-	if font.IsCFF {
-		if err := r.cffTextFont(srcFont, font, text); err != nil {
+	if srcFont.IsCFF {
+		if err := r.cffTextFont(srcFont, text); err != nil {
 			return nil, err
 		}
 	}
@@ -166,12 +131,7 @@ func (r *pdfRenderer) glyphsText(face *canvas.FontFace, items []pdfGlyphItem, hS
 		return r.glyphText(face, items[0].glyph)
 	}
 	srcFont := face.Font
-	font, err := r.outputFont(srcFont)
-	if err != nil {
-		return nil, err
-	}
 	outputFace := *face
-	outputFace.Font = font
 	outputFace.FauxBold = 0
 	outputFace.FauxItalic = 0
 	face = &outputFace
@@ -198,18 +158,18 @@ func (r *pdfRenderer) glyphsText(face *canvas.FontFace, items []pdfGlyphItem, hS
 			spans[i].Glyphs = glyphs
 		}
 	})
-	if font.IsCFF {
-		if err := r.cffTextFont(srcFont, font, text); err != nil {
+	if srcFont.IsCFF {
+		if err := r.cffTextFont(srcFont, text); err != nil {
 			return nil, err
 		}
 	}
 	return text, nil
 }
 
-// cffTextFont 按实际用字隔离CFF子集，优先复用已有字形所在子集并复用缓存字体数据
-// 入参: srcFont 源画布字体, font 独立输出字体, text 已定位文字
+// cffTextFont 线程安全地按实际用字隔离CFF子集，优先复用已有字形所在分片并共享缓存字体字节
+// 入参: srcFont 源画布字体, text 已定位文字
 // 返回: error 字形数量或字体解析错误
-func (r *pdfRenderer) cffTextFont(srcFont, font *canvas.Font, text *canvas.Text) error {
+func (r *pdfRenderer) cffTextFont(srcFont *canvas.Font, text *canvas.Text) error {
 	const limit = 229
 	ids := []uint16{0}
 	text.WalkSpans(func(_, _ float64, span canvas.TextSpan) {
@@ -222,8 +182,10 @@ func (r *pdfRenderer) cffTextFont(srcFont, font *canvas.Font, text *canvas.Text)
 	if len(ids) > limit {
 		return fmt.Errorf("CFF text glyph count exceeds output subset capacity")
 	}
+	fontBytes := r.session.cachedFontBytes(srcFont)
+	r.session.fontMu.Lock()
 	var selected *pdfFontSubset
-	if glyphMap := r.cffGlyphMap[font]; glyphMap != nil && len(ids) > 1 {
+	if glyphMap := r.session.cffGlyphMap[srcFont]; glyphMap != nil && len(ids) > 1 {
 		if candidate := glyphMap[ids[1]]; candidate != nil {
 			count := len(candidate.glyphs)
 			for _, id := range ids {
@@ -238,7 +200,7 @@ func (r *pdfRenderer) cffTextFont(srcFont, font *canvas.Font, text *canvas.Text)
 	}
 	if selected == nil {
 		bestOverlap := -1
-		for _, subset := range r.cffFonts[font] {
+		for _, subset := range r.session.cffFonts[srcFont] {
 			count := len(subset.glyphs)
 			overlap := 0
 			for _, id := range ids {
@@ -258,70 +220,80 @@ func (r *pdfRenderer) cffTextFont(srcFont, font *canvas.Font, text *canvas.Text)
 		}
 	}
 	if selected == nil {
-		output := font
-		if len(r.cffFonts[font]) != 0 {
-			loaded, err := loadCanvasFont(r.outputFontBytes(srcFont), 0, font.Style())
-			if err != nil {
-				return err
-			}
-			copy := *font
-			copy.SFNT = loaded.SFNT
-			output = &copy
+		loaded, err := loadCanvasFont(fontBytes, 0, srcFont.Style())
+		if err != nil {
+			r.session.fontMu.Unlock()
+			return err
 		}
-		selected = &pdfFontSubset{font: output, glyphs: make(map[uint16]bool)}
-		if r.cffFonts == nil {
-			r.cffFonts = make(map[*canvas.Font][]*pdfFontSubset)
+		copyFont := *srcFont
+		copyFont.SFNT = loaded.SFNT
+		selected = &pdfFontSubset{font: &copyFont, glyphs: make(map[uint16]bool)}
+		if r.session.cffFonts == nil {
+			r.session.cffFonts = make(map[*canvas.Font][]*pdfFontSubset)
 		}
-		r.cffFonts[font] = append(r.cffFonts[font], selected)
+		r.session.cffFonts[srcFont] = append(r.session.cffFonts[srcFont], selected)
 	}
-	if r.cffGlyphMap == nil {
-		r.cffGlyphMap = make(map[*canvas.Font]map[uint16]*pdfFontSubset)
+	if r.session.cffGlyphMap == nil {
+		r.session.cffGlyphMap = make(map[*canvas.Font]map[uint16]*pdfFontSubset)
 	}
-	if r.cffGlyphMap[font] == nil {
-		r.cffGlyphMap[font] = make(map[uint16]*pdfFontSubset)
+	if r.session.cffGlyphMap[srcFont] == nil {
+		r.session.cffGlyphMap[srcFont] = make(map[uint16]*pdfFontSubset)
 	}
 	for _, id := range ids {
 		selected.glyphs[id] = true
 		if id != 0 {
-			r.cffGlyphMap[font][id] = selected
+			r.session.cffGlyphMap[srcFont][id] = selected
 		}
 	}
-	if selected.font != font {
-		text.WalkLines(func(_ float64, spans []canvas.TextSpan) {
-			for i := range spans {
-				face := *spans[i].Face
-				face.Font = selected.font
-				spans[i].Face = &face
-				for j := range spans[i].Glyphs {
-					spans[i].Glyphs[j].SFNT = selected.font.SFNT
-				}
+	selectedFont := selected.font
+	r.session.fontMu.Unlock()
+	text.WalkLines(func(_ float64, spans []canvas.TextSpan) {
+		for i := range spans {
+			face := *spans[i].Face
+			face.Font = selectedFont
+			spans[i].Face = &face
+			for j := range spans[i].Glyphs {
+				spans[i].Glyphs[j].SFNT = selectedFont.SFNT
 			}
-		})
-	}
+		}
+	})
 	return nil
 }
 
-// pdfTextSupported 核对原生文字的字形和未裁剪范围，支持合法GID索引并复用字形缓存
+// pdfTextSupported 核对原生文字的字形合法性，并通过原生PDF矢量裁剪保留带边界裁剪的真文字
 // 入参: object 文字对象, fontID 字体标识, face 实际字体, transforms 字形映射, clip 裁剪路径, height 页面高度, matrix 对象变换, glyphMatrix 字形变换
-// 返回: bool 是否能完整保留字形外观
+// 返回: bool 是否能以PDF原生文字完整保留外观
 func (r *Renderer) pdfTextSupported(object TextObject, fontID string, face *canvas.FontFace, transforms map[int]textGlyphTransform, clip *canvas.Path, height float64, matrix Matrix, glyphMatrix canvas.Matrix) bool {
 	if face.Font.IsCFF && face.Font.CFF == nil {
 		return false
 	}
+	var pdfOut *pdfRenderer
+	if r.pageContext != nil {
+		pdfOut, _ = r.pageContext.Value(pdfRendererCtxKey{}).(*pdfRenderer)
+	}
+	if clip != nil && clip.Empty() {
+		if pdfOut != nil {
+			pdfOut.textClipEmpty = true
+			return true
+		}
+		return false
+	}
 	var rect canvas.Rect
+	isRectClip := false
 	if clip != nil {
-		var ok bool
-		rect, ok = rectangularPath(clip)
-		if !ok {
+		rect, isRectClip = rectangularPath(clip)
+		if isRectClip {
+			const tolerance = 1e-9
+			rect = canvas.Rect{X0: rect.X0 - tolerance, Y0: rect.Y0 - tolerance, X1: rect.X1 + tolerance, Y1: rect.Y1 + tolerance}
+		} else if pdfOut == nil {
 			return false
 		}
-		const tolerance = 1e-9
-		rect = canvas.Rect{X0: rect.X0 - tolerance, Y0: rect.Y0 - tolerance, X1: rect.X1 + tolerance, Y1: rect.Y1 + tolerance}
 	}
 	scale := object.HScale
 	if scale == 0 {
 		scale = 1
 	}
+	needsNativeClip := clip != nil && !isRectClip
 	position := 0
 	for _, code := range object.TextCode {
 		runes := textCodeRunes(code.Value)
@@ -344,7 +316,7 @@ func (r *Renderer) pdfTextSupported(object TextObject, fontID string, face *canv
 				}
 			}
 			origin := positioner.Next()
-			if clip == nil {
+			if clip == nil || needsNativeClip {
 				continue
 			}
 			path, _ := r.cachedTextGlyphPath(face, glyph)
@@ -357,12 +329,143 @@ func (r *Renderer) pdfTextSupported(object TextObject, fontID string, face *canv
 			x, y := matrix.Transform(origin.X, origin.Y)
 			view := canvas.Identity.Translate(x, height-y).Mul(glyphMatrix).Scale(scale, 1)
 			if !rect.Contains(path.Copy().Transform(view).Bounds()) {
-				return false
+				if pdfOut == nil {
+					return false
+				}
+				needsNativeClip = true
 			}
 		}
 		position += len(runes)
 	}
+	if pdfOut != nil {
+		if needsNativeClip {
+			pdfOut.setPendingTextClip(clip)
+		} else if face.FauxBold > 0 {
+			pdfOut.content.IsolateNextText()
+		}
+	}
 	return true
+}
+
+// glyphToUnicodeRune 缓存字体字形编号在PDF ToUnicode表中的首字符映射
+// 入参: font 画布字体, gid 字形编号
+// 返回: rune 映射码点, bool 是否存在有效映射
+func (r *pdfRenderer) glyphToUnicodeRune(font *canvas.Font, gid uint16) (rune, bool) {
+	if font == nil || font.SFNT == nil {
+		return 0, false
+	}
+	table := r.glyphUnicode[font]
+	if table != nil {
+		if ch, ok := table[gid]; ok {
+			return ch, ch >= 0
+		}
+	} else {
+		if r.glyphUnicode == nil {
+			r.glyphUnicode = make(map[*canvas.Font]map[uint16]rune)
+		}
+		table = make(map[uint16]rune)
+		r.glyphUnicode[font] = table
+	}
+	if rs := font.SFNT.GlyphToUnicode(gid); len(rs) > 0 {
+		table[gid] = rs[0]
+		return rs[0], true
+	}
+	table[gid] = -1
+	return 0, false
+}
+
+// pdfTextNeedsActualText 判断原生PDF文字是否无法仅靠ToUnicode精确还原原文而需要注入ActualText
+// 入参: pdfOutput PDF渲染器, object 文字对象, fontID 字体标识, face 实际字体, transforms 字形映射
+// 返回: bool 是否需要注入ActualText
+func (r *Renderer) pdfTextNeedsActualText(pdfOutput *pdfRenderer, object TextObject, fontID string, face *canvas.FontFace, transforms map[int]textGlyphTransform) bool {
+	needs := r.checkPDFTextNeedsActualText(pdfOutput, object, fontID, face, transforms)
+	if needs && pdfOutput != nil && !pdfOutput.textClipEmpty {
+		pdfOutput.content.IsolateNextText()
+	}
+	return needs
+}
+
+// checkPDFTextNeedsActualText 逐字检查字体ToUnicode映射能否无损还原OFD原文
+// 入参: pdfOutput PDF渲染器, object 文字对象, fontID 字体标识, face 实际字体, transforms 字形映射
+// 返回: bool 是否需要注入ActualText
+func (r *Renderer) checkPDFTextNeedsActualText(pdfOutput *pdfRenderer, object TextObject, fontID string, face *canvas.FontFace, transforms map[int]textGlyphTransform) bool {
+	if object.ReadDirection != 0 || object.CharDirection != 0 {
+		return true
+	}
+	lines := newTextLineScanner(object)
+	codePos := 0
+	for _, tc := range object.TextCode {
+		if lines.next(tc) {
+			return true
+		}
+		runes := textCodeRunes(tc.Value)
+		if tc.Index != "" {
+			glyphs := r.parseIndexGlyphs(tc.Index, fontID)
+			if len(runes) > 0 && len(runes) != len(glyphs) {
+				return true
+			}
+			for i, glyph := range glyphs {
+				gid, ok := pdfSingleGlyphID(face, glyph)
+				if !ok {
+					return true
+				}
+				mapped, has := pdfOutput.glyphToUnicodeRune(face.Font, gid)
+				if !has || mapped > 0xFFFF {
+					return true
+				}
+				if len(runes) == len(glyphs) {
+					if mapped != runes[i] {
+						return true
+					}
+					continue
+				}
+				if glyph.Text != "" {
+					ch, size := utf8.DecodeRuneInString(glyph.Text)
+					if size != len(glyph.Text) || ch != mapped {
+						return true
+					}
+				}
+			}
+			codePos += len(runes)
+			continue
+		}
+		if len(transforms) == 0 {
+			for _, ch := range runes {
+				if ch > 0xFFFF {
+					return true
+				}
+				gid := face.Font.GlyphIndex(ch)
+				if gid == 0 {
+					return true
+				}
+				mapped, has := pdfOutput.glyphToUnicodeRune(face.Font, gid)
+				if !has || mapped != ch {
+					return true
+				}
+			}
+			codePos += len(runes)
+			continue
+		}
+		glyphs := textCodeGlyphs(runes, transforms, codePos)
+		if len(glyphs) != len(runes) {
+			return true
+		}
+		for i, glyph := range glyphs {
+			if runes[i] > 0xFFFF {
+				return true
+			}
+			gid, ok := pdfSingleGlyphID(face, glyph)
+			if !ok {
+				return true
+			}
+			mapped, has := pdfOutput.glyphToUnicodeRune(face.Font, gid)
+			if !has || mapped != runes[i] {
+				return true
+			}
+		}
+		codePos += len(runes)
+	}
+	return false
 }
 
 // pdfActualText 提取PDF可复制原文，对TextCode.Index优先保留显式文本或通过cmap反查Unicode

@@ -133,7 +133,7 @@ func (e *Editor) SetDocumentInfoContext(ctx context.Context, index int, info Doc
 		e.SetInfo(info)
 		return nil
 	}
-	return e.editDocumentsContext(ctx, func(reader *Reader, data []byte, _ *editorXML) (int, error) {
+	return e.editDocumentsWithVersion(ctx, true, func(reader *Reader, data []byte, _ *editorXML) (int, error) {
 		updated, err := editorUpdateInfoXML(data, NewEditor().Info.DocID, index, before, info)
 		if err != nil {
 			return 0, err
@@ -166,7 +166,7 @@ func (e *Editor) AddDocumentContext(ctx context.Context, title string, width, he
 	if _, err := created.AddPage(width, height); err != nil {
 		return 0, err
 	}
-	err := e.editDocumentsContext(ctx, func(reader *Reader, data []byte, root *editorXML) (int, error) {
+	err := e.editDocumentsWithVersion(ctx, false, func(reader *Reader, data []byte, root *editorXML) (int, error) {
 		occupied := make(map[string]bool)
 		for name := range reader.fileNames {
 			if err := ctx.Err(); err != nil {
@@ -269,7 +269,7 @@ func (e *Editor) MoveDocumentContext(ctx context.Context, from, to int) error {
 	if from == to {
 		return nil
 	}
-	return e.editDocumentsContext(ctx, func(reader *Reader, data []byte, root *editorXML) (int, error) {
+	return e.editDocumentsWithVersion(ctx, true, func(reader *Reader, data []byte, root *editorXML) (int, error) {
 		nodes := make([]*editorXML, 0, reader.DocumentCount())
 		bodies := make([][]byte, 0, reader.DocumentCount())
 		for _, body := range root.children {
@@ -329,7 +329,7 @@ func (e *Editor) DeleteDocumentContext(ctx context.Context, index int) error {
 	if e.DocumentCount() == 1 {
 		return fmt.Errorf("package must contain at least one document")
 	}
-	return e.editDocumentsContext(ctx, func(reader *Reader, data []byte, root *editorXML) (int, error) {
+	return e.editDocumentsWithVersion(ctx, index != e.DocumentIndex(), func(reader *Reader, data []byte, root *editorXML) (int, error) {
 		removed, err := reader.documentFiles(ctx, index)
 		if err != nil {
 			return 0, err
@@ -420,7 +420,7 @@ func (identity editorDocumentIdentity) matches(other editorDocumentIdentity) boo
 	return identity.root == other.root && identity.id == other.id && identity.version == other.version
 }
 
-// editDocumentsContext 在独立快照中修改文档入口，确认未取消后提交完整状态
+// editDocumentsContext 在独立快照中修改文档入口，新增文档切换时清空历史版本选择，其余保留
 // 入参: ctx 取消上下文, edit 修改包快照并返回新的当前文档索引
 // 返回: error 修改或取消错误
 func (e *Editor) editDocumentsContext(ctx context.Context, edit func(*Reader, []byte, *editorXML) (int, error)) error {
@@ -428,20 +428,53 @@ func (e *Editor) editDocumentsContext(ctx context.Context, edit func(*Reader, []
 	if err != nil {
 		return err
 	}
-	return e.editDocumentSnapshotWithRetired(ctx, reader, retiredTags, edit)
+	beforeCount := reader.DocumentCount()
+	return e.editDocumentSnapshotWithRetired(ctx, reader, retiredTags, true, func(r *Reader, data []byte, root *editorXML) (int, error) {
+		index, editErr := edit(r, data, root)
+		if editErr != nil {
+			return 0, editErr
+		}
+		if ofdData, ok := r.files["OFD.xml"]; ok {
+			updatedRoot, parseErr := parseEditorXMLContext(ctx, ofdData)
+			if parseErr != nil {
+				return 0, parseErr
+			}
+			afterCount := 0
+			for _, child := range updatedRoot.children {
+				if child.matchesOFD("DocBody") {
+					afterCount++
+				}
+			}
+			if afterCount != beforeCount {
+				r.selectedVersion = nil
+			}
+		}
+		return index, nil
+	})
 }
 
-// editDocumentSnapshot 修改已有独立快照的文档入口，成功后提交并记录撤销历史
+// editDocumentsWithVersion 在独立快照中修改文档入口并显式控制是否保留当前版本选择
+// 入参: ctx 取消上下文, keepVersion 是否保留已选历史版本, edit 修改包快照并返回新的当前文档索引
+// 返回: error 修改或取消错误
+func (e *Editor) editDocumentsWithVersion(ctx context.Context, keepVersion bool, edit func(*Reader, []byte, *editorXML) (int, error)) error {
+	reader, retiredTags, err := e.snapshotReader(ctx, nil)
+	if err != nil {
+		return err
+	}
+	return e.editDocumentSnapshotWithRetired(ctx, reader, retiredTags, keepVersion, edit)
+}
+
+// editDocumentSnapshot 修改已有独立快照的文档入口，保留已选版本并在成功后提交撤销历史
 // 入参: ctx 取消上下文, reader 包含当前编辑内容的独立快照, edit 修改快照并返回当前文档索引
 // 返回: error 修改或取消错误
 func (e *Editor) editDocumentSnapshot(ctx context.Context, reader *Reader, edit func(*Reader, []byte, *editorXML) (int, error)) error {
-	return e.editDocumentSnapshotWithRetired(ctx, reader, nil, edit)
+	return e.editDocumentSnapshotWithRetired(ctx, reader, nil, true, edit)
 }
 
-// editDocumentSnapshotWithRetired 修改已有独立快照的文档入口并记录淘汰标引路径
-// 入参: ctx 取消上下文, reader 包含当前编辑内容的独立快照, retiredTags 已淘汰的旧标引路径, edit 修改快照并返回当前文档索引
+// editDocumentSnapshotWithRetired 修改已有独立快照的文档入口，按调用方指定保留或清空历史版本选择
+// 入参: ctx 取消上下文, reader 包含当前编辑内容的独立快照, retiredTags 已淘汰的旧标引路径, keepVersion 是否保留已选历史版本, edit 修改快照并返回当前文档索引
 // 返回: error 修改或取消错误
-func (e *Editor) editDocumentSnapshotWithRetired(ctx context.Context, reader *Reader, retiredTags map[string]bool, edit func(*Reader, []byte, *editorXML) (int, error)) error {
+func (e *Editor) editDocumentSnapshotWithRetired(ctx context.Context, reader *Reader, retiredTags map[string]bool, keepVersion bool, edit func(*Reader, []byte, *editorXML) (int, error)) error {
 	data, err := reader.readFileViewContext(ctx, "OFD.xml")
 	if err != nil {
 		return err
@@ -451,7 +484,6 @@ func (e *Editor) editDocumentSnapshotWithRetired(ctx context.Context, reader *Re
 		return err
 	}
 	reader.files = maps.Clone(reader.files)
-	previous := reader.OFD.DocBody[reader.documentIndex]
 	index, err := edit(reader, data, root)
 	if err != nil {
 		return err
@@ -461,12 +493,11 @@ func (e *Editor) editDocumentSnapshotWithRetired(ctx context.Context, reader *Re
 	}
 	before := e.transactionSnapshot()
 	reader.documentIndex, reader.doc = index, nil
+	if !keepVersion {
+		reader.selectedVersion = nil
+	}
 	if err := reader.initRootContext(ctx); err != nil {
 		return err
-	}
-	current := reader.OFD.DocBody[index]
-	if previous.DocRoot != current.DocRoot || previous.DocInfo.DocID != current.DocInfo.DocID {
-		reader.selectedVersion = nil
 	}
 	if _, err := reader.DocContext(ctx); err != nil {
 		return err
