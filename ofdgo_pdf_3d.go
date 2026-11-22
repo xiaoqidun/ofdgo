@@ -63,15 +63,14 @@ func (p *pdfImporter) threeDAnnotation(ctx context.Context, page *pdfgo.Page, an
 		}
 	}
 	action := Action{Event: "CLICK", GotoA: &GotoA{AttachID: id}}
+	appearance, err := p.reader.ReadAnnotationAppearance(annotation)
+	if err != nil {
+		return p.interactiveAppearanceFallback(ctx, page, annotation, "appearance", err)
+	}
+	hasAppearance := appearance != nil
 	var paint func(*pdfImporter) error
+	hasStaticView := false
 	if source.ActivationPolicy.Activation != "XA" {
-		appearance, err := p.reader.ReadAnnotationAppearance(annotation)
-		if err != nil {
-			return p.interactiveAppearanceFallback(ctx, page, annotation, "appearance", err)
-		}
-		if appearance == nil {
-			return fmt.Errorf("missing PDF 3D normal appearance")
-		}
 		if data == nil {
 			data, err = p.editor.source.reader.AttachmentData(id)
 			if err != nil {
@@ -86,15 +85,29 @@ func (p *pdfImporter) threeDAnnotation(ctx context.Context, page *pdfgo.Page, an
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return err
 			}
-			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF 3D rendering unavailable; normal appearance retained: " + err.Error()})
+			if hasAppearance {
+				p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF 3D rendering unavailable; normal appearance retained: " + err.Error()})
+			} else {
+				p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF 3D rendering unavailable; normal appearance missing: " + err.Error()})
+			}
+		} else {
+			hasStaticView = paint != nil
 		}
+	}
+	if !hasStaticView && !hasAppearance {
+		if err := p.recoverPDFObject(ctx, "Annotation.Appearance", annotation.Dictionary, fmt.Errorf("missing PDF 3D normal appearance")); err != nil {
+			return err
+		}
+		paint = func(*pdfImporter) error { return nil }
 	}
 	if err := p.paintedAnnotation(ctx, page, annotation, paint, action); err != nil {
 		return err
 	}
-	message := "PDF 3D appearance and original model retained; advanced interaction not transferred to OFD"
-	if paint != nil {
+	message := "PDF 3D original model retained; normal appearance missing and interactive rendering not transferred to OFD"
+	if hasStaticView {
 		message = "PDF 3D static view and original model retained; interactive rendering not transferred to OFD"
+	} else if hasAppearance {
+		message = "PDF 3D appearance and original model retained; advanced interaction not transferred to OFD"
 	}
 	p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: message})
 	return nil
@@ -187,7 +200,7 @@ func (p *pdfImporter) threeDMarkupAnnotation(ctx context.Context, annotation pdf
 		var err error
 		source, err = p.reader.ReadThreeDContext(ctx, markup.Annotation)
 		if err != nil {
-			return annotation, err
+			return annotation, p.recoverPDFObject(ctx, "Annotation.ExData", annotation.Dictionary["ExData"], err)
 		}
 		if markup.Annotation.Reference != (pdfgo.Reference{}) {
 			if state.sources == nil {
@@ -202,7 +215,7 @@ func (p *pdfImporter) threeDMarkupAnnotation(ctx context.Context, annotation pdf
 			var err error
 			sum, err = pdfgo.ThreeDArtworkChecksum(ctx, source.Stream)
 			if err != nil {
-				return annotation, err
+				return annotation, p.recoverPDFObject(ctx, "Annotation.ExData", annotation.Dictionary["ExData"], err)
 			}
 			if state.sums == nil {
 				state.sums = make(map[*pdfgo.Stream][16]byte)
@@ -217,7 +230,7 @@ func (p *pdfImporter) threeDMarkupAnnotation(ctx context.Context, annotation pdf
 	if !visible {
 		flags, err := p.reader.ReadAnnotationFlags(annotation)
 		if err != nil {
-			return annotation, err
+			return annotation, p.recoverPDFObject(ctx, "Annotation.F", annotation.Dictionary["F"], err)
 		}
 		annotation.Dictionary = maps.Clone(annotation.Dictionary)
 		annotation.Dictionary["F"] = pdfgo.Integer(flags | 2)

@@ -76,6 +76,26 @@ type fontSourceData struct {
 	err  error
 }
 
+// fontSourceResolved 保存默认后端解析后的只读外部字体结果
+type fontSourceResolved struct {
+	data   []byte
+	digest [32]byte
+	face   FontFace
+}
+
+// fontFaceResolveError 标记已打开字体在解析字面信息时的错误，用于区分候选回退与直接失败
+type fontFaceResolveError struct {
+	err error
+}
+
+// Error 返回字面解析错误描述
+// 返回: string 错误信息
+func (e fontFaceResolveError) Error() string { return e.err.Error() }
+
+// Unwrap 返回底层字面解析错误
+// 返回: error 底层错误
+func (e fontFaceResolveError) Unwrap() error { return e.err }
+
 // sharedFontSourceIndex 为派生渲染器提供并发安全的目录、文件系统与字体候选共享索引
 type sharedFontSourceIndex struct {
 	mu          sync.RWMutex
@@ -90,6 +110,7 @@ type fontSourceCache struct {
 	shared       *sharedFontSourceIndex
 	data         *renderCache[fontSourceKey, fontSourceData]
 	collections  *renderCache[fontSourceKey, []byte]
+	resolved     *renderCache[fontSourceKey, fontSourceResolved]
 	fallback     ResolvedFont
 	fallbackRead bool
 }
@@ -108,6 +129,7 @@ func newFontSourceCache(resources *Resources) *fontSourceCache {
 		shared:      newSharedFontSourceIndex(),
 		data:        resourceCache[fontSourceKey, fontSourceData](resources, 64<<20),
 		collections: resourceCache[fontSourceKey, []byte](resources, 64<<20),
+		resolved:    resourceCache[fontSourceKey, fontSourceResolved](resources, 64<<20),
 	}
 }
 
@@ -225,21 +247,39 @@ func (s *sharedFontSourceIndex) setNames(index int, names []string) {
 // child 复用相同来源的文件索引、候选与数据，回退状态保持独立
 // 返回: *fontSourceCache 独立文档缓存
 func (c *fontSourceCache) child() *fontSourceCache {
-	return &fontSourceCache{shared: c.shared, data: c.data, collections: c.collections}
+	return &fontSourceCache{shared: c.shared, data: c.data, collections: c.collections, resolved: c.resolved}
+}
+
+// fontSourceCacheKey 计算外部字体来源的规范缓存键
+// 入参: source 字体来源, definition 字体定义
+// 返回: fontSourceKey 规范键, bool 是否有效
+func fontSourceCacheKey(source fontSource, definition *Font) (fontSourceKey, bool) {
+	key := fontSourceKey{kind: source.kind, index: source.index, face: source.face, name: source.name}
+	if source.kind == fontSourceSystem {
+		matches := basefont.FileMatches(systemFontIndex(), []string{source.name}, definition.Bold, definition.Italic)
+		if len(matches) == 0 {
+			return fontSourceKey{}, false
+		}
+		key = fontSourceKey{kind: fontSourceFile, name: matches[0].Name, face: matches[0].Face}
+	}
+	return key, true
 }
 
 // readFontSource 读取独立字体并规范符号映射，保留集合中的名称和样式选择
 // 入参: source 字体来源, definition 字体定义
 // 返回: []byte 字体数据, error 读取或集合错误
 func (r *Renderer) readFontSource(source fontSource, definition *Font) ([]byte, error) {
-	key := fontSourceKey{kind: source.kind, index: source.index, face: source.face, name: source.name}
-	if source.kind == fontSourceSystem {
-		matches := basefont.FileMatches(systemFontIndex(), []string{source.name}, definition.Bold, definition.Italic)
-		if len(matches) == 0 {
-			return nil, fmt.Errorf("font %q not found", source.name)
-		}
-		key = fontSourceKey{kind: fontSourceFile, name: matches[0].Name, face: matches[0].Face}
+	key, ok := fontSourceCacheKey(source, definition)
+	if !ok {
+		return nil, fmt.Errorf("font %q not found", source.name)
 	}
+	return r.readFontSourceKey(key)
+}
+
+// readFontSourceKey 按规范缓存键读取独立字体并规范符号映射
+// 入参: key 规范字体缓存键
+// 返回: []byte 字体数据, error 读取或集合错误
+func (r *Renderer) readFontSourceKey(key fontSourceKey) ([]byte, error) {
 	if cached, ok := r.fontSourcesCache.data.get(key); ok {
 		return cached.data, cached.err
 	}
@@ -318,15 +358,69 @@ func (r *Renderer) resolveFontSource(backend FontBackend, id string, exact bool)
 		}
 		return ResolvedFont{Data: data, Source: path.Base(definition.FontFile), Face: face, Exact: true}, nil
 	}
-	if source, metrics := r.fontSourceMatch(backend, id, definition, exact); metrics != nil {
-		data := metrics.Write()
-		faces, err := (FontFile{Data: data}).Faces()
+	if _, ok := backend.(SFNTBackend); ok {
+		ctx := r.pageContext
+		if ctx == nil {
+			ctx = r.outputContext()
+		}
+		for _, source := range r.fontSources(id, definition) {
+			if exact && !source.exact {
+				continue
+			}
+			key, ok := fontSourceCacheKey(source, definition)
+			if !ok {
+				continue
+			}
+			resolved, err := r.fontSourcesCache.resolved.load(ctx, key, func() (fontSourceResolved, int, error) {
+				data, err := r.readFontSourceKey(key)
+				if err != nil {
+					return fontSourceResolved{}, 0, err
+				}
+				metrics, err := backend.OpenFont(data)
+				if err != nil {
+					return fontSourceResolved{}, 0, err
+				}
+				written, digest, face, err := metrics.(*sfntFontMetrics).resolvedWrite()
+				if err != nil {
+					return fontSourceResolved{}, 0, fontFaceResolveError{err: err}
+				}
+				return fontSourceResolved{data: written, digest: digest, face: face}, len(written) + 256, nil
+			})
+			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return ResolvedFont{}, err
+				}
+				var faceErr fontFaceResolveError
+				if errors.As(err, &faceErr) {
+					return ResolvedFont{}, faceErr.err
+				}
+				continue
+			}
+			face := resolved.face
+			face.Index = source.face
+			return ResolvedFont{Data: resolved.data, Source: source.name, Face: &face, Exact: source.exact, digest: resolved.digest}, nil
+		}
+	} else if source, metrics := r.fontSourceMatch(backend, id, definition, exact); metrics != nil {
+		var data []byte
+		var digest [32]byte
+		var face FontFace
+		var err error
+		if typed, ok := metrics.(*sfntFontMetrics); ok {
+			data, digest, face, err = typed.resolvedWrite()
+		} else {
+			data = metrics.Write()
+			faces, faceErr := (FontFile{Data: data}).Faces()
+			if faceErr != nil {
+				err = faceErr
+			} else {
+				face = faces[0]
+			}
+		}
 		if err != nil {
 			return ResolvedFont{}, err
 		}
-		face := faces[0]
 		face.Index = source.face
-		return ResolvedFont{Data: data, Source: source.name, Face: &face, Exact: source.exact}, nil
+		return ResolvedFont{Data: data, Source: source.name, Face: &face, Exact: source.exact, digest: digest}, nil
 	}
 	if exact {
 		return ResolvedFont{}, fmt.Errorf("font %q is unavailable", id)
@@ -341,7 +435,14 @@ func (r *Renderer) resolveFontSource(backend FontBackend, id string, exact bool)
 				}
 				metrics, err := backend.OpenFont(data)
 				if err == nil {
-					r.fontSourcesCache.fallback = ResolvedFont{Data: metrics.Write()}
+					var written []byte
+					var digest [32]byte
+					if typed, ok := metrics.(*sfntFontMetrics); ok {
+						written, digest = typed.cachedWrite()
+					} else {
+						written = metrics.Write()
+					}
+					r.fontSourcesCache.fallback = ResolvedFont{Data: written, digest: digest}
 					break
 				}
 			}

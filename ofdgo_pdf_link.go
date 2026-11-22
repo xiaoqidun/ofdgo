@@ -204,13 +204,19 @@ func (d *pdfDestinations) clone() *pdfDestinations {
 // 返回: error 错误信息
 func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict bool) error {
 	p.movieBounds = nil
+	if p.compositeSpace == nil {
+		p.compositeSpace = &pdfgo.ColorSpace{Model: "DeviceRGB"}
+	}
 	annotations, err := p.pageAnnotations(ctx, page)
 	if err != nil {
 		return err
 	}
 	markups, err := p.reader.ReadThreeDMarkups(ctx, annotations)
 	if err != nil {
-		return err
+		if err := p.recoverPDFObject(ctx, "Page.Annots.ThreeDMarkup", page.Dictionary["Annots"], err); err != nil {
+			return err
+		}
+		markups = nil
 	}
 	var markupState pdfThreeDMarkupState
 	parents := make(map[pdfgo.Reference]int)
@@ -220,7 +226,10 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		}
 		opened, err := p.annotationTriggerActions(ctx, annotation, "PO")
 		if err != nil {
-			return err
+			if err := p.recoverAnnotationObject(ctx, "Annotation.AA", annotation.Dictionary["AA"], err); err != nil {
+				return err
+			}
+			opened = nil
 		}
 		if len(opened) != 0 {
 			p.editor.pages[p.page].Actions = append(p.editor.pages[p.page].Actions, opened...)
@@ -239,7 +248,11 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		}
 		popup, err := p.popupAnnotation(ctx, annotation.Dictionary)
 		if err != nil {
-			return err
+			if err := p.recoverAnnotationObject(ctx, "Annotation.Popup", annotation.Dictionary, err); err != nil {
+				return err
+			}
+			attached[i] = true
+			continue
 		}
 		if parent, ok := parents[popup.Parent]; ok {
 			dict := maps.Clone(annotations[parent].Dictionary)
@@ -270,234 +283,243 @@ func (p *pdfImporter) annotations(ctx context.Context, page *pdfgo.Page, strict 
 		if attached[i] {
 			continue
 		}
+		var markup *pdfgo.ThreeDMarkup
 		if len(markups) != 0 {
-			annotation, err = p.threeDMarkupAnnotation(ctx, annotation, markups[i], &markupState, strict)
-			if err != nil {
+			markup = markups[i]
+		}
+		savedDataLen := len(p.annotationData)
+		savedBindingsLen := len(p.annotationBindings)
+		savedText, savedPath, savedImage, savedLinks := p.report.TextObjects, p.report.PathObjects, p.report.ImageObjects, p.report.Links
+		if err := p.convertAnnotation(ctx, page, annotation, markup, &markupState, strict); err != nil {
+			p.annotationData = p.annotationData[:savedDataLen]
+			p.annotationBindings = p.annotationBindings[:savedBindingsLen]
+			p.report.TextObjects, p.report.PathObjects, p.report.ImageObjects, p.report.Links = savedText, savedPath, savedImage, savedLinks
+			if err := p.recoverAnnotationObject(ctx, "Annotation", annotation.Dictionary, err); err != nil {
 				return err
 			}
-		}
-		dict := annotation.Dictionary
-		optional, err := p.reader.Resolve(dict["OC"])
-		if err != nil {
-			return err
-		}
-		if optional != nil {
-			if strict {
-				return &pdfgo.UnsupportedError{Feature: "annotation optional content conversion"}
-			}
-			visible, err := p.reader.OptionalContentVisible(dict["OC"])
-			if err != nil {
-				return err
-			}
-			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF annotation optional content default visibility applied; layer switching not transferred"})
-			if !visible {
-				continue
-			}
-			dict = maps.Clone(dict)
-			delete(dict, "OC")
-			annotation.Dictionary = dict
-		}
-		if annotation.Subtype == "Text" {
-			value, err := p.annotationOpen(ctx, dict)
-			if err != nil {
-				return err
-			}
-			if value == pdfgo.Boolean(true) {
-				if strict {
-					return &pdfgo.UnsupportedError{Feature: "initially open text annotation"}
-				}
-				p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF text annotation open state retained as annotation parameter"})
-			}
-		}
-		popupObject := dict["Popup"]
-		if annotation.Subtype == "Popup" {
-			popupObject = dict
-		}
-		if popupObject != nil {
-			popup, err := p.popupAnnotation(ctx, popupObject)
-			if err != nil {
-				return err
-			}
-			if annotation.Subtype != "Popup" && popup.Parent != (pdfgo.Reference{}) && popup.Parent != annotation.Reference {
-				if err := p.recoverPDFObject(ctx, "Annotation.Popup.Parent", popupObject, fmt.Errorf("inconsistent PDF popup parent")); err != nil {
-					return err
-				}
-			}
-			if popup.Open {
-				if strict {
-					return &pdfgo.UnsupportedError{Feature: "initially open annotation popup"}
-				}
-				p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF popup open state retained as annotation parameter"})
-			}
-		}
-		if annotation.Subtype == "Sound" {
-			sound, err := p.reader.ReadSound(dict["Sound"])
-			if err != nil {
-				if err := p.recoverPDFObject(ctx, "Annotation.Sound", dict["Sound"], err); err != nil {
-					return err
-				}
-				if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
-					return err
-				}
-				continue
-			}
-			id, err := p.soundResource(ctx, sound)
-			if err != nil {
-				if err := p.recoverPDFObject(ctx, "Annotation.Sound", dict["Sound"], err); err != nil {
-					return err
-				}
-				id = ""
-			}
-			if id == "" {
-				if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
-					return err
-				}
-				continue
-			}
-			if err := p.appearanceAnnotation(ctx, page, annotation, Action{Event: "CLICK", Sound: &Sound{ResourceID: id}}); err != nil {
-				return err
-			}
-			continue
-		}
-		if annotation.Subtype == "Movie" {
-			if err := p.movieAnnotation(ctx, page, annotation, strict); err != nil {
-				return err
-			}
-			continue
-		}
-		if annotation.Subtype == "Screen" {
-			if err := p.screenAnnotation(ctx, page, annotation, strict); err != nil {
-				return err
-			}
-			continue
-		}
-		if annotation.Subtype == "3D" || annotation.Subtype == "RichMedia" {
-			if err := p.interactiveAnnotation(ctx, page, annotation, strict); err != nil {
-				return err
-			}
-			continue
-		}
-		if annotation.Subtype == "FileAttachment" {
-			file, err := p.reader.ReadFileSpecification(dict["FS"])
-			if err != nil {
-				return err
-			}
-			data, available, err := p.mediaData(ctx, file)
-			if err != nil {
-				return err
-			}
-			if !available {
-				if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
-					return err
-				}
-				continue
-			}
-			id, err := p.attachmentFile(file.Name, data)
-			if err != nil {
-				return err
-			}
-			if err := p.appearanceAnnotation(ctx, page, annotation, Action{Event: "CLICK", GotoA: &GotoA{AttachID: id}}); err != nil {
-				return err
-			}
-			continue
-		}
-		if annotation.Subtype == "Widget" {
-			field, err := p.reader.ReadField(annotation)
-			if err != nil {
-				if err := p.recoverAnnotationAuxiliary(ctx, annotation, "Annotation.Field", annotation.Dictionary, err); err != nil {
-					return err
-				}
-				if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
-					return err
-				}
-				continue
-			}
-			annotation.Dictionary = field
-			if field["FT"] == pdfgo.Name("Sig") && field["V"] != nil {
-				err = p.signatureWidget(ctx, page, annotation, strict)
-			} else {
-				err = p.formWidget(ctx, page, annotation, strict)
-			}
-			if err != nil {
-				return err
-			}
-			continue
-		}
-		if annotation.Subtype == "Redact" {
-			if strict {
-				return &pdfgo.UnsupportedError{Feature: "pending PDF redaction conversion"}
-			}
-			if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
-				return err
-			}
-			p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF pending redaction appearance imported; content removal not applied; overlay data not transferred"})
-			continue
-		}
-		if annotation.Subtype == "Projection" && strict {
-			return &pdfgo.UnsupportedError{Feature: "projection annotation runtime conversion"}
-		}
-		if annotation.Subtype != "Link" && pdfAnnotationType(annotation.Subtype) != "" {
-			if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
-				return err
-			}
-			continue
-		}
-		if annotation.Subtype != "Link" {
-			return &pdfgo.UnsupportedError{Feature: "annotation " + string(annotation.Subtype)}
-		}
-		flags, err := p.reader.ReadAnnotationFlags(annotation)
-		if err != nil {
-			return err
-		}
-		if flags&64 != 0 {
-			if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
-				return err
-			}
-			continue
-		}
-		var actions []Action
-		currentPage := p.page
-		appendAction := func(dict pdfgo.Dictionary) error {
-			current := annotation
-			current.Dictionary = dict
-			converted, err := p.linkActions(current, strict, &currentPage)
-			if err != nil {
-				return err
-			}
-			actions = append(actions, converted...)
-			return nil
-		}
-		primary, err := p.reader.Resolve(dict["A"])
-		if err != nil {
-			if err := p.recoverPDFObject(ctx, "Annotation.A", dict["A"], err); err != nil {
-				return err
-			}
-		} else if primary == nil {
-			if err := appendAction(dict); err != nil {
-				return err
-			}
-		} else {
-			actions, err = p.eventActions(ctx, dict["A"], "CLICK", annotation, &currentPage)
-			if err != nil {
-				return err
-			}
-		}
-		b := annotation.Rect
-		box := pdfBounds([]pdfgo.Point{p.matrix.Apply(pdfgo.Point{X: b.XMin, Y: b.YMin}), p.matrix.Apply(pdfgo.Point{X: b.XMax, Y: b.YMax})})
-		region, err := p.linkRegion(annotation, box)
-		if err != nil {
-			if err := p.recoverPDFObject(ctx, "Annotation.QuadPoints", dict["QuadPoints"], err); err != nil {
-				return err
-			}
-		}
-		for i := range actions {
-			actions[i].Region = region
-		}
-		if err := p.appearanceAnnotation(ctx, page, annotation, actions...); err != nil {
-			return err
 		}
 	}
 	return nil
+}
+
+// convertAnnotation 转换单条PDF注解及其动作与外观，由调用方按策略隔离单条故障
+// 入参: ctx 取消上下文, page PDF页面, annotation 单条注解, markup 三维批注关联, markupState 同页批注缓存, strict 严格检查开关
+// 返回: error 转换或读取错误
+func (p *pdfImporter) convertAnnotation(ctx context.Context, page *pdfgo.Page, annotation pdfgo.Annotation, markup *pdfgo.ThreeDMarkup, markupState *pdfThreeDMarkupState, strict bool) error {
+	var err error
+	if markup != nil {
+		annotation, err = p.threeDMarkupAnnotation(ctx, annotation, markup, markupState, strict)
+		if err != nil {
+			return err
+		}
+	}
+	dict := annotation.Dictionary
+	optional, err := p.reader.Resolve(dict["OC"])
+	if err != nil {
+		if err := p.recoverPDFObject(ctx, "Annotation.OC", dict["OC"], err); err != nil {
+			return err
+		}
+		dict = maps.Clone(dict)
+		delete(dict, "OC")
+		annotation.Dictionary = dict
+		optional = nil
+	}
+	if optional != nil {
+		if strict {
+			return &pdfgo.UnsupportedError{Feature: "annotation optional content conversion"}
+		}
+		visible, err := p.reader.OptionalContentVisible(dict["OC"])
+		if err != nil {
+			if err := p.recoverPDFObject(ctx, "Annotation.OC", dict["OC"], err); err != nil {
+				return err
+			}
+			visible = true
+		} else {
+			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF annotation optional content default visibility applied; layer switching not transferred"})
+		}
+		if !visible {
+			return nil
+		}
+		dict = maps.Clone(dict)
+		delete(dict, "OC")
+		annotation.Dictionary = dict
+	}
+	if annotation.Subtype == "Text" {
+		value, err := p.annotationOpen(ctx, dict)
+		if err != nil {
+			return err
+		}
+		if value == pdfgo.Boolean(true) {
+			if strict {
+				return &pdfgo.UnsupportedError{Feature: "initially open text annotation"}
+			}
+			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF text annotation open state retained as annotation parameter"})
+		}
+	}
+	popupObject := dict["Popup"]
+	if annotation.Subtype == "Popup" {
+		popupObject = dict
+	}
+	if popupObject != nil {
+		popup, err := p.popupAnnotation(ctx, popupObject)
+		if err != nil {
+			return err
+		}
+		if annotation.Subtype != "Popup" && popup.Parent != (pdfgo.Reference{}) && popup.Parent != annotation.Reference {
+			if err := p.recoverPDFObject(ctx, "Annotation.Popup.Parent", popupObject, fmt.Errorf("inconsistent PDF popup parent")); err != nil {
+				return err
+			}
+		}
+		if popup.Open {
+			if strict {
+				return &pdfgo.UnsupportedError{Feature: "initially open annotation popup"}
+			}
+			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF popup open state retained as annotation parameter"})
+		}
+	}
+	if annotation.Subtype == "Sound" {
+		sound, err := p.reader.ReadSound(dict["Sound"])
+		if err != nil {
+			if err := p.recoverPDFObject(ctx, "Annotation.Sound", dict["Sound"], err); err != nil {
+				return err
+			}
+			return p.appearanceAnnotation(ctx, page, annotation)
+		}
+		id, err := p.soundResource(ctx, sound)
+		if err != nil {
+			if err := p.recoverPDFObject(ctx, "Annotation.Sound", dict["Sound"], err); err != nil {
+				return err
+			}
+			id = ""
+		}
+		if id == "" {
+			return p.appearanceAnnotation(ctx, page, annotation)
+		}
+		return p.appearanceAnnotation(ctx, page, annotation, Action{Event: "CLICK", Sound: &Sound{ResourceID: id}})
+	}
+	if annotation.Subtype == "Movie" {
+		return p.movieAnnotation(ctx, page, annotation, strict)
+	}
+	if annotation.Subtype == "Screen" {
+		return p.screenAnnotation(ctx, page, annotation, strict)
+	}
+	if annotation.Subtype == "3D" || annotation.Subtype == "RichMedia" {
+		return p.interactiveAnnotation(ctx, page, annotation, strict)
+	}
+	if annotation.Subtype == "FileAttachment" {
+		file, err := p.reader.ReadFileSpecification(dict["FS"])
+		if err != nil {
+			if err := p.recoverPDFObject(ctx, "Annotation.FileAttachment", dict["FS"], err); err != nil {
+				return err
+			}
+			return p.appearanceAnnotation(ctx, page, annotation)
+		}
+		data, available, err := p.mediaData(ctx, file)
+		if err != nil {
+			cause := err
+			if file.Embedded != nil && p.warning != nil {
+				if unwrapped, ok := err.(interface{ Unwrap() []error }); ok {
+					for _, item := range unwrapped.Unwrap() {
+						if !errors.Is(item, errPDFMediaRead) {
+							cause = item
+							break
+						}
+					}
+				}
+			}
+			if err := p.recoverPDFObject(ctx, "Annotation.FileAttachment", dict["FS"], cause); err != nil {
+				return err
+			}
+			available = false
+		}
+		if !available {
+			return p.appearanceAnnotation(ctx, page, annotation)
+		}
+		id, err := p.attachmentFile(file.Name, data)
+		if err != nil {
+			return err
+		}
+		return p.appearanceAnnotation(ctx, page, annotation, Action{Event: "CLICK", GotoA: &GotoA{AttachID: id}})
+	}
+	if annotation.Subtype == "Widget" {
+		field, err := p.reader.ReadField(annotation)
+		if err != nil {
+			if err := p.recoverAnnotationAuxiliary(ctx, annotation, "Annotation.Field", annotation.Dictionary, err); err != nil {
+				return err
+			}
+			return p.appearanceAnnotation(ctx, page, annotation)
+		}
+		annotation.Dictionary = field
+		if field["FT"] == pdfgo.Name("Sig") && field["V"] != nil {
+			return p.signatureWidget(ctx, page, annotation, strict)
+		}
+		return p.formWidget(ctx, page, annotation, strict)
+	}
+	if annotation.Subtype == "Redact" {
+		if strict {
+			return &pdfgo.UnsupportedError{Feature: "pending PDF redaction conversion"}
+		}
+		if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
+			return err
+		}
+		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF pending redaction appearance imported; content removal not applied; overlay data not transferred"})
+		return nil
+	}
+	if annotation.Subtype == "Projection" && strict {
+		return &pdfgo.UnsupportedError{Feature: "projection annotation runtime conversion"}
+	}
+	if annotation.Subtype != "Link" && pdfAnnotationType(annotation.Subtype) != "" {
+		return p.appearanceAnnotation(ctx, page, annotation)
+	}
+	if annotation.Subtype != "Link" {
+		return &pdfgo.UnsupportedError{Feature: "annotation " + string(annotation.Subtype)}
+	}
+	flags, err := p.reader.ReadAnnotationFlags(annotation)
+	if err != nil {
+		return err
+	}
+	if flags&64 != 0 {
+		return p.appearanceAnnotation(ctx, page, annotation)
+	}
+	var actions []Action
+	currentPage := p.page
+	appendAction := func(dict pdfgo.Dictionary) error {
+		current := annotation
+		current.Dictionary = dict
+		converted, err := p.linkActions(current, strict, &currentPage)
+		if err != nil {
+			return err
+		}
+		actions = append(actions, converted...)
+		return nil
+	}
+	primary, err := p.reader.Resolve(dict["A"])
+	if err != nil {
+		if err := p.recoverPDFObject(ctx, "Annotation.A", dict["A"], err); err != nil {
+			return err
+		}
+	} else if primary == nil {
+		if err := appendAction(dict); err != nil {
+			return err
+		}
+	} else {
+		actions, err = p.eventActions(ctx, dict["A"], "CLICK", annotation, &currentPage)
+		if err != nil {
+			return err
+		}
+	}
+	b := annotation.Rect
+	box := pdfBounds([]pdfgo.Point{p.matrix.Apply(pdfgo.Point{X: b.XMin, Y: b.YMin}), p.matrix.Apply(pdfgo.Point{X: b.XMax, Y: b.YMax})})
+	region, err := p.linkRegion(annotation, box)
+	if err != nil {
+		if err := p.recoverPDFObject(ctx, "Annotation.QuadPoints", dict["QuadPoints"], err); err != nil {
+			return err
+		}
+	}
+	for i := range actions {
+		actions[i].Region = region
+	}
+	return p.appearanceAnnotation(ctx, page, annotation, actions...)
 }
 
 // linkRegion 将PDF链接四边形映射为OFD动作区域，越出注解矩形时使用矩形

@@ -492,25 +492,6 @@ func resPathFast(r *Reader, rootDir, baseLoc string) string {
 	return r.ResPath(baseLoc)
 }
 
-// mergePageArea 用回退区域补齐页面区域的缺失字段
-// 入参: area 页面区域, fallback 默认区域
-// 返回: PageArea 合并后的页面区域
-func mergePageArea(area, fallback PageArea) PageArea {
-	if area.PhysicalBox == "" {
-		area.PhysicalBox = fallback.PhysicalBox
-	}
-	if area.ApplicationBox == "" {
-		area.ApplicationBox = fallback.ApplicationBox
-	}
-	if area.ContentBox == "" {
-		area.ContentBox = fallback.ContentBox
-	}
-	if area.BleedBox == "" {
-		area.BleedBox = fallback.BleedBox
-	}
-	return area
-}
-
 // OFD 返回包入口OFD.xml的只读副本，切片已克隆避免篡改内部状态
 // 返回: OFD 入口结构副本
 func (r *Reader) OFD() OFD {
@@ -879,8 +860,12 @@ func (r *Reader) PageAreasContext(ctx context.Context, pages []Page) ([]PageArea
 				store.mu.RLock()
 			}
 		}
+		if content.Area != (PageArea{}) {
+			areas[i] = content.Area
+			continue
+		}
 		if !hasTemplates || len(content.Template) == 0 {
-			areas[i] = mergePageArea(content.Area, defaultArea)
+			areas[i] = defaultArea
 			continue
 		}
 		if store != nil {
@@ -2711,34 +2696,14 @@ func (r *Reader) resolvePageArea(area PageArea, templates []Template) (PageArea,
 	return r.resolvePageAreaContext(context.Background(), area, templates)
 }
 
-// resolvePageAreaContext 按模板顺序逐字段解析页面区域的继承，读取过程中响应取消
+// resolvePageAreaContext 按页面、模板页和文档公共数据顺序解析页面区域继承，读取过程中响应取消
 // 入参: ctx 取消上下文, area 页面区域, templates 模板引用
 // 返回: PageArea 页面区域, error 读取或取消错误
 func (r *Reader) resolvePageAreaContext(ctx context.Context, area PageArea, templates []Template) (PageArea, error) {
 	if err := ctx.Err(); err != nil {
 		return PageArea{}, err
 	}
-	if r.doc == nil {
-		return area, nil
-	}
-	complete := func(a PageArea) bool {
-		return a.PhysicalBox != "" && a.ApplicationBox != "" && a.ContentBox != "" && a.BleedBox != ""
-	}
-	merge := func(dst *PageArea, src PageArea) {
-		if dst.PhysicalBox == "" {
-			dst.PhysicalBox = src.PhysicalBox
-		}
-		if dst.ApplicationBox == "" {
-			dst.ApplicationBox = src.ApplicationBox
-		}
-		if dst.ContentBox == "" {
-			dst.ContentBox = src.ContentBox
-		}
-		if dst.BleedBox == "" {
-			dst.BleedBox = src.BleedBox
-		}
-	}
-	if complete(area) {
+	if area != (PageArea{}) || r.doc == nil {
 		return area, nil
 	}
 	for _, ref := range templates {
@@ -2753,15 +2718,13 @@ func (r *Reader) resolvePageAreaContext(ctx context.Context, area PageArea, temp
 			if err != nil {
 				return PageArea{}, err
 			}
-			merge(&area, content.Area)
-			if complete(area) {
-				return area, nil
+			if content.Area != (PageArea{}) {
+				return content.Area, nil
 			}
 			break
 		}
 	}
-	merge(&area, r.doc.CommonData.PageArea)
-	return area, nil
+	return r.doc.CommonData.PageArea, nil
 }
 
 // readDocumentPartContext 读取并解析文档关联文件，传递取消信号到文件读取和XML解码

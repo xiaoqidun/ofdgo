@@ -93,20 +93,23 @@ type pdfFormCache struct {
 	buffer  bytes.Buffer
 }
 
-// formIdentity 生成表单唯一标识，优先采用间接引用以跨工作视图共享
+// formIdentity 生成表单唯一标识，存在引用文档时保留流指针避免对象编号碰撞
 // 入参: ref 表单间接引用, stream 表单流指针
 // 返回: pdfFormIdentity 表单标识
-func formIdentity(ref pdfgo.Reference, stream *pdfgo.Stream) pdfFormIdentity {
-	if ref != (pdfgo.Reference{}) {
+func (p *pdfImporter) formIdentity(ref pdfgo.Reference, stream *pdfgo.Stream) pdfFormIdentity {
+	if !p.hasReferenceDocuments() && ref != (pdfgo.Reference{}) {
 		return pdfFormIdentity{ref: ref}
 	}
-	return pdfFormIdentity{stream: stream}
+	if stream != nil {
+		return pdfFormIdentity{ref: ref, stream: stream}
+	}
+	return pdfFormIdentity{ref: ref}
 }
 
 // countLocalForms 统计当前页所有普通表单及透明组表单的引用次数
 // 入参: nodes 页面原始图元切片
 // 返回: map[pdfFormIdentity]int 页内表单出现频次
-func countLocalForms(nodes []pdfCompositeNode) map[pdfFormIdentity]int {
+func (p *pdfImporter) countLocalForms(nodes []pdfCompositeNode) map[pdfFormIdentity]int {
 	var counts map[pdfFormIdentity]int
 	add := func(ref pdfgo.Reference, stream *pdfgo.Stream) {
 		if ref == (pdfgo.Reference{}) && stream == nil {
@@ -115,7 +118,7 @@ func countLocalForms(nodes []pdfCompositeNode) map[pdfFormIdentity]int {
 		if counts == nil {
 			counts = make(map[pdfFormIdentity]int)
 		}
-		counts[formIdentity(ref, stream)]++
+		counts[p.formIdentity(ref, stream)]++
 	}
 	var visit func([]pdfCompositeNode)
 	visit = func(list []pdfCompositeNode) {
@@ -744,7 +747,7 @@ func (c *pdfFormCache) reset() {
 // 返回: int 估算总引用次数
 func (p *pdfImporter) formUseCount(ref pdfgo.Reference, stream *pdfgo.Stream) int {
 	total := 0
-	if ref != (pdfgo.Reference{}) {
+	if !p.hasReferenceDocuments() && ref != (pdfgo.Reference{}) {
 		if p.formRefCounts != nil {
 			total = p.formRefCounts[ref]
 		}
@@ -758,7 +761,7 @@ func (p *pdfImporter) formUseCount(ref pdfgo.Reference, stream *pdfgo.Stream) in
 		}
 	}
 	if p.localFormCounts != nil {
-		local := p.localFormCounts[formIdentity(ref, stream)]
+		local := p.localFormCounts[p.formIdentity(ref, stream)]
 		if local > total {
 			total = local
 		} else if local > 1 {
@@ -775,7 +778,7 @@ func (p *pdfImporter) recordPageForms(counts map[pdfFormIdentity]int) {
 		return
 	}
 	for id := range counts {
-		if id.ref == (pdfgo.Reference{}) {
+		if id.ref == (pdfgo.Reference{}) || id.stream != nil {
 			continue
 		}
 		if p.pageSeenForms == nil {
@@ -1255,6 +1258,10 @@ func (p *pdfImporter) compositeIsolatedGroupRaster(node pdfCompositeNode) (bool,
 	if effectiveDPI <= 0 {
 		return false, nil
 	}
+	w, h, err := (&RasterPage{Width: uWidth, Height: uHeight, DPI: effectiveDPI}).PixelSize()
+	if err != nil || w > 4096 || h > 4096 || int64(w)*int64(h) > 16<<20 {
+		return false, nil
+	}
 	space := p.compositeSpace
 	if g.ColorSpace != nil {
 		space = g.ColorSpace
@@ -1273,7 +1280,7 @@ func (p *pdfImporter) compositeIsolatedGroupRaster(node pdfCompositeNode) (bool,
 		space:         spaceName,
 		contentDigest: isolatedGroupContentDigest(strippedChildren, formToLocal, space),
 	}
-	if g.Ref != (pdfgo.Reference{}) {
+	if !p.hasReferenceDocuments() && g.Ref != (pdfgo.Reference{}) {
 		cacheKey.stream = nil
 	}
 	cached, found := p.isolatedGroupImages[cacheKey]
@@ -1284,6 +1291,7 @@ func (p *pdfImporter) compositeIsolatedGroupRaster(node pdfCompositeNode) (bool,
 		savedMatrix, savedW, savedH, savedDPI := p.matrix, p.pageWidth, p.pageHeight, p.rasterDPI
 		savedCache := p.compositeCache
 		savedClipTexts := p.clipTexts
+		savedImageObjects := p.report.ImageObjects
 		p.objects = nil
 		p.matrix, p.pageWidth, p.pageHeight, p.rasterDPI = formToLocal, uWidth, uHeight, effectiveDPI
 		p.compositeCache = nil
@@ -1294,6 +1302,7 @@ func (p *pdfImporter) compositeIsolatedGroupRaster(node pdfCompositeNode) (bool,
 		p.matrix, p.pageWidth, p.pageHeight, p.rasterDPI = savedMatrix, savedW, savedH, savedDPI
 		p.compositeCache = savedCache
 		p.clipTexts = savedClipTexts
+		p.report.ImageObjects = savedImageObjects
 		if err != nil {
 			return false, err
 		}

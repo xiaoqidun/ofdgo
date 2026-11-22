@@ -48,6 +48,25 @@ func pdfAnnotationType(subtype pdfgo.Name) string {
 	return ""
 }
 
+// recoverAnnotationObject 在非严格模式下保留或告警跳过故障注解，不吞掉取消与底层读取错误
+// 入参: ctx 取消上下文, name 来源字段, object 原始对象, cause 故障原因
+// 返回: error 严格模式、取消或不可恢复错误
+func (p *pdfImporter) recoverAnnotationObject(ctx context.Context, name string, object pdfgo.Object, cause error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.warning == nil || !pdfAuxiliaryError(cause) {
+		return cause
+	}
+	if err := p.recoverPDFObject(ctx, name, object, cause); err != nil {
+		if ctx.Err() != nil || !pdfAuxiliaryError(err) {
+			return err
+		}
+		p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF " + name + " skipped: " + cause.Error()})
+	}
+	return nil
+}
+
 // recoverAnnotationAuxiliary 仅在存在有效正常外观时保留辅助错误，外观仍由调用方实际绘制
 // 入参: ctx 取消上下文, annotation 原始注解, name 辅助字段名, object 原始对象, cause 辅助错误
 // 返回: error 严格模式、缺少有效外观或不可恢复错误
@@ -283,27 +302,49 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 	stamp.objects = nil
 	stamp.report = PDFImportReport{}
 	stamp.compositeCache = nil
+	stamp.compositeNodes = p.compositeNodes[:len(p.compositeNodes):len(p.compositeNodes)]
 	stamp.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
 	stamp.pageWidth, stamp.pageHeight = box.W, box.H
+	defer func() {
+		if stamp.references != nil && stamp.references != p.references {
+			if p.references == nil {
+				p.references = stamp.references
+			} else {
+				stamp.references.Close()
+			}
+		}
+		p.usedReferences = p.usedReferences || stamp.usedReferences
+	}()
+	paintFailed := false
 	if paint != nil {
 		if err := paint(&stamp); err != nil {
-			return err
+			if err := p.recoverAnnotationObject(ctx, "Annotation.Appearance", annotation.Dictionary, err); err != nil {
+				return err
+			}
+			paintFailed = true
 		}
 	} else {
 		nodes, err := p.collectCompositeNodes(func(visitor pdfgo.Visitor) error {
 			return p.reader.WalkAnnotationAppearance(ctx, page, annotation, visitor)
 		}, annotation.Subtype == "Widget")
-		if err != nil {
-			return err
+		stamp.references = p.references
+		stamp.halftoneWarnings = p.halftoneWarnings
+		stamp.usedReferences = p.usedReferences
+		if err == nil {
+			err = stamp.compositeObjects(nodes)
 		}
-		if err := stamp.compositeObjects(nodes); err != nil {
-			return err
+		if err != nil {
+			if err := p.recoverAnnotationObject(ctx, "Annotation.Appearance", annotation.Dictionary, err); err != nil {
+				return err
+			}
+			paintFailed = true
 		}
 	}
-	p.mergeAnnotationStamp(&stamp)
-	if flags&(2|32) == 0 && !invisible {
-		p.compositeNodes = stamp.compositeNodes
-		p.transferBackdrop = stamp.transferBackdrop
+	if paintFailed {
+		if len(actions) == 0 {
+			return nil
+		}
+		stamp.objects = nil
 	}
 	objects, err := stamp.objects.data(ctx)
 	if err != nil {
@@ -434,13 +475,27 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 		p.annotationBindings = append(p.annotationBindings, binding)
 	}
 	p.annotationData = append(p.annotationData, bytes.TrimPrefix(data, []byte(xml.Header))...)
+	if !paintFailed {
+		p.mergeAnnotationStamp(&stamp)
+		if flags&(2|32) == 0 && !invisible {
+			p.compositeNodes = stamp.compositeNodes
+			p.transferBackdrop = stamp.transferBackdrop
+			p.compositeBackdropLoaded = stamp.compositeBackdropLoaded
+			p.compositeBackdropNodes = stamp.compositeBackdropNodes
+		} else if !p.compositeBackdropLoaded && stamp.compositeBackdropLoaded {
+			p.compositeBackdropLoaded = true
+			p.compositeBackdropNodes = stamp.compositeBackdropNodes
+			if len(stamp.compositeBackdropNodes) != 0 {
+				combined := make([]pdfCompositeNode, 0, len(stamp.compositeBackdropNodes)+len(p.compositeNodes))
+				combined = append(combined, stamp.compositeBackdropNodes...)
+				combined = append(combined, p.compositeNodes...)
+				p.compositeNodes = combined
+			}
+		}
+	}
 	if len(actions) != 0 && annotation.Subtype == "Link" || len(clicks) != 0 {
 		p.report.Links++
 	}
-	p.report.TextObjects += stamp.report.TextObjects
-	p.report.PathObjects += stamp.report.PathObjects
-	p.report.ImageObjects += stamp.report.ImageObjects
-	p.report.Warnings = append(p.report.Warnings, stamp.report.Warnings...)
 	return nil
 }
 
@@ -488,8 +543,17 @@ func (p *pdfImporter) formWidget(ctx context.Context, page *pdfgo.Page, annotati
 		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "hidden PDF form field not transferred"})
 		return nil
 	}
-	if annotation.Dictionary["OC"] != nil {
-		return &pdfgo.UnsupportedError{Feature: "widget viewing behavior"}
+	if oc := annotation.Dictionary["OC"]; oc != nil {
+		optional, err := p.reader.Resolve(oc)
+		if err != nil {
+			if err := p.recoverPDFObject(ctx, "Annotation.OC", oc, err); err != nil {
+				return err
+			}
+			annotation.Dictionary = maps.Clone(annotation.Dictionary)
+			delete(annotation.Dictionary, "OC")
+		} else if optional != nil {
+			return &pdfgo.UnsupportedError{Feature: "widget viewing behavior"}
+		}
 	}
 	if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
 		return err
@@ -596,7 +660,11 @@ func (p *pdfImporter) mergeAnnotationStamp(stamp *pdfImporter) {
 	if p.references == nil {
 		p.references = stamp.references
 	}
+	p.usedReferences = p.usedReferences || stamp.usedReferences
 	if p.halftoneWarnings == nil {
 		p.halftoneWarnings = stamp.halftoneWarnings
+	}
+	if p.isolatedGroupImages == nil {
+		p.isolatedGroupImages = stamp.isolatedGroupImages
 	}
 }

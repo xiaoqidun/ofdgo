@@ -542,7 +542,18 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	if embedded && imported.repairLimit != 0 {
 		for _, glyph := range mark.Glyphs {
 			if glyph.HasID && glyph.ID >= imported.repairLimit {
-				return &pdfgo.UnsupportedError{Feature: "embedded font glyph with missing side bearing"}
+				if p.warning == nil {
+					return &pdfgo.UnsupportedError{Feature: "embedded font glyph with missing side bearing"}
+				}
+				if p.fontWarnings == nil {
+					p.fontWarnings = make(map[string]bool)
+				}
+				msg := fmt.Sprintf("PDF embedded font %s uses glyph with reconstructed side bearing", font.Name)
+				if !p.fontWarnings[msg] {
+					p.fontWarnings[msg] = true
+					p.warning(pdfgo.Diagnostic{Message: msg})
+				}
+				break
 			}
 		}
 	}

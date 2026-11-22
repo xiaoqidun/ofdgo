@@ -58,7 +58,10 @@ func (p *pdfImporter) screenAnnotation(ctx context.Context, page *pdfgo.Page, an
 	delete(appearance.Dictionary, "A")
 	additional, err := p.reader.Resolve(annotation.Dictionary["AA"])
 	if err != nil {
-		return err
+		if err := p.recoverPDFObject(ctx, "Annotation.AA", annotation.Dictionary["AA"], err); err != nil {
+			return err
+		}
+		delete(appearance.Dictionary, "AA")
 	}
 	if dict, ok := additional.(pdfgo.Dictionary); ok {
 		dict = maps.Clone(dict)
@@ -72,7 +75,11 @@ func (p *pdfImporter) screenAnnotation(ctx context.Context, page *pdfgo.Page, an
 	}
 	flags, err := p.reader.ReadAnnotationFlags(annotation)
 	if err != nil {
-		return err
+		if err := p.recoverPDFObject(ctx, "Annotation.F", annotation.Dictionary["F"], err); err != nil {
+			return err
+		}
+		delete(appearance.Dictionary, "F")
+		flags = 0
 	}
 	if flags&64 != 0 {
 		return p.appearanceAnnotation(ctx, page, appearance)
@@ -86,7 +93,10 @@ func (p *pdfImporter) screenAnnotation(ctx context.Context, page *pdfgo.Page, an
 		actions = append(actions, converted...)
 		return err
 	}); err != nil {
-		return err
+		if err := p.recoverPDFObject(ctx, "Annotation.Screen.A", annotation.Dictionary["A"], err); err != nil {
+			return err
+		}
+		actions = nil
 	}
 	return p.appearanceAnnotation(ctx, page, appearance, actions...)
 }
@@ -364,8 +374,20 @@ func (p *pdfImporter) renditionResources(screen pdfgo.Reference, strict bool) ([
 // 返回: error 动作结构、引用或取消错误
 func (p *pdfImporter) collectRenditions() error {
 	seen := make(map[pdfRenditionAssignment]bool)
+	ignore := func(err error) error {
+		if err == nil {
+			return nil
+		}
+		if ctxErr := p.ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if p.warning != nil && pdfAuxiliaryError(err) {
+			return nil
+		}
+		return err
+	}
 	collect := func(object pdfgo.Object) error {
-		return p.reader.WalkActions(p.ctx, object, func(info pdfgo.ActionInfo) error {
+		err := p.reader.WalkActions(p.ctx, object, func(info pdfgo.ActionInfo) error {
 			if info.Type != "Rendition" {
 				return nil
 			}
@@ -395,10 +417,14 @@ func (p *pdfImporter) collectRenditions() error {
 			}
 			return nil
 		})
+		return ignore(err)
 	}
 	opened, err := p.reader.ReadOpenAction(p.ctx)
 	if err != nil && !errors.Is(err, pdfgo.ErrInvalidDestination) {
-		return err
+		if err := ignore(err); err != nil {
+			return err
+		}
+		opened = pdfgo.OpenAction{}
 	}
 	if opened.Action != nil {
 		if err := collect(opened.Action); err != nil {
@@ -408,12 +434,17 @@ func (p *pdfImporter) collectRenditions() error {
 	if err := p.reader.WalkOutlines(p.ctx, func(_ int, item pdfgo.OutlineItem) error {
 		return collect(item.Action)
 	}); err != nil {
-		return err
+		if err := ignore(err); err != nil {
+			return err
+		}
 	}
 	for _, page := range p.pageOrder {
 		triggers, err := p.reader.ReadPageTriggers(p.ctx, page)
 		if err != nil {
-			return err
+			if err := ignore(err); err != nil {
+				return err
+			}
+			triggers = nil
 		}
 		for _, trigger := range triggers {
 			if trigger.Event == "O" {
@@ -424,12 +455,18 @@ func (p *pdfImporter) collectRenditions() error {
 		}
 		annotations, err := page.AnnotationsContext(p.ctx)
 		if err != nil {
-			return err
+			if err := ignore(err); err != nil {
+				return err
+			}
+			continue
 		}
 		for _, annotation := range annotations {
 			flags, err := p.reader.ReadAnnotationFlags(annotation)
 			if err != nil {
-				return err
+				if err := ignore(err); err != nil {
+					return err
+				}
+				continue
 			}
 			if flags&64 == 0 && (annotation.Subtype == "Screen" || annotation.Subtype == "Link") {
 				if err := collect(annotation.Dictionary["A"]); err != nil {
@@ -438,7 +475,10 @@ func (p *pdfImporter) collectRenditions() error {
 			}
 			triggers, err := p.reader.ReadAnnotationTriggers(p.ctx, annotation)
 			if err != nil {
-				return err
+				if err := ignore(err); err != nil {
+					return err
+				}
+				continue
 			}
 			for _, trigger := range triggers {
 				if trigger.Event == "PO" || trigger.Event == "U" && flags&64 == 0 && annotation.Subtype != "Widget" {

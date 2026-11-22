@@ -3239,6 +3239,7 @@ function attachDocumentTab(tab) {
 	el.attachmentDialog.attachmentEdit = tab.attachmentEdit ? {...tab.attachmentEdit, openSeq: state.openSeq} : null;
 	el.pageFrame.style.visibility = "";
 	el.svgHost.replaceChildren();
+	pageView.resetViewState();
 	el.pageList.replaceChildren();
 	el.outlineList.replaceChildren();
 	annotationList.set(null);
@@ -7215,6 +7216,7 @@ async function refreshFontPreview(fontsChanged, tab = documentTab()) {
 	if (!isForegroundDocument(tab)) { if (!tab.closed) tab.configurePending = true; return; }
 	const state = tab.state;
 	state.fontRenderPending = false;
+	if (state.pageWindow) pageView.syncCurrentPageFromScroll();
 	await openDocument({
 		pageIndex: state.pageIndex,
 		fitMode: state.fitMode,
@@ -7726,6 +7728,14 @@ async function openDocument(options = {}) {
 			placeholder.textContent = "正在加载页面";
 			el.pageList.replaceChildren(placeholder);
 		}
+		if (options.resetScroll) {
+			el.viewerPanel.scrollLeft = 0;
+			el.viewerPanel.scrollTop = 0;
+			el.navigationContent.scrollLeft = 0;
+			el.navigationContent.scrollTop = 0;
+			el.metaPanel.scrollLeft = 0;
+			el.metaPanel.scrollTop = 0;
+		}
 		const hideForOpenAction = initialActions && doc.hasOpenAction === true;
 		pageView.renderPageFlow();
 		el.pageFrame.style.visibility = hideForOpenAction ? "hidden" : "";
@@ -7735,25 +7745,24 @@ async function openDocument(options = {}) {
 			}
 			pageView.releasePageResources();
 		}
-		if (options.resetScroll) {
-			el.viewerPanel.scrollLeft = 0;
-			el.viewerPanel.scrollTop = 0;
-			el.navigationContent.scrollLeft = 0;
-			el.navigationContent.scrollTop = 0;
-			el.metaPanel.scrollLeft = 0;
-			el.metaPanel.scrollTop = 0;
-		}
 		pageView.applyFit(false);
-		if (options.keepPreview) {
-			if (options.previewAnchor) {
-				pageView.restoreScaleAnchor(options.previewAnchor);
-			} else if (options.previewScroll) {
-				Object.assign(el.viewerPanel, options.previewScroll);
-				if (previewPosition && state.pageWindow) pageView.syncPageWindow(state.pageWindow,
-					state.pageWindow.offsets[previewPosition.index] + previewPosition.offset);
-			} else {
-				pageView.scrollToPage(pageIndex);
+		if (options.previewAnchor) {
+			pageView.restoreScaleAnchor(options.previewAnchor);
+		} else if (options.previewScroll) {
+			Object.assign(el.viewerPanel, options.previewScroll);
+			if (previewPosition && state.pageWindow) {
+				const targetIndex = Math.max(0, Math.min(previewPosition.index, Math.max(pageCount - 1, 0)));
+				const targetTop = options.previewScroll.scrollTop <= 0 && pageView.pageRowIndex(state.pageWindow, targetIndex) === 0 && previewPosition.offset <= 0
+					? -pageView.windowInset(state.pageWindow)
+					: state.pageWindow.offsets[targetIndex] + previewPosition.offset;
+				pageView.syncPageWindow(state.pageWindow, targetTop);
+			} else if (state.pageWindow) {
+				pageView.syncPageWindow(state.pageWindow);
 			}
+		} else {
+			pageView.scrollToPage(pageIndex);
+		}
+		if (options.keepPreview) {
 			setStatus(pageStatus(pageIndex, pageCount));
 		}
 		if (openSeq !== state.openSeq) {

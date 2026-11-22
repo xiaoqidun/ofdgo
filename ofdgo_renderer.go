@@ -286,6 +286,7 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	if r.fontSourcesCache != nil && next.fontSourcesCache != nil {
 		next.fontSourcesCache.data = r.fontSourcesCache.data
 		next.fontSourcesCache.collections = r.fontSourcesCache.collections
+		next.fontSourcesCache.resolved = r.fontSourcesCache.resolved
 		next.fontSourcesCache.shared = r.fontSourcesCache.shared
 	}
 	maps.Copy(next.sharedBackendStates, r.sharedBackendStates)
@@ -577,6 +578,17 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 	renderer.decodeImages = r.decodeImages
 	renderer.pageContext = r.pageContext
 	renderer.transparentBackground = r.transparentBackground
+	return renderer
+}
+
+// syncChildRenderer 派生同协程同步子渲染器，复用父渲染器字体族缓存
+// 入参: reader 子阅读器
+// 返回: *Renderer 子渲染器
+func (r *Renderer) syncChildRenderer(reader *Reader) *Renderer {
+	renderer := r.childRenderer(reader)
+	if r.reader != nil {
+		renderer.canvasState().fontFamilyCache = r.canvasFontFamilies()
+	}
 	return renderer
 }
 

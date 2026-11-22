@@ -10,7 +10,7 @@ require (
 	github.com/xiaoqidun/guigo v0.0.0-20261122101148-86b7235063eb
 	github.com/xiaoqidun/j2kgo v1.0.6
 	github.com/xiaoqidun/jbig2 v1.1.12
-	github.com/xiaoqidun/pdfgo v0.0.0-20261122101234-36e7a20d25d9
+	github.com/xiaoqidun/pdfgo v0.0.0-20261122155252-b5eb2011287a
 	golang.org/x/image v0.48.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/text v0.44.0

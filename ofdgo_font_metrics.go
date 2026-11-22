@@ -15,8 +15,10 @@
 package ofdgo
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"slices"
 	"sync"
 
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
@@ -61,10 +63,16 @@ type sfntFontMetrics struct {
 	bounds   *sfntFontBounds
 }
 
-// sfntFontBounds 缓存已成功提取的字形边界，不保留轮廓或失败结果
+// sfntFontBounds 缓存已成功提取的字形边界与只读写出数据，不保留轮廓或失败结果
 type sfntFontBounds struct {
-	mu     sync.Mutex
-	values map[sfntGlyphSize]Box
+	mu        sync.Mutex
+	values    map[sfntGlyphSize]Box
+	writeOnce sync.Once
+	written   []byte
+	digest    [32]byte
+	faceOnce  sync.Once
+	face      FontFace
+	faceErr   error
 }
 
 // sfntGlyphSize 区分字形编号及精确毫米字号
@@ -173,10 +181,39 @@ func (SFNTBackend) SubsetSourceFont(data []byte, usage FontUsage) ([]byte, error
 	return basefont.SubsetSourceSFNT(data, u), nil
 }
 
+// cachedWrite 返回只读缓存的字体字节与摘要
+// 返回: []byte 只读字体数据, [32]byte 内容摘要
+func (f sfntFontMetrics) cachedWrite() ([]byte, [32]byte) {
+	f.bounds.writeOnce.Do(func() {
+		f.bounds.written = f.SFNT.Write()
+		f.bounds.digest = sha256.Sum256(f.bounds.written)
+	})
+	return f.bounds.written, f.bounds.digest
+}
+
 // Write 返回字体数据，不修改字体元信息
 // 返回: []byte 独立SFNT数据
 func (f sfntFontMetrics) Write() []byte {
-	return f.SFNT.Write()
+	data, _ := f.cachedWrite()
+	return slices.Clone(data)
+}
+
+// resolvedWrite 复用只读写出数据、摘要与首个字面信息
+// 返回: []byte 字体字节, [32]byte 内容摘要, FontFace 字面信息, error 解析错误
+func (f sfntFontMetrics) resolvedWrite() ([]byte, [32]byte, FontFace, error) {
+	data, digest := f.cachedWrite()
+	f.bounds.faceOnce.Do(func() {
+		faces, err := (FontFile{Data: data}).Faces()
+		if err != nil {
+			f.bounds.faceErr = err
+			return
+		}
+		f.bounds.face = faces[0]
+	})
+	if f.bounds.faceErr != nil {
+		return nil, [32]byte{}, FontFace{}, f.bounds.faceErr
+	}
+	return data, digest, f.bounds.face, nil
 }
 
 // GlyphOutline 返回基线原点、纵轴向下的字形轮廓
@@ -198,30 +235,26 @@ func (f sfntFontMetrics) GlyphOutline(glyph uint16, size float64) (GeometryPath,
 // 返回: Box 字形边界, error 字形解析错误
 func (f sfntFontMetrics) GlyphBounds(glyph uint16, size float64) (Box, error) {
 	key := sfntGlyphSize{glyph: glyph, size: size}
-	if f.bounds != nil {
-		f.bounds.mu.Lock()
-		value, ok := f.bounds.values[key]
-		f.bounds.mu.Unlock()
-		if ok {
-			return value, nil
-		}
+	f.bounds.mu.Lock()
+	value, ok := f.bounds.values[key]
+	f.bounds.mu.Unlock()
+	if ok {
+		return value, nil
 	}
 	outline, err := f.GlyphOutline(glyph, size)
 	if err != nil {
 		return Box{}, err
 	}
-	value, err := outline.Bounds()
+	value, err = outline.Bounds()
 	if err != nil {
 		return Box{}, err
 	}
-	if f.bounds != nil {
-		f.bounds.mu.Lock()
-		if f.bounds.values == nil || len(f.bounds.values) >= sfntGlyphBoundsLimit {
-			f.bounds.values = make(map[sfntGlyphSize]Box)
-		}
-		f.bounds.values[key] = value
-		f.bounds.mu.Unlock()
+	f.bounds.mu.Lock()
+	if f.bounds.values == nil || len(f.bounds.values) >= sfntGlyphBoundsLimit {
+		f.bounds.values = make(map[sfntGlyphSize]Box)
 	}
+	f.bounds.values[key] = value
+	f.bounds.mu.Unlock()
 	return value, nil
 }
 

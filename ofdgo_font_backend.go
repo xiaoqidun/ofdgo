@@ -114,6 +114,7 @@ type ResolvedFont struct {
 	Source string
 	Face   *FontFace
 	Exact  bool
+	digest [32]byte
 }
 
 // PreparedFont 保存绘制用字体及GID、CID到包装字符的映射，所有数据只读
@@ -122,7 +123,6 @@ type PreparedFont struct {
 	ResolvedFont
 	Glyphs     map[uint16]rune
 	CIDs       map[uint16]rune
-	digest     [32]byte
 	definition *Font
 }
 
@@ -266,6 +266,7 @@ func (r *Renderer) resetFontCache() {
 	if r.fontSourcesCache != nil {
 		r.fontSourcesCache.data.clear()
 		r.fontSourcesCache.collections.clear()
+		r.fontSourcesCache.resolved.clear()
 	}
 	r.fontSourcesCache = newFontSourceCache(r.reader.resources)
 	r.resetFontBackendCache()

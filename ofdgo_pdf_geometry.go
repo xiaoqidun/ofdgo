@@ -593,9 +593,19 @@ func (p *pdfImporter) sharedClipObjects(objects []GraphicObject) ([]GraphicObjec
 		for index := range members {
 			*editorObjectClips(&members[index]) = nil
 		}
+		var saved []GraphicObject
+		if p.recordForms {
+			saved = cloneEditorData(members)
+		}
 		id, err := p.objectValidation().addOwnedVector(p.ctx, members, p.pageWidth, p.pageHeight)
 		if err != nil {
 			return nil, err
+		}
+		if p.recordForms {
+			if p.formRecords == nil {
+				p.formRecords = make(map[string]pdfFormRecord)
+			}
+			p.formRecords[id] = pdfFormRecord{objects: saved, width: p.pageWidth, height: p.pageHeight}
 		}
 		mapped.recordOrigin(len(output), p.objects.origin(start))
 		output = append(output, GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: CompositeGraphicUnit{

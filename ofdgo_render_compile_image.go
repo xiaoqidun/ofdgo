@@ -176,7 +176,11 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 		return err
 	}
 	if stamp.Type == "ofd" {
-		reader, err := NewReader(&Input{reader: bytes.NewReader(stamp.Data), size: int64(len(stamp.Data))})
+		var opts []ReaderOption
+		if c.renderer.reader != nil && c.renderer.reader.resources != nil {
+			opts = append(opts, WithResources(c.renderer.reader.resources))
+		}
+		reader, err := NewReader(&Input{reader: bytes.NewReader(stamp.Data), size: int64(len(stamp.Data))}, opts...)
 		if err != nil {
 			return err
 		}
@@ -205,7 +209,7 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 				return err
 			}
 		}
-		renderer := c.renderer.childRenderer(reader)
+		renderer := c.renderer.syncChildRenderer(reader)
 		renderer.transparentBackground = true
 		for _, reference := range document.Pages.Page {
 			content, err := reader.PageContentContext(ctx, reference)

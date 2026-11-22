@@ -190,7 +190,7 @@ func (r *Renderer) loadStampOFD(ctx context.Context, data []byte) (*cachedStampS
 	if forkErr != nil {
 		return nil, forkErr
 	}
-	child := r.childRenderer(forkReader)
+	child := r.syncChildRenderer(forkReader)
 	child.transparentBackground = true
 	session := &cachedStampSession{renderer: child, pages: shared.pages, boxes: shared.boxes}
 	state.stampSessions[digest] = session

@@ -273,8 +273,9 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	if p.imageWorkers > 0 && source.Workers == 0 {
 		source.Workers = p.imageWorkers
 	}
+	allowRefKey := !p.hasReferenceDocuments()
 	key := pdfImageKey{stream: source.Stream, intent: source.Intent}
-	if p.resolveFile == nil && p.resolveReference == nil && source.Stream != nil && source.Stream.Reference != (pdfgo.Reference{}) {
+	if allowRefKey && source.Stream != nil && source.Stream.Reference != (pdfgo.Reference{}) {
 		key.ref = source.Stream.Reference
 		key.stream = nil
 	}
@@ -338,7 +339,7 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 		optimized := false
 		var sharedEntry *pdfSharedImageEntry
 		sharedOwner := false
-		if p.sharedImages != nil && key.process == "" && source.Stream != nil {
+		if allowRefKey && p.sharedImages != nil && key.process == "" && key.ref != (pdfgo.Reference{}) {
 			sharedEntry, sharedOwner = p.sharedImages.acquire(key, source.ColorSpace)
 			if !sharedOwner {
 				select {

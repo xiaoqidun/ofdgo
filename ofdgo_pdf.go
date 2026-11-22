@@ -83,18 +83,19 @@ type PDFImportReport struct {
 // 页面阅读快照独立于后续转换，Finish完成全局结构后交付独立编辑文档
 // 转换失败后可用Reset重建，输入及回调在会话存续期间须保持有效
 type PDFImport struct {
-	input        *Input
-	importer     *pdfImporter
-	options      PDFImportOptions
-	pages        []PageContent
-	ready        []bool
-	dupTemplates map[int]string
-	previews     *renderCache[string, []byte]
-	syncMu       *sync.RWMutex
-	live         *pdfLiveReader
-	targetSync   *pdfLiveReader
-	err          error
-	finished     bool
+	input             *Input
+	importer          *pdfImporter
+	options           PDFImportOptions
+	pages             []PageContent
+	ready             []bool
+	dupTemplates      map[int]string
+	pageCompositeMeta map[int]pdfPageCompositeMeta
+	previews          *renderCache[string, []byte]
+	syncMu            *sync.RWMutex
+	live              *pdfLiveReader
+	targetSync        *pdfLiveReader
+	err               error
+	finished          bool
 }
 
 // pdfLiveReader 维护渐进PDF转换的常驻增量阅读器状态，采用写时复制兼容并发只读视图
@@ -118,78 +119,82 @@ type pdfImportInput struct {
 
 // pdfImporter 保存单次转换的对象与资源状态
 type pdfImporter struct {
-	resources           *Resources
-	ctx                 context.Context
-	reader              *pdfgo.Reader
-	editor              *Editor
-	renderer            *Renderer
-	report              PDFImportReport
-	matrix              pdfgo.Matrix
-	page                int
-	pageActionPage      int
-	fontIDs             map[*pdfgo.Font]string
-	fonts               map[*pdfgo.Font]*pdfImportedFont
-	fontPrograms        map[pdfFontProgramKey]*pdfImportedFont
-	symbolFonts         map[*pdfgo.Font]*pdfImportedFont
-	fontWarnings        map[string]bool
-	clipTexts           map[*pdfgo.TextClip][]TextObject
-	textOrigins         map[*pdfgo.ReplacementText]pdfObjectOrigin
-	clipPaths           *renderCache[[32]byte, pdfClipPath]
-	cmykSpace           string
-	rgbSpace            string
-	iccSpaces           map[pdfICCKey]string
-	mergedColorSpaces   map[[32]byte]string
-	pageBodyCounts      map[int][3]int
-	objects             *pdfObjectBuffer
-	structureBindings   *pdfStructureBindings
-	annotationBindings  []pdfStructureObjectBinding
-	formResources       *pdfFormCache
-	validation          *editorValidation
-	pages               map[pdfgo.Reference]*pdfgo.Page
-	pageOrder           []*pdfgo.Page
-	pageIDs             map[pdfgo.Reference]string
-	pageIndexes         map[pdfgo.Reference]int
-	destinationBoxes    map[pdfgo.Reference]Box
-	imageIDs            map[pdfImageKey][]pdfImageResource
-	imageContents       *renderCache[pdfImageContentKey, pdfImageContent]
-	attachmentIDs       map[pdfAttachmentKey]string
-	modelAttachments    map[*pdfgo.Stream]string
-	mediaResources      map[pdfMediaFileKey]pdfMediaResource
-	mediaInstances      map[pdfMediaInstanceKey]pdfMediaResource
-	movieBounds         map[*Movie]Box
-	renditions          *pdfRenditionImport
-	maskClips           map[*pdfgo.SoftMask]pdfgo.Path
-	pageBox             pdfgo.Rectangle
-	pageWidth           float64
-	pageHeight          float64
-	warning             func(pdfgo.Diagnostic)
-	rasterDPI           float64
-	rasterWarned        bool
-	compositeCache      *pdfCompositeCache
-	compositeNodes      []pdfCompositeNode
-	compositeSpace      *pdfgo.ColorSpace
-	patternCells        *renderCache[pdfPatternCellKey, pdfPatternCell]
-	patternOrigins      map[*Pattern]pdfObjectOrigin
-	annotationData      []byte
-	resolveFile         pdfgo.FileResolver
-	resolveReference    pdfgo.ReferenceResolver
-	references          *codecpdf.ReferenceCache
-	halftoneWarnings    map[*pdfgo.Halftone]bool
-	halftones           map[string]*pdfgo.Halftone
-	transferBackdrop    bool
-	transferModel       pdfgo.Name
-	compression         CompressionOptions
-	imageWorkers        int
-	imageScaleBoost     float64
-	sharedImages        *pdfSharedImageCache
-	formRefCounts       map[pdfgo.Reference]int
-	seenFormPages       map[pdfgo.Reference]int
-	pageSeenForms       map[pdfgo.Reference]bool
-	localFormCounts     map[pdfFormIdentity]int
-	neighborFormRefs    map[pdfgo.Reference]bool
-	recordForms         bool
-	formRecords         map[string]pdfFormRecord
-	isolatedGroupImages map[pdfIsolatedGroupKey]pdfIsolatedGroupImage
+	resources               *Resources
+	ctx                     context.Context
+	reader                  *pdfgo.Reader
+	editor                  *Editor
+	renderer                *Renderer
+	report                  PDFImportReport
+	matrix                  pdfgo.Matrix
+	page                    int
+	pageActionPage          int
+	fontIDs                 map[*pdfgo.Font]string
+	fonts                   map[*pdfgo.Font]*pdfImportedFont
+	fontPrograms            map[pdfFontProgramKey]*pdfImportedFont
+	symbolFonts             map[*pdfgo.Font]*pdfImportedFont
+	fontWarnings            map[string]bool
+	clipTexts               map[*pdfgo.TextClip][]TextObject
+	textOrigins             map[*pdfgo.ReplacementText]pdfObjectOrigin
+	clipPaths               *renderCache[[32]byte, pdfClipPath]
+	cmykSpace               string
+	rgbSpace                string
+	iccSpaces               map[pdfICCKey]string
+	mergedColorSpaces       map[[32]byte]string
+	pageBodyCounts          map[int][3]int
+	objects                 *pdfObjectBuffer
+	structureBindings       *pdfStructureBindings
+	annotationBindings      []pdfStructureObjectBinding
+	formResources           *pdfFormCache
+	validation              *editorValidation
+	pages                   map[pdfgo.Reference]*pdfgo.Page
+	pageOrder               []*pdfgo.Page
+	pageIDs                 map[pdfgo.Reference]string
+	pageIndexes             map[pdfgo.Reference]int
+	destinationBoxes        map[pdfgo.Reference]Box
+	imageIDs                map[pdfImageKey][]pdfImageResource
+	imageContents           *renderCache[pdfImageContentKey, pdfImageContent]
+	attachmentIDs           map[pdfAttachmentKey]string
+	modelAttachments        map[*pdfgo.Stream]string
+	mediaResources          map[pdfMediaFileKey]pdfMediaResource
+	mediaInstances          map[pdfMediaInstanceKey]pdfMediaResource
+	movieBounds             map[*Movie]Box
+	renditions              *pdfRenditionImport
+	maskClips               map[*pdfgo.SoftMask]pdfgo.Path
+	pageBox                 pdfgo.Rectangle
+	pageWidth               float64
+	pageHeight              float64
+	warning                 func(pdfgo.Diagnostic)
+	rasterDPI               float64
+	rasterWarned            bool
+	compositeCache          *pdfCompositeCache
+	compositeNodes          []pdfCompositeNode
+	compositeSpace          *pdfgo.ColorSpace
+	compositeBackdropPage   *pdfgo.Page
+	compositeBackdropLoaded bool
+	compositeBackdropNodes  []pdfCompositeNode
+	patternCells            *renderCache[pdfPatternCellKey, pdfPatternCell]
+	patternOrigins          map[*Pattern]pdfObjectOrigin
+	annotationData          []byte
+	resolveFile             pdfgo.FileResolver
+	resolveReference        pdfgo.ReferenceResolver
+	references              *codecpdf.ReferenceCache
+	usedReferences          bool
+	halftoneWarnings        map[*pdfgo.Halftone]bool
+	halftones               map[string]*pdfgo.Halftone
+	transferBackdrop        bool
+	transferModel           pdfgo.Name
+	compression             CompressionOptions
+	imageWorkers            int
+	imageScaleBoost         float64
+	sharedImages            *pdfSharedImageCache
+	formRefCounts           map[pdfgo.Reference]int
+	seenFormPages           map[pdfgo.Reference]int
+	pageSeenForms           map[pdfgo.Reference]bool
+	localFormCounts         map[pdfFormIdentity]int
+	neighborFormRefs        map[pdfgo.Reference]bool
+	recordForms             bool
+	formRecords             map[string]pdfFormRecord
+	isolatedGroupImages     map[pdfIsolatedGroupKey]pdfIsolatedGroupImage
 }
 
 // pdfObjectBuffer 分块收集导入对象，提交前只整理一次连续数据
@@ -224,21 +229,31 @@ type pdfWorkerInput struct {
 	ctx   context.Context
 }
 
+// pdfPageCompositeMeta 保存页面正文混合空间及设备传递状态，供并行提交与重复页复用
+type pdfPageCompositeMeta struct {
+	space            *pdfgo.ColorSpace
+	transferModel    pdfgo.Name
+	transferBackdrop bool
+}
+
 // pdfPageWorkResult 保存单个工作协程完成的页面正文转换及增量资源
 type pdfPageWorkResult struct {
-	pageIndex       int
-	workerSlot      int
-	objects         []GraphicObject
-	bindings        []pdfStructureBinding
-	observed        []*pdfgo.ContentSequence
-	addedResources  []editorResource
-	addedFonts      map[string]*FontResource
-	addedMetrics    map[string]FontMetrics
-	addedForms      map[string]pdfFormRecord
-	optimizedImages map[[32]byte]CompressionOptions
-	report          PDFImportReport
-	needsSerial     bool
-	err             error
+	pageIndex        int
+	workerSlot       int
+	objects          []GraphicObject
+	bindings         []pdfStructureBinding
+	observed         []*pdfgo.ContentSequence
+	addedResources   []editorResource
+	addedFonts       map[string]*FontResource
+	addedMetrics     map[string]FontMetrics
+	addedForms       map[string]pdfFormRecord
+	optimizedImages  map[[32]byte]CompressionOptions
+	compositeSpace   *pdfgo.ColorSpace
+	transferModel    pdfgo.Name
+	transferBackdrop bool
+	report           PDFImportReport
+	needsSerial      bool
+	err              error
 }
 
 // ConvertPDF 将PDF转换并写入OFD，转换阶段失败时不写入目标
@@ -591,11 +606,12 @@ func colorSpaceResourceDigest(space ColorSpace, profileData []byte) [32]byte {
 	return sum
 }
 
-// isPDFFontHintingWarning 判断诊断信息是否为需要文档级去重的字体提示指令告警
+// isPDFFontDedupWarning 判断诊断信息是否为需要文档级去重的字体告警
 // 入参: message 诊断消息
-// 返回: bool 是否为字体提示告警
-func isPDFFontHintingWarning(message string) bool {
-	return strings.HasPrefix(message, "PDF font ") && strings.HasSuffix(message, " has invalid hinting instructions; design outlines and original font retained")
+// 返回: bool 是否需要文档级去重
+func isPDFFontDedupWarning(message string) bool {
+	return strings.HasPrefix(message, "PDF font ") && strings.HasSuffix(message, " has invalid hinting instructions; design outlines and original font retained") ||
+		strings.HasPrefix(message, "PDF embedded font ") && strings.HasSuffix(message, " uses glyph with reconstructed side bearing")
 }
 
 // remapGraphicObjects 递归重映射图形对象中的字体、图像、颜色空间及复合图形资源标识
@@ -882,22 +898,7 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 			} else if importer.renditions != nil {
 				importer.renditions.media = savedRenditionMedia
 			}
-			importer.movieBounds = nil
-			importer.objects = nil
-			importer.annotationData = nil
-			importer.annotationBindings = nil
-			importer.compositeCache = nil
-			importer.compositeNodes = nil
-			importer.compositeSpace = nil
-			importer.maskClips = nil
-			importer.patternCells = nil
-			importer.patternOrigins = nil
-			importer.clipTexts = nil
-			importer.textOrigins = nil
-			importer.clipPaths = nil
-			importer.localFormCounts = nil
-			importer.neighborFormRefs = nil
-			importer.pageSeenForms = nil
+			importer.clearPageState()
 			importer.report = savedReport
 			importer.report.Warnings = savedReport.Warnings[:savedWarningsLen:savedWarningsLen]
 			if !hadBodyCounts {
@@ -911,32 +912,9 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 		}
 		p.err = err
 	}()
-	importer.ctx = importer.resources.context(ctx)
-	ctx = importer.ctx
-	importer.renderer.pageContext = ctx
+	ctx = importer.resources.context(ctx)
 	page := importer.pageOrder[index]
-	matrix, width, height := codecpdf.PageMatrix(page)
-	importer.matrix = matrix
-	importer.page = index
-	importer.rasterWarned = false
-	importer.pageBox = page.CropBox
-	importer.pageWidth = width
-	importer.pageHeight = height
-	importer.maskClips = make(map[*pdfgo.SoftMask]pdfgo.Path)
-	importer.compositeCache = nil
-	importer.compositeNodes = nil
-	importer.compositeSpace = nil
-	importer.patternCells = nil
-	importer.patternOrigins = nil
-	importer.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
-	importer.textOrigins = nil
-	importer.clipPaths = nil
-	importer.annotationData = nil
-	importer.annotationBindings = nil
-	importer.localFormCounts = nil
-	importer.neighborFormRefs = nil
-	importer.pageSeenForms = nil
-	importer.imageScaleBoost = 0
+	importer.beginPage(ctx, index, page)
 	if err := importer.pageOpenActions(ctx, page); err != nil {
 		return fmt.Errorf("import PDF page %d actions: %w", index+1, err)
 	}
@@ -944,6 +922,7 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 	if err := importer.compositePage(nil, func(visitor pdfgo.Visitor) error { return importer.reader.WalkPage(ctx, page, visitor) }); err != nil {
 		return fmt.Errorf("import PDF page %d: %w", index+1, err)
 	}
+	bodyMeta := pdfPageCompositeMeta{space: importer.compositeSpace, transferModel: importer.transferModel, transferBackdrop: importer.transferBackdrop}
 	if importer.pageBodyCounts == nil {
 		importer.pageBodyCounts = make(map[int][3]int)
 	}
@@ -971,6 +950,10 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 		}
 	}
 	importer.commitSeenForms(index)
+	if p.pageCompositeMeta == nil {
+		p.pageCompositeMeta = make(map[int]pdfPageCompositeMeta)
+	}
+	p.pageCompositeMeta[index] = bodyMeta
 	p.ready[index] = true
 	return nil
 }
@@ -1247,7 +1230,7 @@ func (p *PDFImport) Close() error {
 	p.importer.references.Close()
 	err := p.importer.reader.Close()
 	p.importer = nil
-	p.pages, p.ready, p.dupTemplates = nil, nil, nil
+	p.pages, p.ready, p.dupTemplates, p.pageCompositeMeta = nil, nil, nil, nil
 	p.previews.clear()
 	p.previews = nil
 	if p.syncMu != nil {
@@ -1699,6 +1682,74 @@ func (r *pdfImportInput) ReadAt(data []byte, offset int64) (int, error) {
 	return r.input.ReadAt(data, offset)
 }
 
+// beginPage 初始化当前页面的坐标变换及全部逐页临时状态
+// 入参: ctx 取消上下文, index 页面索引, page PDF页面
+func (p *pdfImporter) beginPage(ctx context.Context, index int, page *pdfgo.Page) {
+	p.ctx = ctx
+	p.renderer.pageContext = ctx
+	matrix, width, height := codecpdf.PageMatrix(page)
+	p.matrix = matrix
+	p.page = index
+	p.rasterWarned = false
+	p.pageBox = page.CropBox
+	p.pageWidth = width
+	p.pageHeight = height
+	p.objects = nil
+	p.maskClips = make(map[*pdfgo.SoftMask]pdfgo.Path)
+	p.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
+	p.compositeCache = nil
+	p.compositeNodes = nil
+	p.compositeSpace = nil
+	p.compositeBackdropPage = nil
+	p.compositeBackdropLoaded = false
+	p.compositeBackdropNodes = nil
+	p.transferModel = ""
+	p.transferBackdrop = false
+	p.patternCells = nil
+	p.patternOrigins = nil
+	p.textOrigins = nil
+	p.clipPaths = nil
+	p.localFormCounts = nil
+	p.neighborFormRefs = nil
+	p.pageSeenForms = nil
+	p.imageScaleBoost = 0
+	p.annotationData = nil
+	p.annotationBindings = nil
+	p.movieBounds = nil
+}
+
+// clearPageState 清空当前页面的临时状态，避免取消回滚后残留跨页数据
+func (p *pdfImporter) clearPageState() {
+	p.movieBounds = nil
+	p.objects = nil
+	p.annotationData = nil
+	p.annotationBindings = nil
+	p.compositeCache = nil
+	p.compositeNodes = nil
+	p.compositeSpace = nil
+	p.compositeBackdropPage = nil
+	p.compositeBackdropLoaded = false
+	p.compositeBackdropNodes = nil
+	p.transferModel = ""
+	p.transferBackdrop = false
+	p.maskClips = nil
+	p.patternCells = nil
+	p.patternOrigins = nil
+	p.clipTexts = nil
+	p.textOrigins = nil
+	p.clipPaths = nil
+	p.localFormCounts = nil
+	p.neighborFormRefs = nil
+	p.pageSeenForms = nil
+	p.imageScaleBoost = 0
+}
+
+// hasReferenceDocuments 判断当前导入器是否可能存在来自非主文档的引用对象
+// 返回: bool 是否使用外部或内嵌引用文档
+func (p *pdfImporter) hasReferenceDocuments() bool {
+	return p.resolveFile != nil || p.resolveReference != nil || p.usedReferences
+}
+
 // referencePage 衔接PDF访问器与当前导入会话的引用文档缓存
 // 入参: ctx 取消上下文, source 来源文档, reference 引用目标
 // 返回: *pdfgo.Page 目标页面，不可用时为空, error 取消或调用方解析错误
@@ -1706,7 +1757,11 @@ func (p *pdfImporter) referencePage(ctx context.Context, source *pdfgo.Reader, r
 	if p.references == nil {
 		p.references = &codecpdf.ReferenceCache{}
 	}
-	return p.references.Resolve(ctx, source, reference, p.resolveFile, p.resolveReference, p.warning)
+	page, err := p.references.Resolve(ctx, source, reference, p.resolveFile, p.resolveReference, p.warning)
+	if page != nil {
+		p.usedReferences = true
+	}
+	return page, err
 }
 
 // pageAnnotations 保留不可显示的源注解声明，其他注解仍按原顺序读取
@@ -1922,11 +1977,170 @@ func (p *pdfImporter) registerMergedForm(ctx context.Context, objects []GraphicO
 	return resource.id, nil
 }
 
+// hasDocumentStructure 判断源PDF文档目录是否声明了有效逻辑结构树
+// 返回: bool 文档是否存在逻辑结构树
+func (p *pdfImporter) hasDocumentStructure() bool {
+	if p.reader == nil {
+		return false
+	}
+	if p.structureBindings != nil && p.structureBindings.invalid[p.reader] {
+		return false
+	}
+	raw, err := p.pdfCatalogObject("StructTreeRoot")
+	if err != nil {
+		return true
+	}
+	if raw == nil {
+		return false
+	}
+	value, err := p.reader.Resolve(raw)
+	return err != nil || value != nil
+}
+
+// pageHasStructureMarks 检查结构绑定表中是否已记录指定页面的标记内容
+// 入参: pageRef 页面间接引用
+// 返回: bool 页面是否包含结构标记
+func (p *pdfImporter) pageHasStructureMarks(pageRef pdfgo.Reference) bool {
+	if p.structureBindings == nil || pageRef == (pdfgo.Reference{}) {
+		return false
+	}
+	for key := range p.structureBindings.marked {
+		if key.reader == p.reader && key.page == pageRef {
+			return true
+		}
+	}
+	return false
+}
+
+// resourcesHaveStructure 递归检查页面资源中的XObject、Pattern与软蒙版组是否携带结构绑定字段
+// 入参: ctx 取消上下文, resources 资源字典
+// 返回: bool 是否存在带StructParents或StructParent的资源流
+func (p *pdfImporter) resourcesHaveStructure(ctx context.Context, resources pdfgo.Dictionary) bool {
+	if len(resources) == 0 || p.reader == nil {
+		return false
+	}
+	seen := make(map[pdfgo.Reference]bool)
+	var inspect func(dict pdfgo.Dictionary, depth int) bool
+	inspectStream := func(entry pdfgo.Object, requireForm bool, depth int) bool {
+		if ctx.Err() != nil {
+			return true
+		}
+		if ref, ok := entry.(pdfgo.Reference); ok {
+			if seen[ref] {
+				return false
+			}
+			seen[ref] = true
+		}
+		resolved, err := p.reader.Resolve(entry)
+		if err != nil {
+			return true
+		}
+		stream, ok := resolved.(*pdfgo.Stream)
+		if !ok || stream == nil {
+			return false
+		}
+		if stream.Dictionary["StructParents"] != nil || stream.Dictionary["StructParent"] != nil {
+			return true
+		}
+		if requireForm {
+			subtype, err := p.reader.Resolve(stream.Dictionary["Subtype"])
+			if err != nil {
+				return true
+			}
+			if subtype != pdfgo.Name("Form") {
+				return false
+			}
+		}
+		resVal, err := p.reader.Resolve(stream.Dictionary["Resources"])
+		if err != nil {
+			return true
+		}
+		if resDict, ok := resVal.(pdfgo.Dictionary); ok && inspect(resDict, depth+1) {
+			return true
+		}
+		return false
+	}
+	inspect = func(dict pdfgo.Dictionary, depth int) bool {
+		if dict == nil || depth > 8 || ctx.Err() != nil {
+			return depth > 8 || ctx.Err() != nil
+		}
+		xobjVal, err := p.reader.Resolve(dict["XObject"])
+		if err != nil {
+			return true
+		}
+		if xobjs, ok := xobjVal.(pdfgo.Dictionary); ok {
+			for _, entry := range xobjs {
+				if inspectStream(entry, true, depth) {
+					return true
+				}
+			}
+		}
+		patVal, err := p.reader.Resolve(dict["Pattern"])
+		if err != nil {
+			return true
+		}
+		if pats, ok := patVal.(pdfgo.Dictionary); ok {
+			for _, entry := range pats {
+				if inspectStream(entry, false, depth) {
+					return true
+				}
+			}
+		}
+		gsVal, err := p.reader.Resolve(dict["ExtGState"])
+		if err != nil {
+			return true
+		}
+		if states, ok := gsVal.(pdfgo.Dictionary); ok {
+			for _, entry := range states {
+				if ctx.Err() != nil {
+					return true
+				}
+				if ref, ok := entry.(pdfgo.Reference); ok {
+					if seen[ref] {
+						continue
+					}
+					seen[ref] = true
+				}
+				resolved, err := p.reader.Resolve(entry)
+				if err != nil {
+					return true
+				}
+				gsDict, ok := resolved.(pdfgo.Dictionary)
+				if !ok || gsDict == nil {
+					continue
+				}
+				smaskObj := gsDict["SMask"]
+				if smaskObj == nil {
+					continue
+				}
+				if ref, ok := smaskObj.(pdfgo.Reference); ok {
+					if seen[ref] {
+						continue
+					}
+					seen[ref] = true
+				}
+				smaskVal, err := p.reader.Resolve(smaskObj)
+				if err != nil {
+					return true
+				}
+				if smaskDict, ok := smaskVal.(pdfgo.Dictionary); ok && smaskDict["G"] != nil && inspectStream(smaskDict["G"], false, depth) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return inspect(resources, 0)
+}
+
 // pageContentFingerprint 计算页面正文内容流、资源、尺寸及旋转的确定性指纹，含结构绑定或直接流时跳过复用
 // 入参: ctx 取消上下文, page PDF页面
 // 返回: [32]byte 内容指纹, bool 是否满足安全复用条件
 func (p *pdfImporter) pageContentFingerprint(ctx context.Context, page *pdfgo.Page) ([32]byte, bool) {
 	if page == nil || page.Dictionary["StructParents"] != nil || ctx.Err() != nil {
+		return [32]byte{}, false
+	}
+	if p.hasDocumentStructure() && (p.pageHasStructureMarks(page.Reference) || p.resourcesHaveStructure(ctx, page.Resources)) {
 		return [32]byte{}, false
 	}
 	h := sha256.New()
@@ -2454,6 +2668,12 @@ func (p *PDFImport) runPageWorker(ctx context.Context, slot int, jobs <-chan int
 	}
 	workerReader := mainImporter.reader.Fork(&pdfWorkerInput{input: p.input, ctx: ctx}, workerWarning, workerImporter.shapePDFText)
 	workerImporter.reader = workerReader
+	defer func() {
+		if workerImporter.references != nil {
+			workerImporter.references.Close()
+		}
+	}()
+	serialOnly := false
 	for pageIndex := range jobs {
 		res := pdfPageWorkResult{pageIndex: pageIndex, workerSlot: slot}
 		if err := ctx.Err(); err != nil {
@@ -2461,34 +2681,14 @@ func (p *PDFImport) runPageWorker(ctx context.Context, slot int, jobs <-chan int
 			results <- res
 			continue
 		}
-		if workerEditor.source != nil {
+		if workerEditor.source != nil || serialOnly {
 			res.needsSerial = true
 			results <- res
 			continue
 		}
 		mainPage := mainImporter.pageOrder[pageIndex]
 		page := workerReader.BindPage(mainPage)
-		matrix, width, height := codecpdf.PageMatrix(page)
-		workerImporter.ctx = ctx
-		workerRenderer.pageContext = ctx
-		workerImporter.matrix = matrix
-		workerImporter.page = pageIndex
-		workerImporter.rasterWarned = false
-		workerImporter.pageBox = page.CropBox
-		workerImporter.pageWidth = width
-		workerImporter.pageHeight = height
-		workerImporter.maskClips = make(map[*pdfgo.SoftMask]pdfgo.Path)
-		workerImporter.compositeCache = nil
-		workerImporter.compositeNodes = nil
-		workerImporter.compositeSpace = nil
-		workerImporter.patternCells = nil
-		workerImporter.patternOrigins = nil
-		workerImporter.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
-		workerImporter.textOrigins = nil
-		workerImporter.clipPaths = nil
-		workerImporter.objects = nil
-		workerImporter.localFormCounts = nil
-		workerImporter.imageScaleBoost = 0
+		workerImporter.beginPage(ctx, pageIndex, page)
 		workerImporter.report = PDFImportReport{}
 		if mainImporter.structureBindings != nil {
 			wb := &pdfStructureBindings{prepared: map[*pdfgo.Reader]bool{workerReader: true}}
@@ -2511,7 +2711,15 @@ func (p *PDFImport) runPageWorker(ctx context.Context, slot int, jobs <-chan int
 			results <- res
 			continue
 		}
-		if workerEditor.source != nil {
+		if workerEditor.source != nil || workerImporter.references != nil {
+			if workerImporter.references != nil {
+				workerImporter.references.Close()
+				workerImporter.references = nil
+			}
+			workerImporter.usedReferences = false
+			if workerEditor.source != nil || len(workerEditor.resources) > resStart {
+				serialOnly = true
+			}
 			res.needsSerial = true
 			results <- res
 			continue
@@ -2521,6 +2729,12 @@ func (p *PDFImport) runPageWorker(ctx context.Context, slot int, jobs <-chan int
 		if workerImporter.objects.len() != 0 {
 			var err error
 			objects, err = workerImporter.objects.data(ctx)
+			if err != nil {
+				res.err = fmt.Errorf("import PDF page %d: %w", pageIndex+1, err)
+				results <- res
+				continue
+			}
+			objects, err = workerImporter.sharedClipObjects(objects)
 			if err != nil {
 				res.err = fmt.Errorf("import PDF page %d: %w", pageIndex+1, err)
 				results <- res
@@ -2577,6 +2791,9 @@ func (p *PDFImport) runPageWorker(ctx context.Context, slot int, jobs <-chan int
 		res.objects = objects
 		res.bindings = bindings
 		res.observed = observed
+		res.compositeSpace = workerImporter.compositeSpace
+		res.transferModel = workerImporter.transferModel
+		res.transferBackdrop = workerImporter.transferBackdrop
 		res.report = workerImporter.report
 		results <- res
 	}
@@ -2635,8 +2852,7 @@ func (p *PDFImport) commitParallelPageResult(ctx context.Context, index int, res
 			} else if importer.renditions != nil {
 				importer.renditions.media = savedRenditionMedia
 			}
-			importer.annotationData = nil
-			importer.annotationBindings = nil
+			importer.clearPageState()
 			importer.report = savedReport
 			importer.report.Warnings = savedReport.Warnings[:savedWarningsLen:savedWarningsLen]
 			if !hadBodyCounts {
@@ -2648,19 +2864,13 @@ func (p *PDFImport) commitParallelPageResult(ctx context.Context, index int, res
 			p.ready[index] = false
 		}
 	}()
-	importer.ctx = importer.resources.context(ctx)
-	ctx = importer.ctx
-	importer.renderer.pageContext = ctx
+	ctx = importer.resources.context(ctx)
 	page := importer.pageOrder[index]
-	matrix, width, height := codecpdf.PageMatrix(page)
-	importer.matrix = matrix
-	importer.page = index
-	importer.rasterWarned = false
-	importer.pageBox = page.CropBox
-	importer.pageWidth = width
-	importer.pageHeight = height
-	importer.annotationData = nil
-	importer.annotationBindings = nil
+	importer.beginPage(ctx, index, page)
+	importer.compositeSpace = res.compositeSpace
+	importer.transferModel = res.transferModel
+	importer.transferBackdrop = res.transferBackdrop
+	importer.compositeBackdropPage = page
 	for _, resource := range res.addedResources {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -2726,18 +2936,14 @@ func (p *PDFImport) commitParallelPageResult(ctx context.Context, index int, res
 	}
 	if len(res.objects) != 0 {
 		remapGraphicObjects(res.objects, idMap)
-		objects, err := importer.sharedClipObjects(res.objects)
-		if err != nil {
-			return fmt.Errorf("import PDF page %d: %w", index+1, err)
-		}
-		if err := importer.objectValidation().appendOwnedObjects(ctx, index, objects); err != nil {
+		if err := importer.objectValidation().appendOwnedObjects(ctx, index, res.objects); err != nil {
 			return fmt.Errorf("import PDF page %d: %w", index+1, err)
 		}
 		if importer.structureBindings != nil {
 			for _, seq := range res.observed {
 				importer.structureBindings.observe(ctx, seq)
 			}
-			importer.structureBindings.append(importer.editor.pages[index].ID, objects, res.bindings)
+			importer.structureBindings.append(importer.editor.pages[index].ID, res.objects, res.bindings)
 		}
 	} else if importer.structureBindings != nil {
 		for _, seq := range res.observed {
@@ -2758,7 +2964,7 @@ func (p *PDFImport) commitParallelPageResult(ctx context.Context, index int, res
 	importer.report.PathObjects += res.report.PathObjects
 	importer.report.ImageObjects += res.report.ImageObjects
 	for _, w := range res.report.Warnings {
-		if isPDFFontHintingWarning(w.Message) {
+		if isPDFFontDedupWarning(w.Message) {
 			if importer.fontWarnings == nil {
 				importer.fontWarnings = make(map[string]bool)
 			}
@@ -2778,6 +2984,10 @@ func (p *PDFImport) commitParallelPageResult(ctx context.Context, index int, res
 			return err
 		}
 	}
+	if p.pageCompositeMeta == nil {
+		p.pageCompositeMeta = make(map[int]pdfPageCompositeMeta)
+	}
+	p.pageCompositeMeta[index] = pdfPageCompositeMeta{space: res.compositeSpace, transferModel: res.transferModel, transferBackdrop: res.transferBackdrop}
 	p.ready[index] = true
 	return nil
 }
@@ -2874,8 +3084,7 @@ func (p *PDFImport) convertDuplicatePage(ctx context.Context, index, leader int)
 			} else if importer.renditions != nil {
 				importer.renditions.media = savedRenditionMedia
 			}
-			importer.annotationData = nil
-			importer.annotationBindings = nil
+			importer.clearPageState()
 			importer.report = savedReport
 			importer.report.Warnings = savedReport.Warnings[:savedWarningsLen:savedWarningsLen]
 			if importer.structureBindings != nil {
@@ -2888,30 +3097,15 @@ func (p *PDFImport) convertDuplicatePage(ctx context.Context, index, leader int)
 		target := &importer.editor.pages[index]
 		target.Template = append(target.Template, Template{TemplateID: tplID, ZOrder: "Background"})
 	}
-	importer.ctx = importer.resources.context(ctx)
-	ctx = importer.ctx
-	importer.renderer.pageContext = ctx
+	ctx = importer.resources.context(ctx)
 	page := importer.pageOrder[index]
-	matrix, width, height := codecpdf.PageMatrix(page)
-	importer.matrix = matrix
-	importer.page = index
-	importer.rasterWarned = false
-	importer.pageBox = page.CropBox
-	importer.pageWidth = width
-	importer.pageHeight = height
-	importer.maskClips = make(map[*pdfgo.SoftMask]pdfgo.Path)
-	importer.compositeCache = nil
-	importer.compositeNodes = nil
-	importer.compositeSpace = nil
-	importer.patternCells = nil
-	importer.patternOrigins = nil
-	importer.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
-	importer.textOrigins = nil
-	importer.clipPaths = nil
-	importer.annotationData = nil
-	importer.annotationBindings = nil
-	importer.localFormCounts = nil
-	importer.imageScaleBoost = 0
+	importer.beginPage(ctx, index, page)
+	if meta, ok := p.pageCompositeMeta[leader]; ok {
+		importer.compositeSpace = meta.space
+		importer.transferModel = meta.transferModel
+		importer.transferBackdrop = meta.transferBackdrop
+	}
+	importer.compositeBackdropPage = page
 	if err := importer.pageOpenActions(ctx, page); err != nil {
 		return fmt.Errorf("import PDF page %d actions: %w", index+1, err)
 	}

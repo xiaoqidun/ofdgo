@@ -609,13 +609,27 @@ func (p *pdfImporter) compositeTextBounds(mark pdfgo.TextMark, stroke bool) Box 
 // 入参: walk 内容访问函数, widget 是否为表单外观
 // 返回: []pdfCompositeNode 原始图元, error 解析错误
 func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widget bool) ([]pdfCompositeNode, error) {
+	return p.collectNodes(walk, widget, false)
+}
+
+// collectNodes 按模式收集原始图元，背景按需收集模式跳过告警、结构观察及文本替换
+// 入参: walk 内容访问函数, widget 是否为表单外观, backdrop 是否仅用于背景合成
+// 返回: []pdfCompositeNode 原始图元, error 解析错误
+func (p *pdfImporter) collectNodes(walk func(pdfgo.Visitor) error, widget, backdrop bool) ([]pdfCompositeNode, error) {
 	active := make(map[*pdfgo.Font]map[string]bool)
 	var seenFonts map[*pdfgo.Font]bool
 	var externalNames map[string]bool
 	var embeddedFonts map[*pdfgo.Font]bool
 	var textMarks []pdfgo.TextMark
 	replacements := pdfTextReplacements{importer: p, widget: widget}
+	warning := p.warning
+	if backdrop {
+		warning = func(pdfgo.Diagnostic) {}
+	}
 	storeText := func(mark pdfgo.TextMark) *pdfgo.TextMark {
+		if backdrop {
+			mark.Replacement = nil
+		}
 		if len(textMarks) == cap(textMarks) {
 			textMarks = make([]pdfgo.TextMark, 0, min(64, max(8, cap(textMarks)*2)))
 		}
@@ -625,53 +639,59 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widg
 	var collect func(func(pdfgo.Visitor) error, *pdfgo.ReplacementText) ([]pdfCompositeNode, error)
 	collect = func(walk func(pdfgo.Visitor) error, replacement *pdfgo.ReplacementText) ([]pdfCompositeNode, error) {
 		var nodes []pdfCompositeNode
-		v := pdfgo.Visitor{Warning: p.warning, Reference: p.referencePage, Halftones: p.halftones}
-		v.MarkedContent = func(mark pdfgo.MarkedContentMark) error {
-			if mark.Replacement != nil {
-				if mark.Operator == "EMC" {
-					replacement = mark.Replacement.Parent
-				} else {
-					replacement = mark.Replacement
-					if !mark.Hidden {
-						span := replacements.span(replacement)
-						if replacement.Parent == nil {
-							span.offset = mark.Offset
+		v := pdfgo.Visitor{Warning: warning, Reference: p.referencePage, Halftones: p.halftones}
+		if !backdrop {
+			v.MarkedContent = func(mark pdfgo.MarkedContentMark) error {
+				if mark.Replacement != nil {
+					if mark.Operator == "EMC" {
+						replacement = mark.Replacement.Parent
+					} else {
+						replacement = mark.Replacement
+						if !mark.Hidden {
+							span := replacements.span(replacement)
+							if replacement.Parent == nil {
+								span.offset = mark.Offset
+							}
 						}
 					}
 				}
+				return replacements.markedContent(mark)
 			}
-			return replacements.markedContent(mark)
 		}
 		v.Path = func(mark pdfgo.PathMark) error {
-			replacements.block(replacement)
-			if err := p.halftone(mark.Style); err != nil {
-				return err
+			if !backdrop {
+				replacements.block(replacement)
+				if err := p.halftone(mark.Style); err != nil {
+					return err
+				}
 			}
 			nodes = append(nodes, pdfCompositeNode{path: &mark})
 			return nil
 		}
 		v.Text = func(mark pdfgo.TextMark) error {
-			replacements.span(mark.Replacement)
-			if mark.Font.Subtype != "Type3" && !seenFonts[mark.Font] {
-				if seenFonts == nil {
-					seenFonts = make(map[*pdfgo.Font]bool)
-				}
-				seenFonts[mark.Font] = true
-				if len(mark.Font.Program) == 0 {
-					if externalNames == nil {
-						externalNames = make(map[string]bool)
+			if !backdrop {
+				replacements.span(mark.Replacement)
+				if mark.Font.Subtype != "Type3" && !seenFonts[mark.Font] {
+					if seenFonts == nil {
+						seenFonts = make(map[*pdfgo.Font]bool)
 					}
-					name := codecpdf.EmbeddedFontName(mark.Font.Name)
-					if !externalNames[basefont.NormalizeName(name)] {
-						for _, candidate := range basefont.ExactCandidateNames(name) {
-							externalNames[basefont.NormalizeName(candidate)] = true
+					seenFonts[mark.Font] = true
+					if len(mark.Font.Program) == 0 {
+						if externalNames == nil {
+							externalNames = make(map[string]bool)
 						}
+						name := codecpdf.EmbeddedFontName(mark.Font.Name)
+						if !externalNames[basefont.NormalizeName(name)] {
+							for _, candidate := range basefont.ExactCandidateNames(name) {
+								externalNames[basefont.NormalizeName(candidate)] = true
+							}
+						}
+					} else {
+						if embeddedFonts == nil {
+							embeddedFonts = make(map[*pdfgo.Font]bool)
+						}
+						embeddedFonts[mark.Font] = true
 					}
-				} else {
-					if embeddedFonts == nil {
-						embeddedFonts = make(map[*pdfgo.Font]bool)
-					}
-					embeddedFonts[mark.Font] = true
 				}
 			}
 			text := &nodes
@@ -682,8 +702,10 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widg
 				text = &nodes[len(nodes)-1].children
 			}
 			if mark.Font.Subtype != "Type3" {
-				if err := p.halftone(mark.Style); err != nil {
-					return err
+				if !backdrop {
+					if err := p.halftone(mark.Style); err != nil {
+						return err
+					}
 				}
 				if len(mark.Glyphs) > 1 && (mark.Object != nil && !mark.Object.Knockout || mark.Style.AlphaIsShape || mark.Style.Fill.Alpha != 1 || mark.Style.Stroke.Alpha != 1 || mark.Style.SoftMask != nil || !codecpdf.NormalBlend(mark.Style.BlendMode) || mark.Mode%4 == 1 || mark.Mode%4 == 2) {
 					for i := range mark.Glyphs {
@@ -706,7 +728,9 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widg
 					}
 					glyphs[glyph.Name] = true
 					source := mark
-					replacements.block(mark.Replacement)
+					if !backdrop {
+						replacements.block(mark.Replacement)
+					}
 					children, err := collect(func(visitor pdfgo.Visitor) error { return p.reader.WalkType3Glyph(p.ctx, source, index, visitor) }, replacement)
 					delete(glyphs, glyph.Name)
 					if err != nil {
@@ -720,9 +744,11 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widg
 			return nil
 		}
 		v.Image = func(mark pdfgo.ImageMark) error {
-			replacements.block(replacement)
-			if err := p.halftone(mark.Style); err != nil {
-				return err
+			if !backdrop {
+				replacements.block(replacement)
+				if err := p.halftone(mark.Style); err != nil {
+					return err
+				}
 			}
 			nodes = append(nodes, pdfCompositeNode{image: &mark})
 			return nil
@@ -754,6 +780,9 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widg
 	if err != nil {
 		return nil, err
 	}
+	if backdrop {
+		return nodes, nil
+	}
 	nodes, err = replacements.apply(nodes)
 	if err != nil {
 		return nil, err
@@ -770,6 +799,47 @@ func (p *pdfImporter) collectCompositeNodes(walk func(pdfgo.Visitor) error, widg
 		}
 	}
 	return nodes, nil
+}
+
+// ensureCompositeBackdrop 在并行或重复页注解需要与正文背景混合时按需收集当前页正文图元
+// 返回: error 遍历或取消错误
+func (p *pdfImporter) ensureCompositeBackdrop() error {
+	if p.compositeBackdropPage == nil || p.compositeBackdropLoaded {
+		return nil
+	}
+	collector := *p
+	collector.warning = func(pdfgo.Diagnostic) {}
+	collector.structureBindings = nil
+	collector.objects = nil
+	collector.report = PDFImportReport{}
+	defer func() {
+		if collector.references != nil && collector.references != p.references {
+			if p.references == nil {
+				p.references = collector.references
+			} else {
+				collector.references.Close()
+			}
+		}
+		p.usedReferences = p.usedReferences || collector.usedReferences
+	}()
+	nodes, err := collector.collectNodes(func(visitor pdfgo.Visitor) error {
+		return collector.reader.WalkPage(collector.ctx, p.compositeBackdropPage, visitor)
+	}, false, true)
+	if err != nil {
+		return err
+	}
+	if len(nodes) == 1 && nodes[0].group != nil && nodes[0].group.Page && !nodes[0].group.Knockout {
+		nodes = nodes[0].children
+	}
+	p.compositeBackdropLoaded = true
+	p.compositeBackdropNodes = nodes
+	if len(nodes) != 0 {
+		combined := make([]pdfCompositeNode, 0, len(nodes)+len(p.compositeNodes))
+		combined = append(combined, nodes...)
+		combined = append(combined, p.compositeNodes...)
+		p.compositeNodes = combined
+	}
+	return nil
 }
 
 // compositePage 保留独立不透明对象，仅将需要背景参与的效果在局部区域合成
@@ -827,11 +897,14 @@ func (p *pdfImporter) compositePage(space *pdfgo.ColorSpace, walk func(pdfgo.Vis
 // 返回: error 转换或合成错误
 func (p *pdfImporter) compositeObjects(nodes []pdfCompositeNode) error {
 	space := p.compositeSpace
+	if space == nil {
+		space = &pdfgo.ColorSpace{Model: "DeviceRGB"}
+	}
 	previousLocalForms := p.localFormCounts
 	previousNeighborForms := p.neighborFormRefs
-	p.localFormCounts = countLocalForms(nodes)
+	p.localFormCounts = p.countLocalForms(nodes)
 	p.recordPageForms(p.localFormCounts)
-	if previousNeighborForms == nil && p.formRefCounts == nil && len(p.pageOrder) >= 2 && len(p.localFormCounts) != 0 {
+	if previousNeighborForms == nil && p.formRefCounts == nil && !p.hasReferenceDocuments() && len(p.pageOrder) >= 2 && len(p.localFormCounts) != 0 {
 		p.neighborFormRefs = p.probeNeighborFormRefs(p.localFormCounts)
 	}
 	defer func() {
@@ -893,6 +966,9 @@ func (p *pdfImporter) compositeObjects(nodes []pdfCompositeNode) error {
 		} else {
 			if p.warning == nil {
 				return &pdfgo.UnsupportedError{Feature: "page color-space compositing"}
+			}
+			if err := p.ensureCompositeBackdrop(); err != nil {
+				return fmt.Errorf("composite graphic %d: %w", i+1, err)
 			}
 			if err := p.compositeRegion(p.compositeNodes, node, space, true); err != nil {
 				return fmt.Errorf("composite graphic %d: %w", i+1, err)
