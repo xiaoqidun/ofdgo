@@ -3458,14 +3458,27 @@ button.outline-link:hover {
 
 .page-list-item.pair-active,
 .page-list-item[data-pair-current] {
-	border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
-	background: var(--accent-soft);
+	border-color: var(--line);
+	background: color-mix(in srgb, var(--accent-soft) 45%, transparent);
 }
 
 .page-list-item.pair-active:not(:disabled):hover,
 .page-list-item[data-pair-current]:not(:disabled):hover {
-	border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
-	background: color-mix(in srgb, var(--selected-fill) 72%, var(--hover-fill));
+	border-color: var(--line-strong);
+	background: color-mix(in srgb, var(--accent-soft) 65%, var(--hover-fill));
+}
+
+.page-list-item[data-pressed] {
+	user-select: none;
+	-webkit-touch-callout: none;
+	-webkit-tap-highlight-color: transparent;
+}
+
+.page-list-item[data-pressed="true"],
+.page-list-item[data-pressed="true"]:hover {
+	border-color: transparent;
+	background: var(--selected-fill);
+	color: var(--accent-strong);
 }
 
 .page-list-item[data-current],
@@ -3477,18 +3490,17 @@ button.outline-link:hover {
 	font-weight: 700;
 }
 
-.page-list-item[data-pressed] {
-	user-select: none;
-	-webkit-touch-callout: none;
-	-webkit-tap-highlight-color: transparent;
+.page-list-item[data-current]:not([data-pressed="false"]),
+.page-list-item[data-current]:not([data-pressed="false"]):hover,
+.page-list-item.active:not([data-pressed="false"]),
+.page-list-item.active:not([data-pressed="false"]):hover {
+	border-color: var(--accent);
+	background: var(--selected-fill);
+	color: var(--accent-strong);
 }
 
-.page-list-item[data-current]:not([data-pressed="false"]),
-.page-list-item.active:not([data-pressed="false"]),
-.page-list-item[data-pressed="true"],
-.page-list-item[data-pressed="true"]:hover {
-	border-color: transparent;
-	background: var(--selected-fill);
+.page-list-item[data-current] .thumb-label,
+.page-list-item.active .thumb-label {
 	color: var(--accent-strong);
 }
 
