@@ -1,8 +1,11 @@
+const BROWSER_PRINT_DESTROYED_TIMEOUT_MS = 60000;
 let printQueue = Promise.resolve();
+let printInstanceSequence = 0;
 
 export class PrintDialog {
 	constructor(options) {
 		Object.assign(this, options);
+		this.instanceId = String(++printInstanceSequence);
 		const panel = this.panel || document.querySelector("#printPanel");
 		this.el = Object.fromEntries(["Panel", "Form", "Settings", "Printer", "Properties", "Copies", "Collation", "Duplex", "BackReverse", "BackRotate", "Contents", "Scope", "Range", "Parity", "Reverse", "Mode", "Paper", "Width", "Height", "Orientation", "Scaling", "Scale", "MarginTop", "MarginRight", "MarginBottom", "MarginLeft", "Grid", "PageOrder", "Gap", "Binding", "BookletSheets", "SheetFrom", "SheetTo", "Overlap", "Sides", "Rotate", "Grayscale", "Borders", "CropMarks", "Raster", "DPI", "DPIValue", "TileOnlyLarge", "Labels", "Preview", "Previous", "Next", "PreviewNumber", "PageControl", "PageCount", "Status", "Spinner", "ProgressTrack", "ProgressBar", "Cancel", "Submit"].map(name => [name, name === "Panel" ? panel : panel.querySelector(`#print${name}`)]));
 		this.printerOptions = this.el.Printer.innerHTML;
@@ -35,6 +38,7 @@ export class PrintDialog {
 		this.observer.observe(this.el.Preview);
 		this.printMedia = typeof window.matchMedia === "function" ? window.matchMedia("print") : null;
 		this.browserPrintTimer = 0;
+		this.destroyedPrintTimer = 0;
 		this.browserPrintFallback = () => {
 			if (this.waiting !== "browser") return;
 			clearTimeout(this.browserPrintTimer);
@@ -52,8 +56,13 @@ export class PrintDialog {
 		this.beforePrint = () => {
 			if (!this.context || !this.el.Panel.open) return;
 			const root = document.querySelector("#ofdgoPrintDocument");
-			if (!root?.children.length) {
+			const owned = Boolean(this.releasePrint && root?.dataset.printOwner === this.instanceId);
+			if (!owned || !root.children.length) {
 				this.root = root || this.createRoot();
+				if (this.root.dataset.printOwner && !owned) {
+					for (const img of this.root.querySelectorAll("img")) img.src = "";
+				}
+				delete this.root.dataset.printOwner;
 				this.root.textContent = "请先在OFDGo中打开打印预览，准备完整文档后打印。";
 			}
 		};
@@ -62,7 +71,7 @@ export class PrintDialog {
 	}
 
 	open(context) {
-		if (this.context) return;
+		if (this.context || this.waiting || this.destroyed) return;
 		const saved = this.settings.get(context.tab)?.get(context.document);
 		this.context = context;
 		this.restoring = true;
@@ -468,9 +477,19 @@ export class PrintDialog {
 	clearBrowserPrintWatch() {
 		clearTimeout(this.browserPrintTimer);
 		this.browserPrintTimer = 0;
+		clearTimeout(this.destroyedPrintTimer);
+		this.destroyedPrintTimer = 0;
 		window.removeEventListener("focus", this.browserPrintFallback);
 		document.removeEventListener("visibilitychange", this.browserPrintVisibility);
 		this.printMedia?.removeEventListener?.("change", this.browserPrintMediaChange);
+	}
+
+	armDestroyedPrintTimeout() {
+		clearTimeout(this.destroyedPrintTimer);
+		this.destroyedPrintTimer = setTimeout(() => {
+			this.destroyedPrintTimer = 0;
+			if (this.destroyed && this.waiting === "browser") this.finishPrint();
+		}, BROWSER_PRINT_DESTROYED_TIMEOUT_MS);
 	}
 
 	async print() {
@@ -492,6 +511,7 @@ export class PrintDialog {
 			this.root = document.querySelector("#ofdgoPrintDocument") || this.createRoot();
 			for (const img of this.root.querySelectorAll("img")) img.src = "";
 			this.root.replaceChildren();
+			this.root.dataset.printOwner = this.instanceId;
 			const style = document.createElement("style");
 			style.textContent = this.layout.sides.map((side, i) => `@page ofdgoPrint${i}{size:${side.width}mm ${side.height}mm;margin:0}`).join("");
 			this.root.append(style);
@@ -582,18 +602,22 @@ export class PrintDialog {
 			if (document.title === this.printTitle) document.title = this.previousTitle;
 			delete this.previousTitle;
 		}
-		if (this.releasePrint && this.root) {
+		if (this.releasePrint && this.root && this.root.dataset.printOwner === this.instanceId) {
 			for (const img of this.root.querySelectorAll("img")) img.src = "";
 			this.root.replaceChildren();
+			delete this.root.dataset.printOwner;
 		}
 		for (const url of this.urls) URL.revokeObjectURL(url);
 		this.urls = [];
 		this.releasePrint?.();
 		this.releasePrint = null;
-		this.status(message);
 		this.waiting = this.running = false;
+		if (this.destroyed) {
+			window.removeEventListener("afterprint", this.afterPrint);
+			return;
+		}
+		this.status(message);
 		this.controls();
-		if (this.destroyed) window.removeEventListener("afterprint", this.afterPrint);
 	}
 
 	async pdf() {
@@ -636,10 +660,11 @@ export class PrintDialog {
 
 	destroy() {
 		this.destroyed = true;
-		this.clearBrowserPrintWatch();
+		if (this.waiting !== "browser") this.clearBrowserPrintWatch();
 		this.close();
 		this.observer.disconnect();
 		window.removeEventListener("beforeprint", this.beforePrint);
-		if (!this.waiting) window.removeEventListener("afterprint", this.afterPrint);
+		if (this.waiting === "browser") this.armDestroyedPrintTimeout();
+		else window.removeEventListener("afterprint", this.afterPrint);
 	}
 }

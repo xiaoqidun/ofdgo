@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"hash"
 	"html"
 	"image"
 	"image/color"
@@ -43,8 +44,35 @@ const svgCreatorMetadata = `<metadata>` + creatorXMP + `</metadata>`
 // svgDefaultPrecision 指定纯矢量SVG路径默认毫米小数位数
 const svgDefaultPrecision = 3
 
+// svgHexDigits 提供十六进制颜色编码字符表
+const svgHexDigits = "0123456789abcdef"
+
 // svgNonReusableTemplate 标记含渐变或底纹定义、不可按片段复用的模板页哨兵
 var svgNonReusableTemplate = &svgTemplateFragment{}
+
+// svgScopeMarkers 定义SVG内置定义与引用的精确标签和属性匹配模式
+var svgScopeMarkers = [...]struct {
+	prefix       []byte
+	end          byte
+	requireSpace bool
+	styleAttr    bool
+}{
+	{prefix: []byte(`<linearGradient id="d`), end: '"'},
+	{prefix: []byte(`<radialGradient id="d`), end: '"'},
+	{prefix: []byte(`<pattern id="d`), end: '"'},
+	{prefix: []byte(`fill="url(#d`), end: ')', requireSpace: true},
+	{prefix: []byte(`stroke="url(#d`), end: ')', requireSpace: true},
+	{prefix: []byte(`clip-path="url(#d`), end: ')', requireSpace: true},
+	{prefix: []byte(`mask="url(#d`), end: ')', requireSpace: true},
+	{prefix: []byte(`filter="url(#d`), end: ')', requireSpace: true},
+	{prefix: []byte(`fill:url(#d`), end: ')', styleAttr: true},
+	{prefix: []byte(`stroke:url(#d`), end: ')', styleAttr: true},
+	{prefix: []byte(`clip-path:url(#d`), end: ')', styleAttr: true},
+	{prefix: []byte(`mask:url(#d`), end: ')', styleAttr: true},
+	{prefix: []byte(`filter:url(#d`), end: ')', styleAttr: true},
+	{prefix: []byte(`href="#d`), end: '"', requireSpace: true},
+	{prefix: []byte(`xlink:href="#d`), end: '"', requireSpace: true},
+}
 
 // svgIntBox 保存量化后的二维整数包围盒
 type svgIntBox struct {
@@ -67,33 +95,34 @@ type svgPathCursor struct {
 // svgResourceRenderer 分离外部资源的SVG渲染器
 type svgResourceRenderer struct {
 	*svg.SVG
-	renderer        *Renderer
-	writer          io.Writer
-	fonts           []SVGFont
-	images          []SVGImage
-	imageNames      map[svgImageKey]string
-	seen            map[string]bool
-	styles          strings.Builder
-	err             error
-	objects         map[*GraphicObject]string
-	objectStack     []svgObjectGroup
-	embeddedFonts   bool
-	pathData        []byte
-	imageClip       *canvas.Path
-	clipDefs        []svgClipDef
-	collectClips    bool
-	hasSVGDefs      bool
-	mergePaths      bool
-	idPrefix        string
-	precision       int
-	pathCount       int
-	pendingPath     []byte
-	pendingFill     color.RGBA
-	pendingCursor   svgPathCursor
-	pendingRowBox   svgIntBox
-	pendingUnionBox svgIntBox
-	pendingHasUnion bool
-	pendingHasPath  bool
+	renderer         *Renderer
+	writer           io.Writer
+	fonts            []SVGFont
+	images           []SVGImage
+	imageNames       map[svgImageKey]string
+	transparentEdges map[image.Image]transparentEdgeResult
+	seen             map[string]bool
+	styles           strings.Builder
+	err              error
+	objects          map[*GraphicObject]string
+	objectStack      []svgObjectGroup
+	embeddedFonts    bool
+	pathData         []byte
+	imageClip        *canvas.Path
+	clipDefs         []svgClipDef
+	collectClips     bool
+	hasSVGDefs       bool
+	mergePaths       bool
+	idPrefix         string
+	precision        int
+	pathCount        int
+	pendingPath      []byte
+	pendingFill      color.RGBA
+	pendingCursor    svgPathCursor
+	pendingRowBox    svgIntBox
+	pendingUnionBox  svgIntBox
+	pendingHasUnion  bool
+	pendingHasPath   bool
 }
 
 // svgImageKey 按原图及输出精度复用图片编码，避免不同显示尺寸共用低清结果
@@ -389,7 +418,42 @@ func appendCompactSVGPath(buf []byte, data []float64, m canvas.Matrix, prec int,
 	return buf
 }
 
-// svgScopeDefsIDs 为SVG内置渐变定义与引用添加作用域前缀，避免多页同DOM冲突
+// appendSVGFillAttr 按SVG 1.1规范追加纯色填充属性，半透明色使用反预乘十六进制与fill-opacity
+// 入参: buf 输出缓冲, c 预乘填充颜色
+// 返回: []byte 追加后的字节切片
+func appendSVGFillAttr(buf []byte, c color.RGBA) []byte {
+	if c.A == 255 {
+		if c == canvas.Black {
+			return buf
+		}
+		buf = append(buf, ` fill="#`...)
+		if c.R>>4 == c.R&0xf && c.G>>4 == c.G&0xf && c.B>>4 == c.B&0xf {
+			return append(buf, svgHexDigits[c.R&0xf], svgHexDigits[c.G&0xf], svgHexDigits[c.B&0xf], '"')
+		}
+		return append(buf, svgHexDigits[c.R>>4], svgHexDigits[c.R&0xf], svgHexDigits[c.G>>4], svgHexDigits[c.G&0xf], svgHexDigits[c.B>>4], svgHexDigits[c.B&0xf], '"')
+	}
+	if c.A == 0 {
+		return append(buf, ` fill="none"`...)
+	}
+	a := uint32(c.A)
+	r := uint8(min(255, (uint32(c.R)*255+a/2)/a))
+	g := uint8(min(255, (uint32(c.G)*255+a/2)/a))
+	b := uint8(min(255, (uint32(c.B)*255+a/2)/a))
+	buf = append(buf, ` fill="#`...)
+	buf = append(buf, svgHexDigits[r>>4], svgHexDigits[r&0xf], svgHexDigits[g>>4], svgHexDigits[g&0xf], svgHexDigits[b>>4], svgHexDigits[b&0xf])
+	buf = append(buf, `" fill-opacity="`...)
+	opStart := len(buf)
+	buf = strconv.AppendFloat(buf, float64(c.A)/255.0, 'f', 5, 64)
+	for len(buf) > opStart && buf[len(buf)-1] == '0' {
+		buf = buf[:len(buf)-1]
+	}
+	if len(buf) > opStart && buf[len(buf)-1] == '.' {
+		buf = buf[:len(buf)-1]
+	}
+	return append(buf, '"')
+}
+
+// svgScopeDefsIDs 为SVG标签内的内置渐变、底纹与引用标识添加作用域前缀，不触碰正文文本
 // 入参: raw 原始SVG字节, prefix 作用域前缀
 // 返回: []byte 前缀化后的SVG字节
 func svgScopeDefsIDs(raw []byte, prefix string) []byte {
@@ -398,55 +462,101 @@ func svgScopeDefsIDs(raw []byte, prefix string) []byte {
 	}
 	escaped := []byte(html.EscapeString(prefix))
 	out := make([]byte, 0, len(raw)+256)
-	markers := [][]byte{[]byte(`<linearGradient id="d`), []byte(`<radialGradient id="d`), []byte(`url(#d`)}
-	ends := []byte{'"', '"', ')'}
 	pos := 0
 	for pos < len(raw) {
-		bestIdx := -1
-		bestKind := -1
-		for k, marker := range markers {
-			if idx := bytes.Index(raw[pos:], marker); idx >= 0 {
-				abs := pos + idx
-				if bestIdx < 0 || abs < bestIdx {
-					bestIdx = abs
-					bestKind = k
-				}
-			}
-		}
-		if bestIdx < 0 {
+		relOpen := bytes.IndexByte(raw[pos:], '<')
+		if relOpen < 0 {
 			out = append(out, raw[pos:]...)
 			break
 		}
-		marker := markers[bestKind]
-		numStart := bestIdx + len(marker)
-		numEnd := numStart
-		for numEnd < len(raw) && raw[numEnd] >= '0' && raw[numEnd] <= '9' {
-			numEnd++
+		tagStart := pos + relOpen
+		out = append(out, raw[pos:tagStart]...)
+		relClose := bytes.IndexByte(raw[tagStart:], '>')
+		if relClose < 0 {
+			out = append(out, raw[tagStart:]...)
+			break
 		}
-		if numEnd > numStart && numEnd < len(raw) && raw[numEnd] == ends[bestKind] {
-			out = append(out, raw[pos:numStart-1]...)
-			out = append(out, escaped...)
-			out = append(out, raw[numStart-1:numEnd+1]...)
-			pos = numEnd + 1
-		} else {
-			out = append(out, raw[pos:numStart]...)
-			pos = numStart
+		tagEnd := tagStart + relClose + 1
+		tag := raw[tagStart:tagEnd]
+		if !bytes.Contains(tag, []byte("#d")) && !bytes.Contains(tag, []byte(`id="d`)) {
+			out = append(out, tag...)
+			pos = tagEnd
+			continue
 		}
+		tpos := 0
+		for tpos < len(tag) {
+			bestIdx := -1
+			bestKind := -1
+			for k := range svgScopeMarkers {
+				if idx := bytes.Index(tag[tpos:], svgScopeMarkers[k].prefix); idx >= 0 {
+					abs := tpos + idx
+					if bestIdx < 0 || abs < bestIdx {
+						bestIdx = abs
+						bestKind = k
+					}
+				}
+			}
+			if bestIdx < 0 {
+				out = append(out, tag[tpos:]...)
+				break
+			}
+			marker := svgScopeMarkers[bestKind]
+			numStart := bestIdx + len(marker.prefix)
+			validBoundary := true
+			if marker.requireSpace {
+				validBoundary = bestIdx > 0 && (tag[bestIdx-1] == ' ' || tag[bestIdx-1] == '\t' || tag[bestIdx-1] == '\n')
+			} else if marker.styleAttr {
+				validBoundary = bestIdx > 0 && (tag[bestIdx-1] == '"' || tag[bestIdx-1] == ';' || tag[bestIdx-1] == ' ')
+			}
+			numEnd := numStart
+			for numEnd < len(tag) && tag[numEnd] >= '0' && tag[numEnd] <= '9' {
+				numEnd++
+			}
+			validEnd := numEnd > numStart && numEnd < len(tag) && tag[numEnd] == marker.end
+			if validEnd && marker.requireSpace && marker.end == ')' {
+				validEnd = numEnd+1 < len(tag) && tag[numEnd+1] == '"'
+			}
+			if validBoundary && validEnd {
+				out = append(out, tag[tpos:numStart-1]...)
+				out = append(out, escaped...)
+				out = append(out, tag[numStart-1:numEnd+1]...)
+				tpos = numEnd + 1
+			} else {
+				out = append(out, tag[tpos:numStart]...)
+				tpos = numStart
+			}
+		}
+		pos = tagEnd
 	}
 	return out
 }
 
-// materializeSVGImage 将延迟或包装像素图像转为标准缓冲，使SVG资源缓存与PNG编码复用像素
+// writeDigestBytes 按分块响应取消并将像素或编码字节写入哈希计算器
+// 入参: ctx 取消上下文, h 哈希实例, data 输入字节
+// 返回: bool 是否未取消并完成写入
+func writeDigestBytes(ctx context.Context, h hash.Hash, data []byte) bool {
+	for len(data) > 0 {
+		if ctx.Err() != nil {
+			return false
+		}
+		count := min(len(data), 256<<10)
+		h.Write(data[:count])
+		data = data[count:]
+	}
+	return ctx.Err() == nil
+}
+
+// materializeSVGImage 将延迟或包装像素图像转为标准缓冲，透传常见内存布局以控制体积与内存
 // 入参: ctx 取消上下文, img 原始图像, limit 允许物化的像素字节上限
 // 返回: image.Image 标准内存图像或原图, error 取消错误
 func materializeSVGImage(ctx context.Context, img image.Image, limit int) (image.Image, error) {
 	switch img.(type) {
-	case *EncodedImage, *image.NRGBA, *image.NRGBA64, *image.RGBA, *image.RGBA64:
+	case *EncodedImage, *image.NRGBA, *image.NRGBA64, *image.RGBA, *image.RGBA64, *image.Gray, *image.Gray16, *image.Paletted, *image.YCbCr, *image.CMYK:
 		return img, nil
 	}
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
-	if w <= 0 || h <= 0 {
+	if w <= 0 || h <= 0 || limit <= 0 {
 		return img, nil
 	}
 	high := baseimage.HighPrecision(img)
@@ -494,29 +604,46 @@ func materializeSVGImage(ctx context.Context, img image.Image, limit int) (image
 // 入参: ctx 取消上下文, img 原始图像, limit 可参与缓存的像素字节上限
 // 返回: [32]byte 内容摘要, bool 是否为支持的图像布局
 func svgPixelDigest(ctx context.Context, img image.Image, limit int) ([32]byte, bool) {
+	if limit <= 0 {
+		return [32]byte{}, false
+	}
 	if encoded, ok := img.(*EncodedImage); ok {
 		raw := encoded.Bytes()
 		if len(raw) == 0 {
 			return [32]byte{}, false
 		}
-		hash := sha256.New()
-		hash.Write([]byte("encoded:"))
-		hash.Write([]byte(encoded.MIME()))
-		hash.Write([]byte{0})
-		for len(raw) > 0 {
-			if ctx.Err() != nil {
-				return [32]byte{}, false
-			}
-			count := min(len(raw), 256<<10)
-			hash.Write(raw[:count])
-			raw = raw[count:]
+		h := sha256.New()
+		h.Write([]byte("encoded:"))
+		h.Write([]byte(encoded.MIME()))
+		h.Write([]byte{0})
+		if !writeDigestBytes(ctx, h, raw) {
+			return [32]byte{}, false
 		}
 		var digest [32]byte
-		hash.Sum(digest[:0])
+		h.Sum(digest[:0])
+		return digest, true
+	}
+	if ycbcr, ok := img.(*image.YCbCr); ok {
+		if int64(len(ycbcr.Y))+int64(len(ycbcr.Cb))+int64(len(ycbcr.Cr)) > int64(limit) {
+			return [32]byte{}, false
+		}
+		bounds := ycbcr.Bounds()
+		var header [88]byte
+		for i, value := range [...]int{9, ycbcr.YStride, ycbcr.CStride, int(ycbcr.SubsampleRatio), bounds.Min.X, bounds.Min.Y, bounds.Max.X, bounds.Max.Y, len(ycbcr.Y), len(ycbcr.Cb), len(ycbcr.Cr)} {
+			binary.LittleEndian.PutUint64(header[i*8:], uint64(value))
+		}
+		h := sha256.New()
+		h.Write(header[:])
+		if !writeDigestBytes(ctx, h, ycbcr.Y) || !writeDigestBytes(ctx, h, ycbcr.Cb) || !writeDigestBytes(ctx, h, ycbcr.Cr) {
+			return [32]byte{}, false
+		}
+		var digest [32]byte
+		h.Sum(digest[:0])
 		return digest, true
 	}
 	var pixels []byte
 	var stride, kind int
+	var palette color.Palette
 	switch source := img.(type) {
 	case *image.NRGBA:
 		pixels, stride, kind = source.Pix, source.Stride, 1
@@ -526,6 +653,14 @@ func svgPixelDigest(ctx context.Context, img image.Image, limit int) ([32]byte, 
 		pixels, stride, kind = source.Pix, source.Stride, 3
 	case *image.RGBA64:
 		pixels, stride, kind = source.Pix, source.Stride, 4
+	case *image.Gray:
+		pixels, stride, kind = source.Pix, source.Stride, 5
+	case *image.Gray16:
+		pixels, stride, kind = source.Pix, source.Stride, 6
+	case *image.CMYK:
+		pixels, stride, kind = source.Pix, source.Stride, 7
+	case *image.Paletted:
+		pixels, stride, kind, palette = source.Pix, source.Stride, 8, source.Palette
 	default:
 		return [32]byte{}, false
 	}
@@ -533,22 +668,28 @@ func svgPixelDigest(ctx context.Context, img image.Image, limit int) ([32]byte, 
 		return [32]byte{}, false
 	}
 	bounds := img.Bounds()
-	var header [48]byte
-	for i, value := range [...]int{kind, stride, bounds.Min.X, bounds.Min.Y, bounds.Max.X, bounds.Max.Y} {
+	var header [56]byte
+	for i, value := range [...]int{kind, stride, bounds.Min.X, bounds.Min.Y, bounds.Max.X, bounds.Max.Y, len(palette)} {
 		binary.LittleEndian.PutUint64(header[i*8:], uint64(value))
 	}
-	hash := sha256.New()
-	hash.Write(header[:])
-	for len(pixels) > 0 {
-		if ctx.Err() != nil {
-			return [32]byte{}, false
+	h := sha256.New()
+	h.Write(header[:])
+	if len(palette) > 0 {
+		var entry [8]byte
+		for _, c := range palette {
+			r, g, b, a := c.RGBA()
+			binary.LittleEndian.PutUint16(entry[0:2], uint16(r))
+			binary.LittleEndian.PutUint16(entry[2:4], uint16(g))
+			binary.LittleEndian.PutUint16(entry[4:6], uint16(b))
+			binary.LittleEndian.PutUint16(entry[6:8], uint16(a))
+			h.Write(entry[:])
 		}
-		count := min(len(pixels), 256<<10)
-		hash.Write(pixels[:count])
-		pixels = pixels[count:]
+	}
+	if !writeDigestBytes(ctx, h, pixels) {
+		return [32]byte{}, false
 	}
 	var digest [32]byte
-	hash.Sum(digest[:0])
+	h.Sum(digest[:0])
 	return digest, true
 }
 
@@ -581,9 +722,7 @@ func (s *svgResourceRenderer) flushPendingPath() {
 		return
 	}
 	output := append(s.pendingPath, '"')
-	if s.pendingFill != canvas.Black {
-		output = fmt.Appendf(output, ` fill="%s"`, canvas.CSSColor(s.pendingFill))
-	}
+	output = appendSVGFillAttr(output, s.pendingFill)
 	output = append(output, '/', '>')
 	if s.err == nil {
 		_, s.err = s.writer.Write(output)
@@ -594,7 +733,7 @@ func (s *svgResourceRenderer) flushPendingPath() {
 	s.pendingCursor = svgPathCursor{}
 }
 
-// RenderPath 跳过空路径并合并连续同色纯矢量路径，其余画笔保留后端处理
+// RenderPath 跳过空路径和不可见路径并合并连续同色纯矢量路径，其余画笔保留后端处理
 // 入参: path 几何路径, style 绘制样式, m 页面变换
 func (s *svgResourceRenderer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix) {
 	if s.err != nil {
@@ -608,7 +747,7 @@ func (s *svgResourceRenderer) RenderPath(path *canvas.Path, style canvas.Style, 
 		}
 	}
 	raw := path.Data()
-	if len(raw) == 0 {
+	if len(raw) == 0 || !style.HasFill() && !style.HasStroke() {
 		return
 	}
 	if style.Fill.IsGradient() || style.Stroke.IsGradient() || style.Fill.IsPattern() || style.Stroke.IsPattern() {
@@ -661,9 +800,7 @@ func (s *svgResourceRenderer) RenderPath(path *canvas.Path, style canvas.Style, 
 	output := append(s.pathData[:0], `<path d="`...)
 	output = appendCompactSVGPath(output, raw, tm, prec, scale, &cursor)
 	output = append(output, '"')
-	if style.Fill.Color != canvas.Black {
-		output = fmt.Appendf(output, ` fill="%s"`, canvas.CSSColor(style.Fill.Color))
-	}
+	output = appendSVGFillAttr(output, style.Fill.Color)
 	if style.FillRule == canvas.EvenOdd {
 		output = append(output, ` fill-rule="evenodd"`...)
 	}
@@ -710,12 +847,18 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 		}
 	}
 	var target image.Point
-	if s.renderer != nil && s.renderer.Compression.ImageDPI() > 0 {
+	if s.renderer != nil && s.renderer.compression.ImageDPI() > 0 {
 		bounds := img.Bounds()
-		target = compressionImageSize(math.Hypot(m[0][0], m[1][0])*float64(bounds.Dx()), math.Hypot(m[0][1], m[1][1])*float64(bounds.Dy()), s.renderer.Compression.ImageDPI())
+		target = compressionImageSize(math.Hypot(m[0][0], m[1][0])*float64(bounds.Dx()), math.Hypot(m[0][1], m[1][1])*float64(bounds.Dy()), s.renderer.compression.ImageDPI())
 	}
-	key := svgImageKey{image: img, size: target}
-	name, ok := s.imageNames[key]
+	cacheKey := s.imageNames != nil && isPointerImage(img)
+	var key svgImageKey
+	var name string
+	var ok bool
+	if cacheKey {
+		key = svgImageKey{image: img, size: target}
+		name, ok = s.imageNames[key]
+	}
 	var resource SVGImage
 	if !ok {
 		resource, s.err = s.imageResource(ctx, img, target)
@@ -724,7 +867,9 @@ func (s *svgResourceRenderer) RenderImage(img image.Image, m canvas.Matrix) {
 		}
 		if s.imageNames != nil {
 			name = resource.Name
-			s.imageNames[key] = name
+			if cacheKey {
+				s.imageNames[key] = name
+			}
 			if s.seen == nil {
 				s.seen = make(map[string]bool)
 			}
@@ -859,7 +1004,7 @@ func (s *svgResourceRenderer) imageResource(ctx context.Context, img image.Image
 		return SVGImage{}, err
 	}
 	if s.renderer != nil {
-		if encoded, ok := img.(*EncodedImage); ok && s.renderer.Compression.Mode == CompressionUnchanged {
+		if encoded, ok := img.(*EncodedImage); ok && s.renderer.compression.Mode == CompressionUnchanged {
 			sum, mime := encoded.ContentMeta()
 			result := SVGImage{Name: fmt.Sprintf("ofdgo-image-%x", sum), MIME: mime}
 			if s.imageNames == nil || !s.renderer.knownSVGResources[result.Name] {
@@ -868,14 +1013,14 @@ func (s *svgResourceRenderer) imageResource(ctx context.Context, img image.Image
 			return result, nil
 		}
 		cache := s.renderer.svgImageResources()
-		limit := max(cache.limit*4, 64<<20)
+		limit := min(cache.limit, 64<<20)
 		var err error
 		img, err = materializeSVGImage(ctx, img, limit)
 		if err != nil {
 			return SVGImage{}, err
 		}
 		if digest, ok := svgPixelDigest(ctx, img, limit); ok {
-			key := svgImageResourceKey{digest: digest, options: s.renderer.Compression, target: target}
+			key := svgImageResourceKey{digest: digest, options: s.renderer.compression, target: target}
 			result, err := cache.load(ctx, key, func() (SVGImage, int, error) {
 				result, err := s.encodeImageResource(ctx, img, target)
 				return result, cap(result.Data) + 256, err
@@ -905,7 +1050,7 @@ func (s *svgResourceRenderer) imageResource(ctx context.Context, img image.Image
 func (s *svgResourceRenderer) encodeImageResource(ctx context.Context, img image.Image, target image.Point) (SVGImage, error) {
 	options := CompressionOptions{}
 	if s.renderer != nil {
-		options = s.renderer.Compression
+		options = s.renderer.compression
 	}
 	resource := SVGImage{MIME: "image/png"}
 	if encoded, ok := img.(*EncodedImage); ok {
@@ -1150,7 +1295,7 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 			}
 		}
 	}
-	if err := r.renderCanvasPageToContext(canvas.NewContext(s), page, !r.TransparentBackground); err != nil {
+	if err := r.renderCanvasPageToContext(canvas.NewContext(s), page, !r.transparentBackground); err != nil {
 		return SVGResources{}, err
 	}
 	s.flushPendingPath()

@@ -53,6 +53,45 @@ type FontResourceBackend interface {
 // SFNTBackend 提供独立的OpenType字体度量、轮廓和资源处理
 type SFNTBackend struct{}
 
+// sfntFontMetrics 保留默认字体度量，写出时不更新原始时间
+type sfntFontMetrics struct {
+	*basefont.SFNT
+	*fontShaper
+	outlines *basefont.Outliner
+	bounds   *sfntFontBounds
+}
+
+// sfntFontBounds 缓存已成功提取的字形边界，不保留轮廓或失败结果
+type sfntFontBounds struct {
+	mu     sync.Mutex
+	values map[sfntGlyphSize]Box
+}
+
+// sfntGlyphSize 区分字形编号及精确毫米字号
+type sfntGlyphSize struct {
+	glyph uint16
+	size  float64
+}
+
+// glyphGeometry 将字体轮廓转换为纵轴向下的几何路径
+type glyphGeometry struct{ path GeometryPath }
+
+// sfntResourceMetrics 隔离资源解析器的度量实现
+type sfntResourceMetrics struct{ *basefont.SFNT }
+
+// sfntSerif 从OpenType OS/2表家族分类与PANOSE参数识别衬线字体
+// 入参: os2 OS/2表字节
+// 返回: bool 是否为衬线字体
+func sfntSerif(os2 []byte) bool {
+	if len(os2) >= 32 {
+		switch os2[30] {
+		case 1, 2, 3, 4, 5, 7:
+			return true
+		}
+	}
+	return len(os2) >= 42 && os2[32] == 2 && os2[33] >= 2 && os2[33] <= 10
+}
+
 // ResolveFont 按需加载字体资源，保留内嵌数据及外部字体的名称、样式和集合索引匹配
 // 入参: r 渲染器, id 字体标识, exact 是否禁止无关回退
 // 返回: ResolvedFont 字体与来源, error 字体不可用错误
@@ -132,14 +171,6 @@ func (SFNTBackend) SubsetSourceFont(data []byte, usage FontUsage) ([]byte, error
 		u.Glyphs[glyph] = true
 	}
 	return basefont.SubsetSourceSFNT(data, u), nil
-}
-
-// sfntFontMetrics 保留默认字体度量，写出时不更新原始时间
-type sfntFontMetrics struct {
-	*basefont.SFNT
-	*fontShaper
-	outlines *basefont.Outliner
-	bounds   *sfntFontBounds
 }
 
 // Write 返回字体数据，不修改字体元信息
@@ -225,21 +256,6 @@ func (f sfntFontMetrics) GlyphOutlines(glyphs []uint16, size float64) ([]Geometr
 	return result, nil
 }
 
-// sfntFontBounds 缓存已成功提取的字形边界，不保留轮廓或失败结果
-type sfntFontBounds struct {
-	mu     sync.Mutex
-	values map[sfntGlyphSize]Box
-}
-
-// sfntGlyphSize 区分字形编号及精确毫米字号
-type sfntGlyphSize struct {
-	glyph uint16
-	size  float64
-}
-
-// glyphGeometry 将字体轮廓转换为纵轴向下的几何路径
-type glyphGeometry struct{ path GeometryPath }
-
 // MoveTo 开始子路径
 // 入参: x 横坐标, y 纵坐标
 func (p *glyphGeometry) MoveTo(x, y float64) {
@@ -267,22 +283,6 @@ func (p *glyphGeometry) CubeTo(ax, ay, bx, by, x, y float64) {
 // Close 闭合当前子路径
 func (p *glyphGeometry) Close() { p.path = append(p.path, GeometrySegment{Verb: GeometryClose}) }
 
-// sfntResourceMetrics 隔离资源解析器的度量实现
-type sfntResourceMetrics struct{ *basefont.SFNT }
-
 // Write 返回未改动元信息的字体数据
 // 返回: []byte 字体数据
 func (f sfntResourceMetrics) Write() []byte { return f.SFNT.Write() }
-
-// sfntSerif 从OpenType OS/2表家族分类与PANOSE参数识别衬线字体
-// 入参: os2 OS/2表字节
-// 返回: bool 是否为衬线字体
-func sfntSerif(os2 []byte) bool {
-	if len(os2) >= 32 {
-		switch os2[30] {
-		case 1, 2, 3, 4, 5, 7:
-			return true
-		}
-	}
-	return len(os2) >= 42 && os2[32] == 2 && os2[33] >= 2 && os2[33] <= 10
-}

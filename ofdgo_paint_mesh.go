@@ -68,6 +68,99 @@ type MeshSampler struct {
 	nodes []meshSampleNode
 }
 
+// meshSampleNode 保存连续三角形组的包围盒及右子树位置
+type meshSampleNode struct {
+	minX, minY, maxX, maxY float64
+	right                  int
+}
+
+// meshTriangleColor 按面积权重采样单个三角形，范围外不产生颜色
+// 入参: triangle 三角形顶点, x 横坐标, y 纵坐标
+// 返回: color.RGBA 预乘颜色, bool 是否位于三角形内
+func meshTriangleColor(triangle *[3]MeshVertex, x, y float64) (color.RGBA, bool) {
+	a, b, c := triangle[0].Point, triangle[1].Point, triangle[2].Point
+	d := (b.Y-c.Y)*(a.X-c.X) + (c.X-b.X)*(a.Y-c.Y)
+	if d == 0 {
+		return color.RGBA{}, false
+	}
+	u := ((b.Y-c.Y)*(x-c.X) + (c.X-b.X)*(y-c.Y)) / d
+	v := ((c.Y-a.Y)*(x-c.X) + (a.X-c.X)*(y-c.Y)) / d
+	w := 1 - u - v
+	if u < -1e-12 || v < -1e-12 || w < -1e-12 {
+		return color.RGBA{}, false
+	}
+	var values [4]float64
+	alpha := 0.0
+	for j, weight := range [3]float64{u, v, w} {
+		alpha += weight * triangle[j].Alpha
+		for k := range values {
+			values[k] += weight * triangle[j].Values[k]
+		}
+	}
+	red, green, blue := triangle[0].rgb(values)
+	return color.RGBA{meshByte(red * alpha), meshByte(green * alpha), meshByte(blue * alpha), meshByte(alpha)}, true
+}
+
+// meshTriangleIndices 校验控制点并生成共享边或格构三角形编号
+// 入参: points 控制点, columns 每行点数，零表示非格构, extend 延伸标志
+// 返回: [][3]int 三角形顶点编号, error 非法拓扑
+func meshTriangleIndices(points []ShdPoint, columns, extend int) ([][3]int, error) {
+	if len(points) < 3 || extend < 0 || extend > 1 {
+		return nil, fmt.Errorf("invalid mesh shading")
+	}
+	if columns != 0 && (columns < 2 || columns > len(points)/2 || len(points)%columns != 0) {
+		return nil, fmt.Errorf("invalid lattice shading dimensions")
+	}
+	for i, p := range points {
+		if !finite(p.X) || !finite(p.Y) || p.EdgeFlag < 0 || p.EdgeFlag > 2 {
+			return nil, fmt.Errorf("invalid mesh shading point %d", i)
+		}
+	}
+	var result [][3]int
+	if columns != 0 {
+		for i := columns; i < len(points); i++ {
+			if i%columns != 0 {
+				result = append(result, [3]int{i - columns - 1, i - columns, i - 1}, [3]int{i - columns, i - 1, i})
+			}
+		}
+		return result, nil
+	}
+	var triangle [3]int
+	for i := 0; i < len(points); {
+		switch points[i].EdgeFlag {
+		case 0:
+			if len(points)-i < 3 {
+				return nil, fmt.Errorf("incomplete mesh shading triangle")
+			}
+			triangle = [3]int{i, i + 1, i + 2}
+			i += 3
+		case 1, 2:
+			if i == 0 {
+				return nil, fmt.Errorf("mesh shading starts with a shared edge")
+			}
+			if points[i].EdgeFlag == 1 {
+				triangle[0] = triangle[1]
+			}
+			triangle[1], triangle[2] = triangle[2], i
+			i++
+		}
+		result = append(result, triangle)
+	}
+	return result, nil
+}
+
+// meshRGB 将插值后的颜色分量转换为RGB
+// 入参: space 颜色模型, values 分量
+// 返回: float64 红、绿、蓝分量
+func meshRGB(space string, values [4]float64) (float64, float64, float64) {
+	return (MeshVertex{Space: space}).rgb(values)
+}
+
+// meshByte 将归一化颜色分量量化为八位整数
+// 入参: value 分量
+// 返回: uint8 量化结果
+func meshByte(value float64) uint8 { return uint8(math.Round(math.Max(0, math.Min(1, value)) * 255)) }
+
 // UnmarshalXML 解析高洛德渐变的控制点和背景色
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解码错误
@@ -196,39 +289,6 @@ func (s *MeshSampler) At(x, y float64) color.RGBA {
 	return s.mesh.Background
 }
 
-// meshSampleNode 保存连续三角形组的包围盒及右子树位置
-type meshSampleNode struct {
-	minX, minY, maxX, maxY float64
-	right                  int
-}
-
-// meshTriangleColor 按面积权重采样单个三角形，范围外不产生颜色
-// 入参: triangle 三角形顶点, x 横坐标, y 纵坐标
-// 返回: color.RGBA 预乘颜色, bool 是否位于三角形内
-func meshTriangleColor(triangle *[3]MeshVertex, x, y float64) (color.RGBA, bool) {
-	a, b, c := triangle[0].Point, triangle[1].Point, triangle[2].Point
-	d := (b.Y-c.Y)*(a.X-c.X) + (c.X-b.X)*(a.Y-c.Y)
-	if d == 0 {
-		return color.RGBA{}, false
-	}
-	u := ((b.Y-c.Y)*(x-c.X) + (c.X-b.X)*(y-c.Y)) / d
-	v := ((c.Y-a.Y)*(x-c.X) + (a.X-c.X)*(y-c.Y)) / d
-	w := 1 - u - v
-	if u < -1e-12 || v < -1e-12 || w < -1e-12 {
-		return color.RGBA{}, false
-	}
-	var values [4]float64
-	alpha := 0.0
-	for j, weight := range [3]float64{u, v, w} {
-		alpha += weight * triangle[j].Alpha
-		for k := range values {
-			values[k] += weight * triangle[j].Values[k]
-		}
-	}
-	red, green, blue := triangle[0].rgb(values)
-	return color.RGBA{meshByte(red * alpha), meshByte(green * alpha), meshByte(blue * alpha), meshByte(alpha)}, true
-}
-
 // outline 返回方向一致的三角形轮廓，供绘制裁剪和对象度量共用
 // 返回: GeometryPath 非零绕数填充轮廓
 func (m *MeshShading) outline() GeometryPath {
@@ -274,7 +334,7 @@ func (r *Renderer) resolveMesh(fill *FillColor) (*MeshShading, error) {
 		if err != nil {
 			return nil, err
 		}
-		profile, err := r.Reader.colorProfile(r.colorDefinition(space))
+		profile, err := r.reader.colorProfile(r.colorDefinition(space))
 		if err != nil {
 			return nil, err
 		}
@@ -335,66 +395,6 @@ func (v MeshVertex) rgb(values [4]float64) (float64, float64, float64) {
 	}
 	return rgb[0], rgb[1], rgb[2]
 }
-
-// meshTriangleIndices 校验控制点并生成共享边或格构三角形编号
-// 入参: points 控制点, columns 每行点数，零表示非格构, extend 延伸标志
-// 返回: [][3]int 三角形顶点编号, error 非法拓扑
-func meshTriangleIndices(points []ShdPoint, columns, extend int) ([][3]int, error) {
-	if len(points) < 3 || extend < 0 || extend > 1 {
-		return nil, fmt.Errorf("invalid mesh shading")
-	}
-	if columns != 0 && (columns < 2 || columns > len(points)/2 || len(points)%columns != 0) {
-		return nil, fmt.Errorf("invalid lattice shading dimensions")
-	}
-	for i, p := range points {
-		if !finite(p.X) || !finite(p.Y) || p.EdgeFlag < 0 || p.EdgeFlag > 2 {
-			return nil, fmt.Errorf("invalid mesh shading point %d", i)
-		}
-	}
-	var result [][3]int
-	if columns != 0 {
-		for i := columns; i < len(points); i++ {
-			if i%columns != 0 {
-				result = append(result, [3]int{i - columns - 1, i - columns, i - 1}, [3]int{i - columns, i - 1, i})
-			}
-		}
-		return result, nil
-	}
-	var triangle [3]int
-	for i := 0; i < len(points); {
-		switch points[i].EdgeFlag {
-		case 0:
-			if len(points)-i < 3 {
-				return nil, fmt.Errorf("incomplete mesh shading triangle")
-			}
-			triangle = [3]int{i, i + 1, i + 2}
-			i += 3
-		case 1, 2:
-			if i == 0 {
-				return nil, fmt.Errorf("mesh shading starts with a shared edge")
-			}
-			if points[i].EdgeFlag == 1 {
-				triangle[0] = triangle[1]
-			}
-			triangle[1], triangle[2] = triangle[2], i
-			i++
-		}
-		result = append(result, triangle)
-	}
-	return result, nil
-}
-
-// meshRGB 将插值后的颜色分量转换为RGB
-// 入参: space 颜色模型, values 分量
-// 返回: float64 红、绿、蓝分量
-func meshRGB(space string, values [4]float64) (float64, float64, float64) {
-	return (MeshVertex{Space: space}).rgb(values)
-}
-
-// meshByte 将归一化颜色分量量化为八位整数
-// 入参: value 分量
-// 返回: uint8 量化结果
-func meshByte(value float64) uint8 { return uint8(math.Round(math.Max(0, math.Min(1, value)) * 255)) }
 
 // build 按绘制顺序构建包围盒层级，不重排原三角形
 // 入参: first 起始三角形, end 结束位置

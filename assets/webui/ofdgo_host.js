@@ -2,22 +2,31 @@ import { setInputFiles } from "./ofdgo_util.js";
 
 const engineRuntimes = new Map();
 const READ_ONLY_OPERATIONS = new Set([
-	"ofdgoRenderPage", "ofdgoLoadPDF", "ofdgoDocumentInfo", "ofdgoDocumentVersions", "ofdgoDocumentNavigation",
-	"ofdgoOpenLinks", "ofdgoDestinationView", "ofdgoOutlineLinks", "ofdgoRenderBackends", "ofdgoSVGFontData",
-	"ofdgoSearchPage", "ofdgoSearchPages", "ofdgoPageTextString", "ofdgoPagesText", "ofdgoResources",
-	"ofdgoResourceReferences", "ofdgoResourceTargets", "ofdgoResourceLocations", "ofdgoFontPreview",
-	"ofdgoFontFaces", "ofdgoFontFace", "ofdgoMatchFontFiles", "ofdgoImages", "ofdgoImagePageSize",
-	"ofdgoImagePreview", "ofdgoStructureTargets", "ofdgoStructureObjects", "ofdgoStructureXML",
-	"ofdgoPackageDocuments", "ofdgoVerifySignatures", "ofdgoAnnotationInfos", "ofdgoInvoices", "ofdgoInvoice",
-	"ofdgoExportInvoice", "ofdgoValidateInvoice", "ofdgoActionList", "ofdgoPageSettings", "ofdgoReadAnnotation",
-	"ofdgoPreviewSignatureSeal", "ofdgoExportFormats", "ofdgoOutputFormats", "ofdgoParsePageRange",
-	"ofdgoExportPage", "ofdgoExportDocument", "ofdgoPreparePrint", "ofdgoLayoutPrint", "ofdgoPrintSide",
-	"ofdgoPrintPDF", "ofdgoDiscardPrint", "ofdgoExportAttachment", "ofdgoExportResource", "ofdgoExportMedia",
-	"ofdgoExportVersion", "ofdgoPreviewText", "ofdgoPreviewTextSelection", "ofdgoCheckDocument",
+	"ofdgoActionList", "ofdgoAnnotationInfos", "ofdgoCheckDocument", "ofdgoCheckTextFont", "ofdgoDestinationView",
+	"ofdgoDistributionAxes", "ofdgoDocumentInfo", "ofdgoDocumentNavigation", "ofdgoDocumentVersions", "ofdgoEditorFont",
+	"ofdgoEditorInfo", "ofdgoExportAttachment", "ofdgoExportDocument", "ofdgoExportFormats", "ofdgoExportImages",
+	"ofdgoExportInvoice", "ofdgoExportMedia", "ofdgoExportPage", "ofdgoExportResource", "ofdgoExportVersion",
+	"ofdgoFontFace", "ofdgoFontFaces", "ofdgoFontMenu", "ofdgoFontPreferenceOrder", "ofdgoFontPreview",
+	"ofdgoGetRichText", "ofdgoImagePreview", "ofdgoImages", "ofdgoInvoice", "ofdgoInvoices",
+	"ofdgoLoadPDF", "ofdgoMatchFontFiles", "ofdgoOpenLinks", "ofdgoOutlineLinks", "ofdgoOutputFormats",
+	"ofdgoPackageDocuments", "ofdgoPageSettings", "ofdgoPagesText", "ofdgoParsePageRange", "ofdgoPreviewImage",
+	"ofdgoPreviewRichText", "ofdgoPreviewSignatureSeal", "ofdgoPreviewText", "ofdgoPreviewTextSelection", "ofdgoPrintPDF",
+	"ofdgoPrintSide", "ofdgoReadAnnotation", "ofdgoRenderBackends", "ofdgoRenderPage", "ofdgoResourceLocations",
+	"ofdgoResourceReferences", "ofdgoResourceTargets", "ofdgoResources", "ofdgoRichTextFonts", "ofdgoSVGFontData",
+	"ofdgoSearchPage", "ofdgoSearchPages", "ofdgoSignaturePlacement", "ofdgoStructureObjects", "ofdgoStructureTargets",
+	"ofdgoStructureXML", "ofdgoStyleResource", "ofdgoStyleTextFonts", "ofdgoTextSelection", "ofdgoValidateInvoice",
+	"ofdgoVerifySignatures",
+]);
+const PDF_REPLACE_OPERATIONS = new Set([
+	"ofdgoOpen", "ofdgoOpenPDF", "ofdgoCreateDocument",
 ]);
 let engineModule = null;
 let engineScheduler = null;
 let engineSequence = 0;
+
+function replacesPDFSession(name, args) {
+	return PDF_REPLACE_OPERATIONS.has(name) || name === "ofdgoImportImages" && Number(args?.[2]) < 0;
+}
 
 class BrowserScheduler {
 	constructor() {
@@ -133,6 +142,17 @@ class BrowserScheduler {
 		const paused = this.queue.filter(task => task.worker === worker && task.data.engineID === engineID && task.data.preload);
 		this.queue = this.queue.filter(task => !paused.includes(task));
 		for (const task of paused) worker.receive({data:{engineID, id:task.data.id, ok:false, canceled:true, error:"预加载已暂停"}});
+	}
+
+	cancelPDF(worker, engineID) {
+		const queued = this.queue.filter(task => task.worker === worker && task.data.engineID === engineID && task.data.name === "ofdgoLoadPDF");
+		if (queued.length) {
+			this.queue = this.queue.filter(task => !queued.includes(task));
+			for (const task of queued) worker.receive({data:{engineID, id:task.data.id, ok:false, canceled:true, error:"操作已取消"}});
+		}
+		for (const data of worker.operations.values()) {
+			if (data.engineID === engineID && data.name === "ofdgoLoadPDF") worker.worker.postMessage({type:"cancel", engineID, id:data.id});
+		}
 	}
 
 	remove(worker) {
@@ -485,7 +505,10 @@ class BrowserEngine {
 			else this.primary.postMessage(data);
 			return;
 		}
-		if (!data.type && !READ_ONLY_OPERATIONS.has(data.name)) this.invalidatePages();
+		if (!data.type && !READ_ONLY_OPERATIONS.has(data.name)) {
+			if (replacesPDFSession(data.name, data.args)) engineScheduler.cancelPDF(this.primary.runtime, this.engineID);
+			this.invalidatePages();
+		}
 		const slot = data.name === "ofdgoRenderPage" && this.source ? this.pageSlot(data) : null;
 		if (!slot) {
 			if (data.name === "ofdgoRenderPage") this.requests.set(data.id, null);
@@ -757,7 +780,7 @@ class NativeHost {
 			postMessage(data) {
 				if (closed) return;
 				if (data.type === "cancel") {
-					requests.get(data.id)?.abort();
+					requests.get(data.id)?.controller.abort();
 					return;
 				}
 				if (data.type === "font") return;
@@ -765,9 +788,14 @@ class NativeHost {
 					const input = data.args?.[0];
 					if (input?.nativeFile && !input.temporary) inputs.add(input.nativeFile);
 				}
-				const controller = new AbortController();
-				requests.set(data.id, controller);
 				const parallel = READ_ONLY_OPERATIONS.has(data.name);
+				if (replacesPDFSession(data.name, data.args)) {
+					for (const request of requests.values()) {
+						if (request.name === "ofdgoLoadPDF") request.controller.abort();
+					}
+				}
+				const controller = new AbortController();
+				requests.set(data.id, {controller, name:data.name});
 				const priority = typeof data.priority === "number" ? data.priority
 					: data.name === "ofdgoRenderPage" ? (typeof data.args?.[7] === "number" ? data.args[7] : data.args?.[6] ? 5 : 2)
 					: data.background ? 7 : data.preload ? 6 : 3;
@@ -812,7 +840,7 @@ class NativeHost {
 			terminate() {
 				if (closed) return termination;
 				closed = true;
-				for (const controller of requests.values()) controller.abort();
+				for (const request of requests.values()) request.controller.abort();
 				termination = ready.then(engine => host.call("engine.close", {engine})).catch(() => {}).finally(async () => {
 					unsubscribe?.();
 					for (const resolve of completions.values()) resolve({ok:false, canceled:true, error:"会话已关闭"});

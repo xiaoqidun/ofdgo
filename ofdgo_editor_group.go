@@ -22,6 +22,56 @@ import (
 	"slices"
 )
 
+// editorUngroupable 判断移除容器是否会丢失对象行为或未知属性
+// 入参: node 容器节点
+// 返回: bool 是否可解组
+func editorUngroupable(node *editorXML) bool {
+	if node.name.Local != "CompositeObject" && node.name.Local != "CompositeGraphicUnit" {
+		return false
+	}
+	if !editorXMLAttributes(node, "ID Name Boundary CTM DrawParam Alpha Visible ResourceID Width Height") {
+		return false
+	}
+	var contentSupported func(*editorXML) bool
+	contentSupported = func(content *editorXML) bool {
+		attributes := ""
+		if content.name.Local == "PageBlock" {
+			attributes = "ID"
+		}
+		if !editorXMLAttributes(content, attributes) {
+			return false
+		}
+		for _, member := range content.children {
+			if classifyOFDNamespace(member.name.Space) == ofdXMLUnknown {
+				return false
+			}
+			if member.name.Local == "PageBlock" {
+				if !contentSupported(member) {
+					return false
+				}
+			} else if !slices.Contains([]string{"TextObject", "PathObject", "ImageObject", "CompositeObject", "CompositeGraphicUnit"}, member.name.Local) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, child := range node.children {
+		switch child.name.Local {
+		case "Content", "PageBlock":
+			if !contentSupported(child) {
+				return false
+			}
+		case "Clips":
+			if !editorXMLSupported(child) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // GroupObjects 将同一容器内连续的对象组合，保留标识、绘制顺序及原始内容
 // 入参: page 页面索引, ids 至少两个对象标识
 // 返回: string 组合标识, error 错误信息
@@ -113,7 +163,14 @@ func (e *Editor) GroupObjects(page int, ids []string) (id string, err error) {
 			e.maxID, e.resources = maxID, e.resources[:resourceCount]
 		}
 	}()
-	id, resourceID := e.nextID(), e.nextID()
+	id, err = e.nextID()
+	if err != nil {
+		return "", err
+	}
+	resourceID, err := e.nextID()
+	if err != nil {
+		return "", err
+	}
 	content, err = editorXMLContainer("Content", nil, content)
 	if err != nil {
 		return "", err
@@ -225,54 +282,4 @@ func (e *Editor) replaceGroup(page int, indexes []editorObjectPosition, objects 
 		change.undo = func(e *Editor) { apply(e, before, previous) }
 		change.redo = func(e *Editor) { apply(e, after, origins) }
 	}
-}
-
-// editorUngroupable 判断移除容器是否会丢失对象行为或未知属性
-// 入参: node 容器节点
-// 返回: bool 是否可解组
-func editorUngroupable(node *editorXML) bool {
-	if node.name.Local != "CompositeObject" && node.name.Local != "CompositeGraphicUnit" {
-		return false
-	}
-	if !editorXMLAttributes(node, "ID Name Boundary CTM DrawParam Alpha Visible ResourceID Width Height") {
-		return false
-	}
-	var contentSupported func(*editorXML) bool
-	contentSupported = func(content *editorXML) bool {
-		attributes := ""
-		if content.name.Local == "PageBlock" {
-			attributes = "ID"
-		}
-		if !editorXMLAttributes(content, attributes) {
-			return false
-		}
-		for _, member := range content.children {
-			if classifyOFDNamespace(member.name.Space) == ofdXMLUnknown {
-				return false
-			}
-			if member.name.Local == "PageBlock" {
-				if !contentSupported(member) {
-					return false
-				}
-			} else if !slices.Contains([]string{"TextObject", "PathObject", "ImageObject", "CompositeObject", "CompositeGraphicUnit"}, member.name.Local) {
-				return false
-			}
-		}
-		return true
-	}
-	for _, child := range node.children {
-		switch child.name.Local {
-		case "Content", "PageBlock":
-			if !contentSupported(child) {
-				return false
-			}
-		case "Clips":
-			if !editorXMLSupported(child) {
-				return false
-			}
-		default:
-			return false
-		}
-	}
-	return true
 }

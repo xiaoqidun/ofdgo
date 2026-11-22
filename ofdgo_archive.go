@@ -51,6 +51,15 @@ type ArchiveOptions struct {
 	OnProgress  func(completed, total int) error
 }
 
+// archiveEntryTask 保存单个待压缩归档条目的并发压缩结果
+type archiveEntryTask struct {
+	file ArchiveFile
+	crc  uint32
+	data []byte
+	err  error
+	done chan struct{}
+}
+
 // WriteArchive 分块归档文件，保持文件内容，有损选项在此仅提高ZIP压缩等级
 // 入参: ctx 取消上下文, writer 输出流, files 文件列表, options 归档配置
 // 返回: int64 已写字节数, error 读写错误，出错时应丢弃输出
@@ -248,15 +257,6 @@ func WriteArchive(ctx context.Context, writer io.Writer, files []ArchiveFile, op
 		}
 	}
 	return count, ctx.Err()
-}
-
-// archiveEntryTask 保存单个待压缩归档条目的并发压缩结果
-type archiveEntryTask struct {
-	file ArchiveFile
-	crc  uint32
-	data []byte
-	err  error
-	done chan struct{}
 }
 
 // archiveMethod 按扩展名选择归档存储或压缩方式

@@ -105,9 +105,15 @@ func RenderThreeD(ctx context.Context, model *basethreed.U3DModel, source pdfgo.
 	if err != nil {
 		return nil, err
 	}
+	if !finite(scale) || scale <= 0 {
+		return nil, fmt.Errorf("invalid PDF 3D projection scale")
+	}
 	camera.Perspective = projection.Subtype == "P"
 	camera.ScaleX = scale * float64(options.Width) / width
 	camera.ScaleY = scale * float64(options.Height) / height
+	if !finite(camera.ScaleX) || !finite(camera.ScaleY) || camera.ScaleX <= 0 || camera.ScaleY <= 0 {
+		return nil, fmt.Errorf("invalid PDF 3D projection scale")
+	}
 	switch projection.Clipping {
 	case "XNF":
 		camera.Near = 0

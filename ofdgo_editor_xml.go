@@ -34,47 +34,6 @@ type editorXML struct {
 	parent                  *editorXML
 }
 
-// child 查找OFD直接子节点
-// 入参: name 节点名称
-// 返回: *editorXML 节点，不存在时为nil
-func (n *editorXML) child(name string) *editorXML {
-	return n.childAt(name, 0)
-}
-
-// childAt 查找指定序号的OFD直接子节点
-// 入参: name 节点名称, index 从0开始的节点序号
-// 返回: *editorXML 节点，不存在时为nil
-func (n *editorXML) childAt(name string, index int) *editorXML {
-	for _, child := range n.children {
-		if child.matchesOFD(name) {
-			if index == 0 {
-				return child
-			}
-			index--
-		}
-	}
-	return nil
-}
-
-// attr 获取无命名空间的属性值
-// 入参: name 属性名称
-// 返回: string 属性值
-func (n *editorXML) attr(name string) string {
-	for _, attr := range n.attrs {
-		if attr.Name.Space == "" && attr.Name.Local == name {
-			return attr.Value
-		}
-	}
-	return ""
-}
-
-// hasAttr 判断属性是否存在，区分空值与省略
-// 入参: name 属性名称
-// 返回: bool 是否存在
-func (n *editorXML) hasAttr(name string) bool {
-	return slices.ContainsFunc(n.attrs, func(attr xml.Attr) bool { return attr.Name.Space == "" && attr.Name.Local == name })
-}
-
 // editorXMLPatch 替换原文中的连续区间
 type editorXMLPatch struct {
 	start, end int
@@ -86,37 +45,6 @@ type editorXMLReader struct {
 	data   []byte
 	offset int
 	ctx    context.Context
-}
-
-// ReadByte 读取XML词元字节，每4096字节检查取消状态
-// 返回: byte 当前字节, error 取消或读取错误
-func (r *editorXMLReader) ReadByte() (byte, error) {
-	if r.offset&4095 == 0 {
-		if err := r.ctx.Err(); err != nil {
-			return 0, err
-		}
-	}
-	if r.offset >= len(r.data) {
-		return 0, io.EOF
-	}
-	b := r.data[r.offset]
-	r.offset++
-	return b, nil
-}
-
-// Read 读取XML原文字节并检查取消状态
-// 入参: p 接收缓冲区
-// 返回: int 已读字节数, error 取消或读取错误
-func (r *editorXMLReader) Read(p []byte) (int, error) {
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
-	}
-	if r.offset >= len(r.data) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.data[r.offset:])
-	r.offset += n
-	return n, nil
 }
 
 // editorXMLPrefix 跳过UTF-8字节序标记和XML空白，探测后保留首个内容字节
@@ -244,8 +172,13 @@ func editorXMLContent(data []byte, node *editorXML, content []byte) editorXMLPat
 		return editorXMLPatch{node.open, node.close, content}
 	}
 	header := data[node.start:node.open]
-	end := bytes.IndexAny(header[1:], " \t\r\n/>") + 1
-	name := header[1:end]
+	lt := bytes.IndexByte(header, '<')
+	if lt < 0 {
+		return editorXMLPatch{node.start, node.end, content}
+	}
+	tag := header[lt:]
+	end := bytes.IndexAny(tag[1:], " \t\r\n/>") + 1
+	name := tag[1:end]
 	replacement := append(bytes.Clone(header[:len(header)-2]), '>')
 	replacement = append(replacement, content...)
 	replacement = append(replacement, []byte("</"+string(name)+">")...)
@@ -1032,4 +965,76 @@ func editorXMLStandaloneRoot(ctx context.Context, data []byte, source, root *edi
 		}
 	}
 	return result, nil
+}
+
+// child 查找OFD直接子节点
+// 入参: name 节点名称
+// 返回: *editorXML 节点，不存在时为nil
+func (n *editorXML) child(name string) *editorXML {
+	return n.childAt(name, 0)
+}
+
+// childAt 查找指定序号的OFD直接子节点
+// 入参: name 节点名称, index 从0开始的节点序号
+// 返回: *editorXML 节点，不存在时为nil
+func (n *editorXML) childAt(name string, index int) *editorXML {
+	for _, child := range n.children {
+		if child.matchesOFD(name) {
+			if index == 0 {
+				return child
+			}
+			index--
+		}
+	}
+	return nil
+}
+
+// attr 获取无命名空间的属性值
+// 入参: name 属性名称
+// 返回: string 属性值
+func (n *editorXML) attr(name string) string {
+	for _, attr := range n.attrs {
+		if attr.Name.Space == "" && attr.Name.Local == name {
+			return attr.Value
+		}
+	}
+	return ""
+}
+
+// hasAttr 判断属性是否存在，区分空值与省略
+// 入参: name 属性名称
+// 返回: bool 是否存在
+func (n *editorXML) hasAttr(name string) bool {
+	return slices.ContainsFunc(n.attrs, func(attr xml.Attr) bool { return attr.Name.Space == "" && attr.Name.Local == name })
+}
+
+// ReadByte 读取XML词元字节，每4096字节检查取消状态
+// 返回: byte 当前字节, error 取消或读取错误
+func (r *editorXMLReader) ReadByte() (byte, error) {
+	if r.offset&4095 == 0 {
+		if err := r.ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
+	if r.offset >= len(r.data) {
+		return 0, io.EOF
+	}
+	b := r.data[r.offset]
+	r.offset++
+	return b, nil
+}
+
+// Read 读取XML原文字节并检查取消状态
+// 入参: p 接收缓冲区
+// 返回: int 已读字节数, error 取消或读取错误
+func (r *editorXMLReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if r.offset >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.offset:])
+	r.offset += n
+	return n, nil
 }

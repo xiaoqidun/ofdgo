@@ -45,6 +45,17 @@ type SignaturePolicy struct {
 	RequireRevocation       bool
 }
 
+// signaturePolicyRejection 区分策略拒绝与解析失败
+type signaturePolicyRejection struct{ message string }
+
+// signatureCoverageNode 收集OFD结构中的包内路径引用
+type signatureCoverageNode struct {
+	XMLName  xml.Name
+	Attrs    []xml.Attr              `xml:",any,attr"`
+	Text     string                  `xml:",chardata"`
+	Children []signatureCoverageNode `xml:",any"`
+}
+
 // WithSignaturePolicy 设置签名策略
 // 入参: policy 签名策略
 // 返回: SignatureVerifyOption 验签选项
@@ -56,417 +67,6 @@ func WithSignaturePolicy(policy SignaturePolicy) SignatureVerifyOption {
 	policy.SignatureMethods = append([]string(nil), policy.SignatureMethods...)
 	policy.RequiredFiles = append([]string(nil), policy.RequiredFiles...)
 	return func(o *signatureVerifyOptions) { o.Policy = &policy }
-}
-
-// signaturePolicyRejection 区分策略拒绝与解析失败
-type signaturePolicyRejection struct{ message string }
-
-// Error 返回策略拒绝原因
-// 返回: string 错误信息
-func (e signaturePolicyRejection) Error() string { return e.message }
-
-// signatureCoverageNode 收集OFD结构中的包内路径引用
-type signatureCoverageNode struct {
-	XMLName  xml.Name
-	Attrs    []xml.Attr              `xml:",any,attr"`
-	Text     string                  `xml:",chardata"`
-	Children []signatureCoverageNode `xml:",any"`
-}
-
-// applySignaturePolicyError 将实际算法策略拒绝记入报告
-// 入参: err 验签错误
-func (report *SignatureVerifyReport) applySignaturePolicyError(err error) {
-	var rejection signaturePolicyRejection
-	if errors.As(err, &rejection) {
-		report.PolicyChecked, report.PolicyOK, report.PolicyError = true, false, rejection.Error()
-	}
-}
-
-// applySignaturePolicy 应用版本和算法限制
-// 入参: o 验签选项, ofdVersion OFD版本, sesVersion SES版本, method 签名算法, digest 摘要算法
-func (report *SignatureVerifyReport) applySignaturePolicy(o *signatureVerifyOptions, ofdVersion string, sesVersion int, method, digest string) {
-	if o.Policy == nil {
-		return
-	}
-	if !report.PolicyChecked {
-		report.PolicyChecked, report.PolicyOK = true, true
-	}
-	p := o.Policy
-	var err error
-	if len(p.OFDVersions) != 0 && !signatureStringAllowed(ofdVersion, p.OFDVersions) {
-		err = fmt.Errorf("OFD version rejected: %s", ofdVersion)
-	}
-	if sesVersion != 0 && len(p.SESVersions) != 0 {
-		allowed := false
-		for _, v := range p.SESVersions {
-			allowed = allowed || v == sesVersion
-		}
-		if !allowed {
-			err = fmt.Errorf("SES version rejected: %d", sesVersion)
-		}
-	}
-	if e := signatureAlgorithmPolicy(p, method, digest); e != nil {
-		err = e
-	}
-	if err != nil {
-		report.PolicyOK, report.PolicyError = false, err.Error()
-	}
-}
-
-// applySignatureCoverage 区分引用摘要通过和文档覆盖完整
-// 入参: report 验签报告, listPath 签名列表路径, o 验签选项
-func (r *Reader) applySignatureCoverage(report *SignatureVerifyReport, listPath string, o *signatureVerifyOptions) {
-	covered := make(map[string]bool)
-	for _, ref := range report.References {
-		if ref.Checked && ref.OK {
-			covered[cleanPackagePath(ref.Path)] = true
-		}
-	}
-	for name := range covered {
-		report.CoveredFiles = append(report.CoveredFiles, name)
-	}
-	sort.Strings(report.CoveredFiles)
-	if o.Policy == nil || !o.Policy.RequireDocumentCoverage && len(o.Policy.RequiredFiles) == 0 {
-		return
-	}
-	report.CoverageChecked, report.CoverageOK = true, true
-	required := make(map[string]bool)
-	for _, name := range o.Policy.RequiredFiles {
-		required[cleanPackagePath(name)] = true
-	}
-	if o.Policy.RequireDocumentCoverage {
-		root := path.Dir(cleanPackagePath(o.DocRoot))
-		contentRequired := map[string]bool{"OFD.xml": true}
-		if r.OFD != nil && o.DocIndex >= 0 && o.DocIndex < len(r.OFD.DocBody) {
-			if cover := strings.TrimSpace(r.OFD.DocBody[o.DocIndex].DocInfo.Cover); cover != "" {
-				coverPath := cleanPackagePath(resolveResourcePath("OFD.xml", "", cover))
-				if validPackagePath(coverPath) {
-					contentRequired[coverPath] = true
-				}
-			}
-		}
-		if err := r.signatureCoverageReferences(o.DocRoot, contentRequired); err != nil {
-			report.CoverageOK, report.CoverageError = false, err.Error()
-		}
-		docRequired := make(map[string]bool, len(contentRequired))
-		for item := range contentRequired {
-			docRequired[item] = true
-		}
-		if r.versionInfo != nil && strings.TrimSpace(r.versionInfo.Location) != "" {
-			versionPath := cleanPackagePath(r.versionInfo.Location)
-			if validPackagePath(versionPath) {
-				contentRequired[versionPath] = true
-				docRequired[versionPath] = true
-				if err := r.signatureCoverageReferences(versionPath, docRequired); err != nil && report.CoverageError == "" {
-					report.CoverageOK, report.CoverageError = false, err.Error()
-				}
-			}
-		} else if r.OFD != nil && o.DocIndex >= 0 && o.DocIndex < len(r.OFD.DocBody) && r.OFD.DocBody[o.DocIndex].versioned {
-			if versions, err := r.DocumentVersionsContext(context.Background()); err == nil {
-				for _, ver := range versions {
-					verPath := cleanPackagePath(ver.Location)
-					if validPackagePath(verPath) {
-						docRequired[verPath] = true
-						if err := r.signatureCoverageReferences(verPath, docRequired); err != nil && report.CoverageError == "" {
-							report.CoverageOK, report.CoverageError = false, err.Error()
-						}
-					}
-				}
-			}
-		}
-		cleanList := cleanPackagePath(listPath)
-		excluded := make(map[string]bool)
-		if !contentRequired[cleanList] {
-			excluded[cleanList] = true
-		}
-		name := cleanPackagePath(signatureRefPath(listPath, report.BaseLoc))
-		data, err := r.readFile(name)
-		if err != nil {
-			report.CoverageOK = false
-			report.CoverageError = err.Error()
-			return
-		}
-		file, err := parseSignatureFile(data)
-		if err != nil {
-			report.CoverageOK = false
-			report.CoverageError = err.Error()
-			return
-		}
-		if !contentRequired[name] {
-			excluded[name] = true
-		}
-		if valPath, ok := canExcludeSignatureValue(cleanList, name, file.SignedValue, root, contentRequired, false); ok {
-			excluded[valPath] = true
-		}
-		if sealPath, ok := canExcludeSignatureSeal(cleanList, name, file.SignedInfo.Seal.BaseLoc, root, contentRequired, false); ok {
-			excluded[sealPath] = true
-		}
-		if listData, err := r.readFile(cleanList); err == nil {
-			var list Signatures
-			if xml.Unmarshal(listData, &list) == nil {
-				var versionScope *versionSignatureScope
-				if r.versionInfo != nil {
-					versionScope, _ = r.buildVersionSignatureScope(context.Background(), cleanList, list)
-				}
-				after := false
-				for _, entry := range list.List {
-					entryPath := cleanPackagePath(signatureRefPath(listPath, entry.BaseLoc))
-					if versionScope != nil && !r.versionSignatureMatches(context.Background(), versionScope, entry) {
-						if validPackagePath(entryPath) && !contentRequired[entryPath] {
-							excluded[entryPath] = true
-							if entryData, err := r.readFile(entryPath); err == nil {
-								if entryFile, err := parseSignatureFile(entryData); err == nil {
-									if valPath := cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedValue)); validPackagePath(valPath) && !contentRequired[valPath] {
-										excluded[valPath] = true
-									}
-									if sealPath := cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedInfo.Seal.BaseLoc)); validPackagePath(sealPath) && !contentRequired[sealPath] {
-										excluded[sealPath] = true
-									}
-								}
-							}
-						}
-						continue
-					}
-					if !after {
-						if entryPath == name && (report.ID == "" || entry.ID == report.ID) {
-							after = true
-						}
-						continue
-					}
-					if !validPackagePath(entryPath) || entryPath == "OFD.xml" || contentRequired[entryPath] || !strings.EqualFold(path.Ext(entryPath), ".xml") {
-						continue
-					}
-					if entryData, err := r.readFile(entryPath); err == nil {
-						if entryFile, err := parseSignatureFile(entryData); err == nil && canExcludeSubsequentSignature(cleanList, entryPath, root) {
-							if !docRequired[entryPath] || inSignatureSubdir(entryPath, cleanList, entryPath, root, true) {
-								excluded[entryPath] = true
-							}
-							if valPath, ok := canExcludeSignatureValue(cleanList, entryPath, entryFile.SignedValue, root, contentRequired, true); ok {
-								if !docRequired[valPath] || inSignatureSubdir(valPath, cleanList, entryPath, root, true) {
-									excluded[valPath] = true
-								}
-							}
-							if sealPath, ok := canExcludeSignatureSeal(cleanList, entryPath, entryFile.SignedInfo.Seal.BaseLoc, root, contentRequired, true); ok {
-								if !docRequired[sealPath] || inSignatureSubdir(sealPath, cleanList, entryPath, root, true) {
-									excluded[sealPath] = true
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-		for item := range docRequired {
-			if !excluded[item] || contentRequired[item] {
-				required[item] = true
-			}
-		}
-		if r.versionInfo == nil {
-			otherOwned := make(map[string]bool)
-			multiDoc := r.OFD != nil && len(r.OFD.DocBody) > 1
-			if multiDoc {
-				var otherIndexes []int
-				for idx := range r.OFD.DocBody {
-					if idx != o.DocIndex {
-						otherIndexes = append(otherIndexes, idx)
-					}
-				}
-				if deps, _, err := r.documentDependencies(context.Background(), otherIndexes...); err == nil {
-					maps.Copy(otherOwned, deps)
-				}
-			}
-			include := func(item string) {
-				clean := cleanPackagePath(item)
-				if clean == "" || clean == "." || strings.HasSuffix(item, "/") || excluded[clean] || otherOwned[clean] {
-					return
-				}
-				if !multiDoc || root != "." && strings.HasPrefix(clean, root+"/") {
-					required[clean] = true
-				}
-			}
-			for item, fileInfo := range r.fileIndex {
-				if !fileInfo.FileInfo().IsDir() {
-					include(item)
-				}
-			}
-			for item := range r.files {
-				include(item)
-			}
-			if src := r.encryptedSource(); src != nil {
-				for _, item := range src.names() {
-					include(item)
-				}
-			}
-		}
-	}
-	for name := range required {
-		if !covered[name] {
-			report.UncoveredFiles = append(report.UncoveredFiles, name)
-		}
-	}
-	sort.Strings(report.UncoveredFiles)
-	report.CoverageOK = report.CoverageOK && len(report.UncoveredFiles) == 0
-}
-
-// signatureCoverageReferences 收集标准OFD引用的传递闭包且包含跨文档资源与版本清单
-// 入参: root 文档或版本入口, required 待补充的必需文件集合
-// 返回: error 引用文件无法读取或解析时的错误
-func (r *Reader) signatureCoverageReferences(root string, required map[string]bool) error {
-	type pendingResFile struct {
-		id        string
-		resolved  string
-		structure bool
-	}
-	queue := []string{cleanPackagePath(root)}
-	seen := make(map[string]bool)
-	usedIDs := make(map[string]bool)
-	resDeps := make(map[string][]string)
-	var pending []pendingResFile
-	recordID := func(ownerID, raw string) {
-		id := editorResourceID(raw)
-		if id == "" {
-			return
-		}
-		if ownerID == "" {
-			usedIDs[id] = true
-		} else {
-			resDeps[ownerID] = append(resDeps[ownerID], id)
-		}
-	}
-	for {
-		for len(queue) != 0 {
-			name := queue[0]
-			queue = queue[1:]
-			if seen[name] {
-				continue
-			}
-			seen[name], required[name] = true, true
-			data, err := r.readFile(name)
-			if err != nil {
-				return err
-			}
-			trimmed := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
-			if !bytes.HasPrefix(bytes.TrimSpace(trimmed), []byte("<")) {
-				continue
-			}
-			var node signatureCoverageNode
-			if err := xml.Unmarshal(trimmed, &node); err != nil {
-				return fmt.Errorf("coverage XML %s: %w", name, err)
-			}
-			isRes := node.XMLName.Local == "Res"
-			base := ""
-			if isRes {
-				for _, attr := range node.Attrs {
-					if attr.Name.Local == "BaseLoc" {
-						base = attr.Value
-					}
-				}
-			}
-			add := func(loc, resItemID string, resource, structure bool) {
-				if strings.TrimSpace(loc) == "" {
-					return
-				}
-				resBase := ""
-				if resource {
-					resBase = base
-				}
-				resolved := cleanPackagePath(resolveResourcePath(name, resBase, loc))
-				if !validPackagePath(resolved) {
-					return
-				}
-				if resource && resItemID != "" {
-					pending = append(pending, pendingResFile{id: resItemID, resolved: resolved, structure: structure})
-					return
-				}
-				required[resolved] = true
-				if structure && !seen[resolved] {
-					queue = append(queue, resolved)
-				}
-			}
-			var walk func(signatureCoverageNode, string, string, int)
-			walk = func(current signatureCoverageNode, parent, resItemID string, depth int) {
-				kind := current.XMLName.Local
-				if !ofdXMLChild(node.XMLName, current.XMLName) || classifyOFDNamespace(current.XMLName.Space) == ofdXMLUnknown && current.XMLName.Space != node.XMLName.Space || kind == "Signatures" || kind == "Signature" || kind == "Data" && parent == "Extension" {
-					return
-				}
-				if isRes && depth == 2 && editorResourceElement(parent) == kind {
-					for _, attr := range current.Attrs {
-						if attr.Name.Space == "" && attr.Name.Local == "ID" {
-							resItemID = editorResourceID(attr.Value)
-						}
-					}
-				}
-				for _, attr := range current.Attrs {
-					if attr.Name.Space != "" {
-						continue
-					}
-					if attr.Name.Local != "ID" && editorResourceReferenceKind(attr.Name.Local, isRes) == editorReferenceID {
-						recordID(resItemID, attr.Value)
-					}
-					if attr.Name.Local == "BaseLoc" && kind != "Res" || attr.Name.Local == "Link" && kind == "DrawParam" {
-						add(attr.Value, resItemID, isRes, true)
-					} else if attr.Name.Local == "Profile" && kind == "ColorSpace" {
-						add(attr.Value, resItemID, true, false)
-					}
-				}
-				if editorResourceReferenceKind(kind, isRes) == editorReferenceID {
-					recordID(resItemID, current.Text)
-				}
-				switch kind {
-				case "PublicRes", "DocumentRes", "PageRes", "Annotations", "Attachments", "CustomTags", "Extensions":
-					add(current.Text, "", false, true)
-				case "DocRoot":
-					if node.XMLName.Local == "DocVersion" {
-						add(current.Text, "", false, true)
-					}
-				case "File":
-					if parent == "FileList" && node.XMLName.Local == "DocVersion" {
-						add(current.Text, "", false, false)
-					}
-				case "FileLoc":
-					add(current.Text, "", false, parent == "Page" && node.XMLName.Local == "Annotations")
-				case "SchemaLoc", "ExtendData":
-					add(current.Text, "", false, false)
-				case "FontFile", "MediaFile", "Profile":
-					add(current.Text, resItemID, true, false)
-				}
-				for _, child := range current.Children {
-					walk(child, kind, resItemID, depth+1)
-				}
-			}
-			walk(node, "", "", 0)
-		}
-		expanded := true
-		for expanded {
-			expanded = false
-			for id := range usedIDs {
-				for _, dep := range resDeps[id] {
-					if !usedIDs[dep] {
-						usedIDs[dep] = true
-						expanded = true
-					}
-				}
-			}
-		}
-		var remaining []pendingResFile
-		progressed := false
-		for _, item := range pending {
-			if usedIDs[item.id] {
-				required[item.resolved] = true
-				if item.structure && !seen[item.resolved] {
-					queue = append(queue, item.resolved)
-					progressed = true
-				}
-			} else {
-				remaining = append(remaining, item)
-			}
-		}
-		pending = remaining
-		if !progressed {
-			break
-		}
-	}
-	return nil
 }
 
 // rejectSignaturePolicy 构造可识别的策略拒绝错误
@@ -690,4 +290,421 @@ func inDocumentContentSubdir(target, docRootDir string) bool {
 	default:
 		return false
 	}
+}
+
+// Error 返回策略拒绝原因
+// 返回: string 错误信息
+func (e signaturePolicyRejection) Error() string { return e.message }
+
+// applySignaturePolicyError 将实际算法策略拒绝记入报告
+// 入参: err 验签错误
+func (report *SignatureVerifyReport) applySignaturePolicyError(err error) {
+	var rejection signaturePolicyRejection
+	if errors.As(err, &rejection) {
+		report.PolicyChecked, report.PolicyOK, report.PolicyError = true, false, rejection.Error()
+	}
+}
+
+// applySignaturePolicy 应用版本和算法限制
+// 入参: o 验签选项, ofdVersion OFD版本, sesVersion SES版本, method 签名算法, digest 摘要算法
+func (report *SignatureVerifyReport) applySignaturePolicy(o *signatureVerifyOptions, ofdVersion string, sesVersion int, method, digest string) {
+	if o.Policy == nil {
+		return
+	}
+	if !report.PolicyChecked {
+		report.PolicyChecked, report.PolicyOK = true, true
+	}
+	p := o.Policy
+	var err error
+	if len(p.OFDVersions) != 0 && !signatureStringAllowed(ofdVersion, p.OFDVersions) {
+		err = fmt.Errorf("OFD version rejected: %s", ofdVersion)
+	}
+	if sesVersion != 0 && len(p.SESVersions) != 0 {
+		allowed := false
+		for _, v := range p.SESVersions {
+			allowed = allowed || v == sesVersion
+		}
+		if !allowed {
+			err = fmt.Errorf("SES version rejected: %d", sesVersion)
+		}
+	}
+	if e := signatureAlgorithmPolicy(p, method, digest); e != nil {
+		err = e
+	}
+	if err != nil {
+		report.PolicyOK, report.PolicyError = false, err.Error()
+	}
+}
+
+// applySignatureCoverage 区分引用摘要通过和文档覆盖完整
+// 入参: ctx 取消上下文, report 验签报告, listPath 签名列表路径, o 验签选项
+func (r *Reader) applySignatureCoverage(ctx context.Context, report *SignatureVerifyReport, listPath string, o *signatureVerifyOptions) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	covered := make(map[string]bool)
+	for _, ref := range report.References {
+		if ref.Checked && ref.OK {
+			covered[cleanPackagePath(ref.Path)] = true
+		}
+	}
+	for name := range covered {
+		report.CoveredFiles = append(report.CoveredFiles, name)
+	}
+	sort.Strings(report.CoveredFiles)
+	if o.Policy == nil || !o.Policy.RequireDocumentCoverage && len(o.Policy.RequiredFiles) == 0 {
+		return
+	}
+	report.CoverageChecked, report.CoverageOK = true, true
+	if err := ctx.Err(); err != nil {
+		report.CoverageOK, report.CoverageError = false, err.Error()
+		return
+	}
+	required := make(map[string]bool)
+	for _, name := range o.Policy.RequiredFiles {
+		required[cleanPackagePath(name)] = true
+	}
+	if o.Policy.RequireDocumentCoverage {
+		root := path.Dir(cleanPackagePath(o.DocRoot))
+		contentRequired := map[string]bool{"OFD.xml": true}
+		if r.ofd != nil && o.DocIndex >= 0 && o.DocIndex < len(r.ofd.DocBody) {
+			if cover := strings.TrimSpace(r.ofd.DocBody[o.DocIndex].DocInfo.Cover); cover != "" {
+				coverPath := cleanPackagePath(resolveResourcePath("OFD.xml", "", cover))
+				if validPackagePath(coverPath) {
+					contentRequired[coverPath] = true
+				}
+			}
+		}
+		if err := r.signatureCoverageReferences(ctx, o.DocRoot, contentRequired); err != nil {
+			report.CoverageOK, report.CoverageError = false, err.Error()
+		}
+		docRequired := make(map[string]bool, len(contentRequired))
+		for item := range contentRequired {
+			docRequired[item] = true
+		}
+		if r.versionInfo != nil && strings.TrimSpace(r.versionInfo.Location) != "" {
+			versionPath := cleanPackagePath(r.versionInfo.Location)
+			if validPackagePath(versionPath) {
+				contentRequired[versionPath] = true
+				docRequired[versionPath] = true
+				if err := r.signatureCoverageReferences(ctx, versionPath, docRequired); err != nil && report.CoverageError == "" {
+					report.CoverageOK, report.CoverageError = false, err.Error()
+				}
+			}
+		} else if r.ofd != nil && o.DocIndex >= 0 && o.DocIndex < len(r.ofd.DocBody) && r.ofd.DocBody[o.DocIndex].versioned {
+			if versions, err := r.DocumentVersionsContext(ctx); err == nil {
+				for _, ver := range versions {
+					verPath := cleanPackagePath(ver.Location)
+					if validPackagePath(verPath) {
+						docRequired[verPath] = true
+						if err := r.signatureCoverageReferences(ctx, verPath, docRequired); err != nil && report.CoverageError == "" {
+							report.CoverageOK, report.CoverageError = false, err.Error()
+						}
+					}
+				}
+			}
+		}
+		cleanList := cleanPackagePath(listPath)
+		excluded := make(map[string]bool)
+		if !contentRequired[cleanList] {
+			excluded[cleanList] = true
+		}
+		name := cleanPackagePath(signatureRefPath(listPath, report.BaseLoc))
+		data, err := r.readFileViewContext(ctx, name)
+		if err != nil {
+			report.CoverageOK = false
+			report.CoverageError = err.Error()
+			return
+		}
+		file, err := parseSignatureFile(data)
+		if err != nil {
+			report.CoverageOK = false
+			report.CoverageError = err.Error()
+			return
+		}
+		if !contentRequired[name] {
+			excluded[name] = true
+		}
+		if valPath, ok := canExcludeSignatureValue(cleanList, name, file.SignedValue, root, contentRequired, false); ok {
+			excluded[valPath] = true
+		}
+		if sealPath, ok := canExcludeSignatureSeal(cleanList, name, file.SignedInfo.Seal.BaseLoc, root, contentRequired, false); ok {
+			excluded[sealPath] = true
+		}
+		if listData, err := r.readFileViewContext(ctx, cleanList); err == nil {
+			var list Signatures
+			if xml.Unmarshal(listData, &list) == nil {
+				var versionScope *versionSignatureScope
+				if r.versionInfo != nil {
+					versionScope, _ = r.buildVersionSignatureScope(ctx, cleanList, list)
+				}
+				after := false
+				for _, entry := range list.List {
+					if err := ctx.Err(); err != nil {
+						report.CoverageOK, report.CoverageError = false, err.Error()
+						return
+					}
+					entryPath := cleanPackagePath(signatureRefPath(listPath, entry.BaseLoc))
+					if versionScope != nil && !r.versionSignatureMatches(ctx, versionScope, entry) {
+						if validPackagePath(entryPath) && !contentRequired[entryPath] {
+							excluded[entryPath] = true
+							if entryData, err := r.readFileViewContext(ctx, entryPath); err == nil {
+								if entryFile, err := parseSignatureFile(entryData); err == nil {
+									if valPath := cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedValue)); validPackagePath(valPath) && !contentRequired[valPath] {
+										excluded[valPath] = true
+									}
+									if sealPath := cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedInfo.Seal.BaseLoc)); validPackagePath(sealPath) && !contentRequired[sealPath] {
+										excluded[sealPath] = true
+									}
+								}
+							}
+						}
+						continue
+					}
+					if !after {
+						if entryPath == name && (report.ID == "" || entry.ID == report.ID) {
+							after = true
+						}
+						continue
+					}
+					if !validPackagePath(entryPath) || entryPath == "OFD.xml" || contentRequired[entryPath] || !strings.EqualFold(path.Ext(entryPath), ".xml") {
+						continue
+					}
+					if entryData, err := r.readFileViewContext(ctx, entryPath); err == nil {
+						if entryFile, err := parseSignatureFile(entryData); err == nil && canExcludeSubsequentSignature(cleanList, entryPath, root) {
+							if !docRequired[entryPath] || inSignatureSubdir(entryPath, cleanList, entryPath, root, true) {
+								excluded[entryPath] = true
+							}
+							if valPath, ok := canExcludeSignatureValue(cleanList, entryPath, entryFile.SignedValue, root, contentRequired, true); ok {
+								if !docRequired[valPath] || inSignatureSubdir(valPath, cleanList, entryPath, root, true) {
+									excluded[valPath] = true
+								}
+							}
+							if sealPath, ok := canExcludeSignatureSeal(cleanList, entryPath, entryFile.SignedInfo.Seal.BaseLoc, root, contentRequired, true); ok {
+								if !docRequired[sealPath] || inSignatureSubdir(sealPath, cleanList, entryPath, root, true) {
+									excluded[sealPath] = true
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		for item := range docRequired {
+			if !excluded[item] || contentRequired[item] {
+				required[item] = true
+			}
+		}
+		if r.versionInfo == nil {
+			otherOwned := make(map[string]bool)
+			multiDoc := r.ofd != nil && len(r.ofd.DocBody) > 1
+			if multiDoc {
+				var otherIndexes []int
+				for idx := range r.ofd.DocBody {
+					if idx != o.DocIndex {
+						otherIndexes = append(otherIndexes, idx)
+					}
+				}
+				if deps, _, err := r.documentDependencies(ctx, otherIndexes...); err == nil {
+					maps.Copy(otherOwned, deps)
+				}
+			}
+			include := func(item string) {
+				clean := cleanPackagePath(item)
+				if clean == "" || clean == "." || strings.HasSuffix(item, "/") || excluded[clean] || otherOwned[clean] {
+					return
+				}
+				if !multiDoc || root != "." && strings.HasPrefix(clean, root+"/") {
+					required[clean] = true
+				}
+			}
+			for item, fileInfo := range r.fileIndex {
+				if !fileInfo.FileInfo().IsDir() {
+					include(item)
+				}
+			}
+			for item := range r.files {
+				include(item)
+			}
+			if src := r.encryptedSource(); src != nil {
+				for _, item := range src.names() {
+					include(item)
+				}
+			}
+		}
+	}
+	for name := range required {
+		if !covered[name] {
+			report.UncoveredFiles = append(report.UncoveredFiles, name)
+		}
+	}
+	sort.Strings(report.UncoveredFiles)
+	report.CoverageOK = report.CoverageOK && len(report.UncoveredFiles) == 0
+}
+
+// signatureCoverageReferences 收集标准OFD引用的传递闭包且包含跨文档资源与版本清单
+// 入参: ctx 取消上下文, root 文档或版本入口, required 待补充的必需文件集合
+// 返回: error 引用文件无法读取、解析或取消时的错误
+func (r *Reader) signatureCoverageReferences(ctx context.Context, root string, required map[string]bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	type pendingResFile struct {
+		id        string
+		resolved  string
+		structure bool
+	}
+	queue := []string{cleanPackagePath(root)}
+	seen := make(map[string]bool)
+	usedIDs := make(map[string]bool)
+	resDeps := make(map[string][]string)
+	var pending []pendingResFile
+	recordID := func(ownerID, raw string) {
+		id := editorResourceID(raw)
+		if id == "" {
+			return
+		}
+		if ownerID == "" {
+			usedIDs[id] = true
+		} else {
+			resDeps[ownerID] = append(resDeps[ownerID], id)
+		}
+	}
+	for {
+		for len(queue) != 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			name := queue[0]
+			queue = queue[1:]
+			if seen[name] {
+				continue
+			}
+			seen[name], required[name] = true, true
+			data, err := r.readFileViewContext(ctx, name)
+			if err != nil {
+				return err
+			}
+			trimmed := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+			if !bytes.HasPrefix(bytes.TrimSpace(trimmed), []byte("<")) {
+				continue
+			}
+			var node signatureCoverageNode
+			if err := xml.Unmarshal(trimmed, &node); err != nil {
+				return fmt.Errorf("coverage XML %s: %w", name, err)
+			}
+			isRes := node.XMLName.Local == "Res"
+			base := ""
+			if isRes {
+				for _, attr := range node.Attrs {
+					if attr.Name.Local == "BaseLoc" {
+						base = attr.Value
+					}
+				}
+			}
+			add := func(loc, resItemID string, resource, structure bool) {
+				if strings.TrimSpace(loc) == "" {
+					return
+				}
+				resBase := ""
+				if resource {
+					resBase = base
+				}
+				resolved := cleanPackagePath(resolveResourcePath(name, resBase, loc))
+				if !validPackagePath(resolved) {
+					return
+				}
+				if resource && resItemID != "" {
+					pending = append(pending, pendingResFile{id: resItemID, resolved: resolved, structure: structure})
+					return
+				}
+				required[resolved] = true
+				if structure && !seen[resolved] {
+					queue = append(queue, resolved)
+				}
+			}
+			var walk func(signatureCoverageNode, string, string, int)
+			walk = func(current signatureCoverageNode, parent, resItemID string, depth int) {
+				kind := current.XMLName.Local
+				if !ofdXMLChild(node.XMLName, current.XMLName) || classifyOFDNamespace(current.XMLName.Space) == ofdXMLUnknown && current.XMLName.Space != node.XMLName.Space || kind == "Signatures" || kind == "Signature" || kind == "Data" && parent == "Extension" {
+					return
+				}
+				if isRes && depth == 2 && editorResourceElement(parent) == kind {
+					for _, attr := range current.Attrs {
+						if attr.Name.Space == "" && attr.Name.Local == "ID" {
+							resItemID = editorResourceID(attr.Value)
+						}
+					}
+				}
+				for _, attr := range current.Attrs {
+					if attr.Name.Space != "" {
+						continue
+					}
+					if attr.Name.Local != "ID" && editorResourceReferenceKind(attr.Name.Local, isRes) == editorReferenceID {
+						recordID(resItemID, attr.Value)
+					}
+					if attr.Name.Local == "BaseLoc" && kind != "Res" || attr.Name.Local == "Link" && kind == "DrawParam" {
+						add(attr.Value, resItemID, isRes, true)
+					} else if attr.Name.Local == "Profile" && kind == "ColorSpace" {
+						add(attr.Value, resItemID, true, false)
+					}
+				}
+				if editorResourceReferenceKind(kind, isRes) == editorReferenceID {
+					recordID(resItemID, current.Text)
+				}
+				switch kind {
+				case "PublicRes", "DocumentRes", "PageRes", "Annotations", "Attachments", "CustomTags", "Extensions":
+					add(current.Text, "", false, true)
+				case "DocRoot":
+					if node.XMLName.Local == "DocVersion" {
+						add(current.Text, "", false, true)
+					}
+				case "File":
+					if parent == "FileList" && node.XMLName.Local == "DocVersion" {
+						add(current.Text, "", false, false)
+					}
+				case "FileLoc":
+					add(current.Text, "", false, parent == "Page" && node.XMLName.Local == "Annotations")
+				case "SchemaLoc", "ExtendData":
+					add(current.Text, "", false, false)
+				case "FontFile", "MediaFile", "Profile":
+					add(current.Text, resItemID, true, false)
+				}
+				for _, child := range current.Children {
+					walk(child, kind, resItemID, depth+1)
+				}
+			}
+			walk(node, "", "", 0)
+		}
+		expanded := true
+		for expanded {
+			expanded = false
+			for id := range usedIDs {
+				for _, dep := range resDeps[id] {
+					if !usedIDs[dep] {
+						usedIDs[dep] = true
+						expanded = true
+					}
+				}
+			}
+		}
+		var remaining []pendingResFile
+		progressed := false
+		for _, item := range pending {
+			if usedIDs[item.id] {
+				required[item.resolved] = true
+				if item.structure && !seen[item.resolved] {
+					queue = append(queue, item.resolved)
+					progressed = true
+				}
+			} else {
+				remaining = append(remaining, item)
+			}
+		}
+		pending = remaining
+		if !progressed {
+			break
+		}
+	}
+	return nil
 }

@@ -27,9 +27,6 @@ import (
 // ptPerMM 为毫米转换为排版点的比例
 const ptPerMM = 72.0 / 25.4
 
-// canvasGlyphBoundsKey 区分跨渲染器共享的字形局部包围盒缓存
-type canvasGlyphBoundsKey struct{}
-
 // intersectCanvasRect 计算两个画布矩形的交集并判断是否有正面积或有效范围
 // 入参: a 矩形一, b 矩形二
 // 返回: canvas.Rect 交集矩形, bool 是否相交
@@ -44,21 +41,6 @@ func intersectCanvasRect(a, b canvas.Rect) (canvas.Rect, bool) {
 		return canvas.Rect{}, false
 	}
 	return r, true
-}
-
-// cachedGlyphBounds 获取或缓存只读字形路径的本地包围盒，避免重复求解贝塞尔极值
-// 入参: cache 共享包围盒缓存, path 只读字形路径
-// 返回: canvas.Rect 本地包围盒
-func cachedGlyphBounds(cache *renderCache[*canvas.Path, canvas.Rect], path *canvas.Path) canvas.Rect {
-	if path == nil || path.Empty() {
-		return canvas.Rect{}
-	}
-	if bounds, ok := cache.get(path); ok {
-		return bounds
-	}
-	bounds := path.Bounds()
-	cache.put(path, bounds, 64)
-	return bounds
 }
 
 // renderText 渲染文本
@@ -266,6 +248,10 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		ctx.Pop()
 		return
 	}
+	var runRunes []rune
+	if textRun != nil {
+		runRunes = []rune(textRun.Text)
+	}
 	glyphTransforms := r.textObjectGlyphTransforms(fontID, obj)
 	_, shadedFill := fillPaint.(canvas.Gradient)
 	pdfOutput, _ := ctx.Renderer.(*pdfRenderer)
@@ -357,10 +343,6 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if clipPath != nil {
 		clipRect, hasRectClip = rectangularPath(clipPath)
 	}
-	var glyphBoundsCache *renderCache[*canvas.Path, canvas.Rect]
-	if textRun != nil {
-		glyphBoundsCache = sharedCanvasCache[*canvas.Path, canvas.Rect](r, canvasGlyphBoundsKey{}, 2<<20)
-	}
 	for _, tc := range obj.TextCode {
 		if r.pageContext != nil {
 			if err := r.pageContext.Err(); err != nil {
@@ -413,8 +395,12 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			}
 			var glyphPath *canvas.Path
 			var glyphWidth float64
+			var glyphBounds canvas.Rect
+			hasGlyphCached := false
 			if drawAsGlyphPath && !pdfText {
-				glyphPath, glyphWidth = r.cachedTextGlyphPath(face, glyph)
+				cached := r.cachedTextGlyph(face, glyph)
+				glyphPath, glyphWidth, glyphBounds = cached.path, cached.width, cached.bounds
+				hasGlyphCached = true
 			} else {
 				glyphWidth = textGlyphWidth(face, glyph)
 			}
@@ -431,8 +417,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			}
 			if textRun != nil {
 				if i < len(spans) {
-					if glyphPath == nil {
-						glyphPath, _ = r.cachedTextGlyphPath(face, glyph)
+					if !hasGlyphCached {
+						cached := r.cachedTextGlyph(face, glyph)
+						glyphPath, glyphBounds = cached.path, cached.bounds
 					}
 					scaleX := hScale
 					m := canvas.Identity.Translate(canvasX, canvasY)
@@ -441,25 +428,17 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					}
 					gm := m.Scale(scaleX, 1)
 					hasGlyphOutline := !glyphPath.Empty()
-					var glyphBounds canvas.Rect
-					if hasGlyphOutline {
-						glyphBounds = cachedGlyphBounds(glyphBoundsCache, glyphPath)
-					}
 					var box Box
-					if clipPath == nil || hasRectClip {
-						if hasGlyphOutline {
-							rect := glyphBounds.Transform(gm)
-							visible := true
-							if hasRectClip {
-								rect, visible = intersectCanvasRect(rect, clipRect)
-							}
-							if visible {
+					if hasGlyphOutline {
+						rect := glyphBounds.Transform(gm)
+						if !hasRectClip || rect.Overlaps(clipRect) {
+							if isAxisAlignedCanvasMatrix(gm) && (clipPath == nil || hasRectClip && clipRect.Contains(rect)) {
 								box = Box{X: rect.X0, Y: pageH - rect.Y1, W: rect.X1 - rect.X0, H: rect.Y1 - rect.Y0}
+							} else {
+								path := glyphPath.Copy().Transform(gm)
+								box = textPathBox(r.applyCachedClipPath(path, clipPath), pageH)
 							}
 						}
-					} else if hasGlyphOutline {
-						path := glyphPath.Copy().Transform(gm)
-						box = textPathBox(r.applyCachedClipPath(path, clipPath), pageH)
 					}
 					for j := spans[i][0]; j < spans[i][1]; j++ {
 						textRun.Boxes[textPos+j] = unionTextBox(textRun.Boxes[textPos+j], box)
@@ -468,7 +447,11 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 					if hasGlyphOutline {
 						bounds = bounds.Add(glyphBounds)
 					}
-					textRun.addSpan(textPos+spans[i][0], textPos+spans[i][1], bounds, gm, clipPath, pageH)
+					start, end := textPos+spans[i][0], textPos+spans[i][1]
+					textRun.addSpan(start, end, bounds, gm, clipPath, pageH)
+					if i+1 == len(spans) || spans[i+1] != spans[i] {
+						textRun.mergeLastSpan(runRunes, start, end)
+					}
 				}
 				if r.textOnly {
 					continue

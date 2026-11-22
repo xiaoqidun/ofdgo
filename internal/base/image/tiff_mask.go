@@ -20,6 +20,12 @@ import (
 	"image/color"
 )
 
+// maskedTIFFImage 将独立透明蒙版叠加到主图，复用两个目录的只读像素
+type maskedTIFFImage struct {
+	source, mask image.Image
+	bounds       image.Rectangle
+}
+
 // DecodeTIFF 解码主图及透明蒙版，保留颜色精度与高分辨率蒙版
 // 入参: ctx 取消上下文，可为nil, data TIFF编码, layout 主图布局
 // 返回: image.Image 图像, error 解码或取消错误
@@ -33,12 +39,6 @@ func DecodeTIFF(ctx context.Context, data []byte, layout TIFFLayout) (image.Imag
 		return nil, err
 	}
 	return &maskedTIFFImage{source: source, mask: mask, bounds: image.Rectangle{Max: layout.DisplaySize()}}, nil
-}
-
-// maskedTIFFImage 将独立透明蒙版叠加到主图，复用两个目录的只读像素
-type maskedTIFFImage struct {
-	source, mask image.Image
-	bounds       image.Rectangle
 }
 
 // Bounds 返回主图和蒙版共同覆盖的像素区域

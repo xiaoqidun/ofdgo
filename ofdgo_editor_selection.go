@@ -47,6 +47,87 @@ type TextFontChange struct {
 	To   TextFontStyle `json:"to"`
 }
 
+// editorSelectionPart 保存按绘制顺序排列的顶层或内部对象快照
+type editorSelectionPart struct {
+	objects   []GraphicObject
+	composite *CompositeSelection
+}
+
+// editorTargetGroup 保存同一父路径的直接成员，结构操作按逆序处理父路径
+type editorTargetGroup struct {
+	path    ObjectPath
+	indexes []int
+}
+
+// editorTargetGroups 分离顶层与内部选区，拒绝重复或相互包含的路径
+// 入参: paths 完整对象路径
+// 返回: []string 正文标识, []string 注解标识, []editorTargetGroup 内部成员, error 路径错误
+func editorTargetGroups(paths []ObjectPath) ([]string, []string, []editorTargetGroup, error) {
+	var objects, annotations []string
+	var groups []editorTargetGroup
+	for i, path := range paths {
+		if path.Signature != "" || (path.ID == "") == (path.Annotation == "") || slices.ContainsFunc(path.Children, func(index int) bool { return index < 0 }) {
+			return nil, nil, nil, fmt.Errorf("invalid object path")
+		}
+		for _, other := range paths[:i] {
+			length := min(len(path.Children), len(other.Children))
+			if path.ID == other.ID && path.Annotation == other.Annotation && slices.Equal(path.Children[:length], other.Children[:length]) {
+				return nil, nil, nil, fmt.Errorf("selection paths overlap")
+			}
+		}
+		if len(path.Children) == 0 {
+			if path.Annotation != "" {
+				annotations = append(annotations, path.Annotation)
+			} else {
+				objects = append(objects, path.ID)
+			}
+			continue
+		}
+		index := path.Children[len(path.Children)-1]
+		path.Children = slices.Clone(path.Children[:len(path.Children)-1])
+		group := slices.IndexFunc(groups, func(group editorTargetGroup) bool {
+			return path.ID == group.path.ID && path.Annotation == group.path.Annotation && slices.Equal(path.Children, group.path.Children)
+		})
+		if group < 0 {
+			groups = append(groups, editorTargetGroup{path: path, indexes: []int{index}})
+		} else {
+			groups[group].indexes = append(groups[group].indexes, index)
+		}
+	}
+	slices.SortFunc(groups, func(a, b editorTargetGroup) int {
+		if order := cmp.Compare(a.path.ID, b.path.ID); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(a.path.Annotation, b.path.Annotation); order != 0 {
+			return order
+		}
+		return -slices.Compare(a.path.Children, b.path.Children)
+	})
+	return objects, annotations, groups, nil
+}
+
+// splitSignatureTargets 校验并分离签章外观，普通对象沿用既有路径校验
+// 入参: paths 完整对象路径
+// 返回: []ObjectPath 普通路径, []ObjectPath 签章路径, error 重复或无效路径
+func splitSignatureTargets(paths []ObjectPath) ([]ObjectPath, []ObjectPath, error) {
+	if !slices.ContainsFunc(paths, func(path ObjectPath) bool { return path.Signature != "" }) {
+		return paths, nil, nil
+	}
+	var regular, signatures []ObjectPath
+	for _, path := range paths {
+		if path.Signature == "" {
+			regular = append(regular, path)
+			continue
+		}
+		if path.ID == "" || path.Annotation != "" || len(path.Children) != 0 || slices.ContainsFunc(signatures, func(other ObjectPath) bool { return other.Signature == path.Signature && other.ID == path.ID }) {
+			return nil, nil, fmt.Errorf("invalid or duplicate signature appearance path")
+		}
+		signatures = append(signatures, path)
+	}
+	_, _, _, err := editorTargetGroups(regular)
+	return regular, signatures, err
+}
+
 // SelectionBounds 获取正文与注解混合选区的实际范围，复用同一次度量的资源缓存
 // 入参: page 页面索引, objects 正文标识, annotations 注解标识，各列表不得重复
 // 返回: Box 页面毫米范围, error 标识或度量错误
@@ -72,7 +153,7 @@ func (e *Editor) TransformSelection(page int, objects, annotations []string, mat
 	if _, ok := matrix.Invert(); !ok {
 		return fmt.Errorf("selection transform must be finite and invertible")
 	}
-	if matrix == IdentityMatrix {
+	if matrix == IdentityMatrix() {
 		if _, _, err := e.selectedObjects(page, objects); err != nil {
 			return err
 		}
@@ -656,7 +737,7 @@ func (e *Editor) ArrangeTargets(page int, paths []ObjectPath, distribute bool, d
 	}
 	return e.Transaction(func(edit *Editor) error {
 		for i, matrix := range matrices {
-			if matrix != IdentityMatrix {
+			if matrix != IdentityMatrix() {
 				if err := edit.TransformTargets(page, paths[i:i+1], matrix); err != nil {
 					return err
 				}
@@ -893,23 +974,11 @@ func (e *Editor) WriteTargetsTo(ctx context.Context, writer io.Writer, page int,
 	return packet.WriteToWithOptions(ctx, writer, WriteOptions{})
 }
 
-// editorSelectionPart 保存按绘制顺序排列的顶层或内部对象快照
-type editorSelectionPart struct {
-	objects   []GraphicObject
-	composite *CompositeSelection
-}
-
-// editorTargetGroup 保存同一父路径的直接成员，结构操作按逆序处理父路径
-type editorTargetGroup struct {
-	path    ObjectPath
-	indexes []int
-}
-
 // orientSelection 将直角旋转或镜像定位到混合选区中心，恒等变换仅校验标识
 // 入参: page 页面索引, objects 正文标识, annotations 注解标识, matrix 方向变换
 // 返回: error 标识、度量或编辑错误
 func (e *Editor) orientSelection(page int, objects, annotations []string, matrix Matrix) error {
-	if matrix != IdentityMatrix {
+	if matrix != IdentityMatrix() {
 		bounds, err := e.SelectionBounds(page, objects, annotations)
 		if err != nil {
 			return err
@@ -1029,7 +1098,7 @@ func (e *Editor) transformSelection(page int, objects, annotations []string, mat
 		changes := make(map[string]Matrix, len(objects))
 		var updates []GraphicObject
 		for i, id := range objects {
-			if matrices[i] != IdentityMatrix {
+			if matrices[i] != IdentityMatrix() {
 				changes[id] = matrices[i]
 				updates = append(updates, items[i])
 			}
@@ -1043,7 +1112,7 @@ func (e *Editor) transformSelection(page int, objects, annotations []string, mat
 		}
 		for i, id := range annotations {
 			matrix := matrices[len(objects)+i]
-			if matrix != IdentityMatrix {
+			if matrix != IdentityMatrix() {
 				if err := edit.MoveAnnotations(page, []string{id}, matrix.e, matrix.f); err != nil {
 					return err
 				}
@@ -1214,73 +1283,4 @@ func (e *Editor) formatTargetsText(page int, paths []ObjectPath, patch TextForma
 		}
 		return nil
 	})
-}
-
-// editorTargetGroups 分离顶层与内部选区，拒绝重复或相互包含的路径
-// 入参: paths 完整对象路径
-// 返回: []string 正文标识, []string 注解标识, []editorTargetGroup 内部成员, error 路径错误
-func editorTargetGroups(paths []ObjectPath) ([]string, []string, []editorTargetGroup, error) {
-	var objects, annotations []string
-	var groups []editorTargetGroup
-	for i, path := range paths {
-		if path.Signature != "" || (path.ID == "") == (path.Annotation == "") || slices.ContainsFunc(path.Children, func(index int) bool { return index < 0 }) {
-			return nil, nil, nil, fmt.Errorf("invalid object path")
-		}
-		for _, other := range paths[:i] {
-			length := min(len(path.Children), len(other.Children))
-			if path.ID == other.ID && path.Annotation == other.Annotation && slices.Equal(path.Children[:length], other.Children[:length]) {
-				return nil, nil, nil, fmt.Errorf("selection paths overlap")
-			}
-		}
-		if len(path.Children) == 0 {
-			if path.Annotation != "" {
-				annotations = append(annotations, path.Annotation)
-			} else {
-				objects = append(objects, path.ID)
-			}
-			continue
-		}
-		index := path.Children[len(path.Children)-1]
-		path.Children = slices.Clone(path.Children[:len(path.Children)-1])
-		group := slices.IndexFunc(groups, func(group editorTargetGroup) bool {
-			return path.ID == group.path.ID && path.Annotation == group.path.Annotation && slices.Equal(path.Children, group.path.Children)
-		})
-		if group < 0 {
-			groups = append(groups, editorTargetGroup{path: path, indexes: []int{index}})
-		} else {
-			groups[group].indexes = append(groups[group].indexes, index)
-		}
-	}
-	slices.SortFunc(groups, func(a, b editorTargetGroup) int {
-		if order := cmp.Compare(a.path.ID, b.path.ID); order != 0 {
-			return order
-		}
-		if order := cmp.Compare(a.path.Annotation, b.path.Annotation); order != 0 {
-			return order
-		}
-		return -slices.Compare(a.path.Children, b.path.Children)
-	})
-	return objects, annotations, groups, nil
-}
-
-// splitSignatureTargets 校验并分离签章外观，普通对象沿用既有路径校验
-// 入参: paths 完整对象路径
-// 返回: []ObjectPath 普通路径, []ObjectPath 签章路径, error 重复或无效路径
-func splitSignatureTargets(paths []ObjectPath) ([]ObjectPath, []ObjectPath, error) {
-	if !slices.ContainsFunc(paths, func(path ObjectPath) bool { return path.Signature != "" }) {
-		return paths, nil, nil
-	}
-	var regular, signatures []ObjectPath
-	for _, path := range paths {
-		if path.Signature == "" {
-			regular = append(regular, path)
-			continue
-		}
-		if path.ID == "" || path.Annotation != "" || len(path.Children) != 0 || slices.ContainsFunc(signatures, func(other ObjectPath) bool { return other.Signature == path.Signature && other.ID == path.ID }) {
-			return nil, nil, fmt.Errorf("invalid or duplicate signature appearance path")
-		}
-		signatures = append(signatures, path)
-	}
-	_, _, _, err := editorTargetGroups(regular)
-	return regular, signatures, err
 }

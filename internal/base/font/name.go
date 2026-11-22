@@ -22,6 +22,16 @@ import (
 	"golang.org/x/text/encoding/charmap"
 )
 
+// fontNameRecord 字体名称表记录
+type fontNameRecord struct {
+	Platform uint16
+	Encoding uint16
+	Language uint16
+	Name     uint16
+	Length   uint16
+	Offset   uint16
+}
+
 // FileNames 按字体索引读取字体或集合中各项的名称
 // 入参: file 字体数据
 // 返回: [][]string 各字体名称及带样式的字体族名称
@@ -54,16 +64,6 @@ func FileNames(file io.ReaderAt) [][]string {
 func NamesFromTable(data []byte) []string {
 	records, values := fontNameValues(data)
 	return fontNamesFromValues(records, values)
-}
-
-// fontNameRecord 字体名称表记录
-type fontNameRecord struct {
-	Platform uint16
-	Encoding uint16
-	Language uint16
-	Name     uint16
-	Length   uint16
-	Offset   uint16
 }
 
 // fontFaceNames 读取指定字体表目录中的名称
@@ -117,7 +117,7 @@ func fontNamesFromValues(records []fontNameRecord, values map[[4]uint16]string) 
 		default:
 			continue
 		}
-		names = AppendFontName(names, seen, name)
+		names = appendFontName(names, seen, name)
 	}
 	return names
 }

@@ -23,6 +23,13 @@ import (
 	"math/bits"
 )
 
+// bmpColorMask 保存一个BMP颜色分量的位域位置和取值范围
+type bmpColorMask struct {
+	mask  uint32
+	shift uint
+	Max   uint32
+}
+
 // DecodeConfig 读取图片尺寸，BMP和TIFF只读取布局信息，不解码像素
 // 入参: input 图片输入流
 // 返回: image.Config 图片配置, string 图片格式, error 头部错误
@@ -75,14 +82,20 @@ func BMPColorMasks(data []byte, offset int, bpp uint16, compression uint32) ([4]
 		if bpp == 24 {
 			return result, fmt.Errorf("invalid bmp bitfield depth")
 		}
+		if offset < 66 || len(data) < 66 {
+			return result, fmt.Errorf("truncated bmp color masks")
+		}
 		header := binary.LittleEndian.Uint32(data[14:18])
-		if offset < 66 || len(data) < 66 || header != 40 && header < 52 {
+		if header != 40 && header < 52 {
 			return result, fmt.Errorf("truncated bmp color masks")
 		}
 		for i := range 3 {
 			masks[i] = binary.LittleEndian.Uint32(data[54+i*4:])
 		}
 		if header >= 56 {
+			if offset < 70 || len(data) < 70 {
+				return result, fmt.Errorf("truncated bmp color masks")
+			}
 			masks[3] = binary.LittleEndian.Uint32(data[66:70])
 		}
 	default:
@@ -105,13 +118,6 @@ func BMPColorMasks(data []byte, offset int, bpp uint16, compression uint32) ([4]
 		used |= mask
 	}
 	return result, nil
-}
-
-// bmpColorMask 保存一个BMP颜色分量的位域位置和取值范围
-type bmpColorMask struct {
-	mask  uint32
-	shift uint
-	Max   uint32
 }
 
 // sample 将位域采样值映射到八位通道，缺省透明度为不透明

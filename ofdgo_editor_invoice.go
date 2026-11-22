@@ -61,6 +61,181 @@ type InvoiceCapabilities struct {
 	Reasons  map[string]string `json:"reasons"`
 }
 
+// invoiceBindingRecord 保存当前文档内的来源选择器，资源路径变化时仍以入口和摘要核对载荷
+type invoiceBindingRecord struct {
+	Kind     string             `json:"kind"`
+	ID       string             `json:"id"`
+	NodePath string             `json:"nodePath,omitempty"`
+	Digest   string             `json:"digest"`
+	Invoice  int                `json:"invoice"`
+	Layout   *InvoiceLayout     `json:"layout,omitempty"`
+	Pages    []invoiceOwnedPage `json:"pages,omitempty"`
+}
+
+// invoiceOwnedPage 记录自动生成票面的标识和内容摘要，不覆盖后续人工修改
+type invoiceOwnedPage struct {
+	ID     string `json:"id"`
+	Digest string `json:"digest"`
+}
+
+// invoiceBindingEntry 保存标引索引及当前页序中的图元关联
+type invoiceBindingEntry struct {
+	index    int
+	record   invoiceBindingRecord
+	bindings []InvoiceBinding
+}
+
+// invoiceWritableReport 检查待写入载荷包含可识别发票且没有解析诊断
+// 入参: ctx 取消上下文, data 结构化原文
+// 返回: InvoiceReport 发票结果, error 格式或校验错误
+func invoiceWritableReport(ctx context.Context, data []byte) (InvoiceReport, error) {
+	report, err := parseInvoiceXML(ctx, data, InvoiceSource{})
+	if err != nil {
+		return InvoiceReport{}, err
+	}
+	if len(report.Invoices) == 0 {
+		return InvoiceReport{}, fmt.Errorf("no supported invoice data")
+	}
+	if len(report.Issues) > 0 {
+		return InvoiceReport{}, fmt.Errorf("invalid invoice data: %s", report.Issues[0].Message)
+	}
+	if err := invoiceValidateXMLWrite(ctx, nil, data); err != nil {
+		return InvoiceReport{}, err
+	}
+	return report, nil
+}
+
+// invoicePayloadSignature 识别XML数字签名和官方税务签名段，不推断签名有效性
+// 入参: ctx 取消上下文, data 结构化原文
+// 返回: bool 是否存在签名声明, error XML或取消错误
+func invoicePayloadSignature(ctx context.Context, data []byte) (bool, error) {
+	root, err := invoiceXMLTree(ctx, data)
+	if err != nil {
+		return false, err
+	}
+	nodes := []*invoiceXMLNode{root}
+	for len(nodes) > 0 {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		node := nodes[len(nodes)-1]
+		nodes = nodes[:len(nodes)-1]
+		if node.name.Space == invoiceXMLSignature && node.name.Local == "Signature" || root.name.Space == "" && root.name.Local == "EInvoice" && node.parent == root && node.name.Space == "" && node.name.Local == "TaxBureauSignature" {
+			return true, nil
+		}
+		nodes = append(nodes, node.children...)
+	}
+	return false, nil
+}
+
+// invoiceRemapBindings 按唯一事实身份维护索引关联，不限制未关联业务字段的修改
+// 入参: before 原发票, after 新发票, bindings 原关联
+// 返回: []InvoiceBinding 更新后的关联, error 身份缺失或歧义错误
+func invoiceRemapBindings(before, after Invoice, bindings []InvoiceBinding) ([]InvoiceBinding, error) {
+	result := slices.Clone(bindings)
+	for i := range result {
+		binding := &result[i]
+		oldFacts, newFacts, prefix := before.Facts, after.Facts, "facts."
+		if strings.HasPrefix(binding.Field, "items.") {
+			if binding.Item < 0 || binding.Item >= len(before.Items) || binding.Item >= len(after.Items) {
+				return nil, fmt.Errorf("bound invoice item no longer exists")
+			}
+			if len(before.Items) != len(after.Items) && !reflect.DeepEqual(before.Items[binding.Item], after.Items[binding.Item]) {
+				return nil, fmt.Errorf("bound invoice item identity changed")
+			}
+			oldFacts, newFacts, prefix = before.Items[binding.Item].Fields, after.Items[binding.Item].Fields, "items.fields."
+		}
+		if !strings.HasPrefix(binding.Field, prefix) {
+			continue
+		}
+		index, err := strconv.Atoi(strings.TrimPrefix(binding.Field, prefix))
+		if err != nil || index < 0 || index >= len(oldFacts) {
+			return nil, fmt.Errorf("bound invoice fact no longer exists")
+		}
+		fact := oldFacts[index]
+		identity := func(candidate InvoiceFact) bool {
+			return candidate.Name == fact.Name && candidate.Namespace == fact.Namespace && candidate.Context == fact.Context && candidate.Unit == fact.Unit && slices.Equal(candidate.Dimensions, fact.Dimensions)
+		}
+		oldCount, match, count := 0, -1, 0
+		for _, candidate := range oldFacts {
+			if identity(candidate) {
+				oldCount++
+			}
+		}
+		for j, candidate := range newFacts {
+			if identity(candidate) {
+				count++
+				match = j
+			}
+		}
+		if oldCount != 1 || count != 1 || fact.Source.NodePath == "" || newFacts[match].Source.NodePath != fact.Source.NodePath {
+			if reflect.DeepEqual(oldFacts, newFacts) {
+				continue
+			}
+			return nil, fmt.Errorf("bound invoice fact identity is missing or ambiguous")
+		}
+		binding.Field = fmt.Sprintf("%s%d", prefix, match)
+	}
+	return result, nil
+}
+
+// invoiceBindingCoverage 检查修改字段的票面关联覆盖情况
+// 入参: before 原发票, after 新发票, bindings 显式关联
+// 返回: error 未绑定字段错误
+func invoiceBindingCoverage(before, after Invoice, bindings []InvoiceBinding) error {
+	type fieldKey struct {
+		field string
+		item  int
+	}
+	old, values := make(map[fieldKey]string), make(map[fieldKey]string)
+	bound := make(map[fieldKey]bool)
+	for _, field := range invoiceLayoutFields(before) {
+		old[fieldKey{field.field, field.item}] = field.value
+	}
+	for _, field := range invoiceLayoutFields(after) {
+		values[fieldKey{field.field, field.item}] = field.value
+	}
+	for _, binding := range bindings {
+		bound[fieldKey{binding.Field, binding.Item}] = true
+		var oldFacts, newFacts []InvoiceFact
+		name := ""
+		if strings.HasPrefix(binding.Field, "facts.") {
+			oldFacts, newFacts, name = before.Facts, after.Facts, strings.TrimPrefix(binding.Field, "facts.")
+		} else if strings.HasPrefix(binding.Field, "items.fields.") {
+			if binding.Item < 0 || binding.Item >= len(before.Items) || binding.Item >= len(after.Items) {
+				return fmt.Errorf("bound invoice item changed")
+			}
+			oldFacts, newFacts, name = before.Items[binding.Item].Fields, after.Items[binding.Item].Fields, strings.TrimPrefix(binding.Field, "items.fields.")
+		}
+		if name != "" {
+			index, err := strconv.Atoi(name)
+			if err != nil || index < 0 || index >= len(oldFacts) || index >= len(newFacts) {
+				return fmt.Errorf("bound invoice fact changed")
+			}
+			a, b := oldFacts[index], newFacts[index]
+			if a.Name != b.Name || a.Namespace != b.Namespace || a.Context != b.Context || a.Unit != b.Unit {
+				return fmt.Errorf("bound invoice fact identity changed")
+			}
+			if mapped, ok := invoiceEDRMFactBinding(before, a); ok {
+				if next, valid := invoiceEDRMFactBinding(after, b); valid && mapped.Field == next.Field && mapped.Item == next.Item {
+					bound[fieldKey{mapped.Field, mapped.Item}] = true
+				}
+			}
+		}
+	}
+	for key, value := range old {
+		if value != values[key] && !bound[key] {
+			return fmt.Errorf("changed invoice field %s has no appearance binding", key.field)
+		}
+	}
+	for key, value := range values {
+		if value != old[key] && !bound[key] {
+			return fmt.Errorf("changed invoice field %s has no appearance binding", key.field)
+		}
+	}
+	return nil
+}
+
 // InvoiceCapabilities 获取当前文档版本的发票操作能力
 // 入参: ctx 取消上下文, source 精确来源, index 来源内从0开始的发票索引
 // 返回: InvoiceCapabilities 操作能力, error 来源、索引或读取错误
@@ -147,6 +322,7 @@ func (r *Reader) InvoiceCapabilities(ctx context.Context, source InvoiceSource, 
 			}
 			for _, binding := range entry.bindings {
 				if err := ctx.Err(); err != nil {
+					_ = editor.Close()
 					return result, err
 				}
 				_, fieldErr := invoiceBindingValue(report.Invoices[index], binding)
@@ -167,6 +343,7 @@ func (r *Reader) InvoiceCapabilities(ctx context.Context, source InvoiceSource, 
 					result.Reasons["sync"] = "生成票面已修改或签名，请重新绑定"
 				}
 			}
+			_ = editor.Close()
 		}
 	}
 	if !result.Sync && result.Reasons["sync"] == "" {
@@ -240,6 +417,7 @@ func (r *Reader) CheckInvoiceAppearance(ctx context.Context, source InvoiceSourc
 	if err != nil {
 		return nil, err
 	}
+	defer editor.Close()
 	var issues []InvoiceIssue
 	for _, binding := range bindings {
 		if err := ctx.Err(); err != nil {
@@ -850,30 +1028,6 @@ func (e *Editor) SetInvoiceBindings(ctx context.Context, source InvoiceSource, i
 	})
 }
 
-// invoiceBindingRecord 保存当前文档内的来源选择器，资源路径变化时仍以入口和摘要核对载荷
-type invoiceBindingRecord struct {
-	Kind     string             `json:"kind"`
-	ID       string             `json:"id"`
-	NodePath string             `json:"nodePath,omitempty"`
-	Digest   string             `json:"digest"`
-	Invoice  int                `json:"invoice"`
-	Layout   *InvoiceLayout     `json:"layout,omitempty"`
-	Pages    []invoiceOwnedPage `json:"pages,omitempty"`
-}
-
-// invoiceOwnedPage 记录自动生成票面的标识和内容摘要，不覆盖后续人工修改
-type invoiceOwnedPage struct {
-	ID     string `json:"id"`
-	Digest string `json:"digest"`
-}
-
-// invoiceBindingEntry 保存标引索引及当前页序中的图元关联
-type invoiceBindingEntry struct {
-	index    int
-	record   invoiceBindingRecord
-	bindings []InvoiceBinding
-}
-
 // reindexInvoiceBindings 在删除入口后维护其他发票的标引序号及内联子树序号
 // 入参: ctx 取消上下文, structures 删除前标引, removed 删除的标引索引, source 删除来源
 // 返回: error 元数据或提交错误
@@ -1033,157 +1187,6 @@ func (r *Reader) invoiceBindings(ctx context.Context, source InvoiceSource, dige
 		entries = append(entries, entry)
 	}
 	return entries, nil
-}
-
-// invoiceWritableReport 检查待写入载荷包含可识别发票且没有解析诊断
-// 入参: ctx 取消上下文, data 结构化原文
-// 返回: InvoiceReport 发票结果, error 格式或校验错误
-func invoiceWritableReport(ctx context.Context, data []byte) (InvoiceReport, error) {
-	report, err := parseInvoiceXML(ctx, data, InvoiceSource{})
-	if err != nil {
-		return InvoiceReport{}, err
-	}
-	if len(report.Invoices) == 0 {
-		return InvoiceReport{}, fmt.Errorf("no supported invoice data")
-	}
-	if len(report.Issues) > 0 {
-		return InvoiceReport{}, fmt.Errorf("invalid invoice data: %s", report.Issues[0].Message)
-	}
-	if err := invoiceValidateXMLWrite(ctx, nil, data); err != nil {
-		return InvoiceReport{}, err
-	}
-	return report, nil
-}
-
-// invoicePayloadSignature 识别XML数字签名和官方税务签名段，不推断签名有效性
-// 入参: ctx 取消上下文, data 结构化原文
-// 返回: bool 是否存在签名声明, error XML或取消错误
-func invoicePayloadSignature(ctx context.Context, data []byte) (bool, error) {
-	root, err := invoiceXMLTree(ctx, data)
-	if err != nil {
-		return false, err
-	}
-	nodes := []*invoiceXMLNode{root}
-	for len(nodes) > 0 {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		node := nodes[len(nodes)-1]
-		nodes = nodes[:len(nodes)-1]
-		if node.name.Space == invoiceXMLSignature && node.name.Local == "Signature" || root.name.Space == "" && root.name.Local == "EInvoice" && node.parent == root && node.name.Space == "" && node.name.Local == "TaxBureauSignature" {
-			return true, nil
-		}
-		nodes = append(nodes, node.children...)
-	}
-	return false, nil
-}
-
-// invoiceRemapBindings 按唯一事实身份维护索引关联，不限制未关联业务字段的修改
-// 入参: before 原发票, after 新发票, bindings 原关联
-// 返回: []InvoiceBinding 更新后的关联, error 身份缺失或歧义错误
-func invoiceRemapBindings(before, after Invoice, bindings []InvoiceBinding) ([]InvoiceBinding, error) {
-	result := slices.Clone(bindings)
-	for i := range result {
-		binding := &result[i]
-		oldFacts, newFacts, prefix := before.Facts, after.Facts, "facts."
-		if strings.HasPrefix(binding.Field, "items.") {
-			if binding.Item < 0 || binding.Item >= len(before.Items) || binding.Item >= len(after.Items) {
-				return nil, fmt.Errorf("bound invoice item no longer exists")
-			}
-			if len(before.Items) != len(after.Items) && !reflect.DeepEqual(before.Items[binding.Item], after.Items[binding.Item]) {
-				return nil, fmt.Errorf("bound invoice item identity changed")
-			}
-			oldFacts, newFacts, prefix = before.Items[binding.Item].Fields, after.Items[binding.Item].Fields, "items.fields."
-		}
-		if !strings.HasPrefix(binding.Field, prefix) {
-			continue
-		}
-		index, err := strconv.Atoi(strings.TrimPrefix(binding.Field, prefix))
-		if err != nil || index < 0 || index >= len(oldFacts) {
-			return nil, fmt.Errorf("bound invoice fact no longer exists")
-		}
-		fact := oldFacts[index]
-		identity := func(candidate InvoiceFact) bool {
-			return candidate.Name == fact.Name && candidate.Namespace == fact.Namespace && candidate.Context == fact.Context && candidate.Unit == fact.Unit && slices.Equal(candidate.Dimensions, fact.Dimensions)
-		}
-		oldCount, match, count := 0, -1, 0
-		for _, candidate := range oldFacts {
-			if identity(candidate) {
-				oldCount++
-			}
-		}
-		for j, candidate := range newFacts {
-			if identity(candidate) {
-				count++
-				match = j
-			}
-		}
-		if oldCount != 1 || count != 1 || fact.Source.NodePath == "" || newFacts[match].Source.NodePath != fact.Source.NodePath {
-			if reflect.DeepEqual(oldFacts, newFacts) {
-				continue
-			}
-			return nil, fmt.Errorf("bound invoice fact identity is missing or ambiguous")
-		}
-		binding.Field = fmt.Sprintf("%s%d", prefix, match)
-	}
-	return result, nil
-}
-
-// invoiceBindingCoverage 检查修改字段的票面关联覆盖情况
-// 入参: before 原发票, after 新发票, bindings 显式关联
-// 返回: error 未绑定字段错误
-func invoiceBindingCoverage(before, after Invoice, bindings []InvoiceBinding) error {
-	type fieldKey struct {
-		field string
-		item  int
-	}
-	old, values := make(map[fieldKey]string), make(map[fieldKey]string)
-	bound := make(map[fieldKey]bool)
-	for _, field := range invoiceLayoutFields(before) {
-		old[fieldKey{field.field, field.item}] = field.value
-	}
-	for _, field := range invoiceLayoutFields(after) {
-		values[fieldKey{field.field, field.item}] = field.value
-	}
-	for _, binding := range bindings {
-		bound[fieldKey{binding.Field, binding.Item}] = true
-		var oldFacts, newFacts []InvoiceFact
-		name := ""
-		if strings.HasPrefix(binding.Field, "facts.") {
-			oldFacts, newFacts, name = before.Facts, after.Facts, strings.TrimPrefix(binding.Field, "facts.")
-		} else if strings.HasPrefix(binding.Field, "items.fields.") {
-			if binding.Item < 0 || binding.Item >= len(before.Items) || binding.Item >= len(after.Items) {
-				return fmt.Errorf("bound invoice item changed")
-			}
-			oldFacts, newFacts, name = before.Items[binding.Item].Fields, after.Items[binding.Item].Fields, strings.TrimPrefix(binding.Field, "items.fields.")
-		}
-		if name != "" {
-			index, err := strconv.Atoi(name)
-			if err != nil || index < 0 || index >= len(oldFacts) || index >= len(newFacts) {
-				return fmt.Errorf("bound invoice fact changed")
-			}
-			a, b := oldFacts[index], newFacts[index]
-			if a.Name != b.Name || a.Namespace != b.Namespace || a.Context != b.Context || a.Unit != b.Unit {
-				return fmt.Errorf("bound invoice fact identity changed")
-			}
-			if mapped, ok := invoiceEDRMFactBinding(before, a); ok {
-				if next, valid := invoiceEDRMFactBinding(after, b); valid && mapped.Field == next.Field && mapped.Item == next.Item {
-					bound[fieldKey{mapped.Field, mapped.Item}] = true
-				}
-			}
-		}
-	}
-	for key, value := range old {
-		if value != values[key] && !bound[key] {
-			return fmt.Errorf("changed invoice field %s has no appearance binding", key.field)
-		}
-	}
-	for key, value := range values {
-		if value != old[key] && !bound[key] {
-			return fmt.Errorf("changed invoice field %s has no appearance binding", key.field)
-		}
-	}
-	return nil
 }
 
 // invoiceOwnedPages 计算编辑快照中指定页面的语义摘要，忽略XML序列化差异

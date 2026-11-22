@@ -16,9 +16,6 @@ package ofdgo
 
 import "errors"
 
-// EditReason 编辑操作受限的原因，不依赖错误描述的语言或文案
-type EditReason string
-
 const (
 	// EditUnsupportedObject 对象包含尚不支持编辑的特性
 	EditUnsupportedObject EditReason = "unsupportedObject"
@@ -38,22 +35,13 @@ const (
 	EditInvalidObject EditReason = "invalidObject"
 )
 
+// EditReason 编辑操作受限的原因，不依赖错误描述的语言或文案
+type EditReason string
+
 // EditError 编辑受限原因及原始错误，可通过errors.As取得Code和更具体的诊断
 type EditError struct {
 	Code EditReason
 	Err  error
-}
-
-// Error 保留原始错误描述
-// 返回: string 错误描述
-func (e *EditError) Error() string {
-	return e.Err.Error()
-}
-
-// Unwrap 保留原始错误链
-// 返回: error 原始错误
-func (e *EditError) Unwrap() error {
-	return e.Err
 }
 
 // editReason 提取编辑错误分类，未分类的校验错误作为对象数据异常
@@ -69,4 +57,25 @@ func editReason(err error) EditReason {
 		return failure.Code
 	}
 	return EditInvalidObject
+}
+
+// Error 保留原始错误描述
+// 返回: string 错误描述
+func (e *EditError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Err == nil {
+		return string(e.Code)
+	}
+	return e.Err.Error()
+}
+
+// Unwrap 保留原始错误链
+// 返回: error 原始错误
+func (e *EditError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }

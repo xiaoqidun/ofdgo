@@ -58,184 +58,6 @@ type FontRegistry struct {
 	level    int
 }
 
-// MapGlyph 线程安全地登记源字形编号并返回子集内连续CID编号
-// 入参: gid 源字体字形编号
-// 返回: uint16 子集字形编号
-func (e *FontEntry) MapGlyph(gid uint16) uint16 {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.subset.Get(gid)
-}
-
-// NewFontRegistry 创建文档级并发安全字体注册表
-// 入参: allocRef 对象引用分配器, subset 是否启用字形子集化, compress 是否压缩字体流, level zlib压缩级别
-// 返回: *FontRegistry 字体注册表
-func NewFontRegistry(allocRef func() pdfgo.Reference, subset, compress bool, level int) *FontRegistry {
-	return &FontRegistry{
-		allocRef: allocRef,
-		entries:  make(map[fontRegistryKey]*FontEntry),
-		subset:   subset,
-		compress: compress,
-		level:    level,
-	}
-}
-
-// Register 线程安全地获取或注册字体对应的PDF资源名、间接引用与字形映射项
-// 入参: font 画布字体, vertical 是否竖排
-// 返回: pdfgo.Name 资源名, pdfgo.Reference 对象引用, *FontEntry 字体登记项
-func (r *FontRegistry) Register(font *canvas.Font, vertical bool) (pdfgo.Name, pdfgo.Reference, *FontEntry) {
-	std := standardPDFFontName(font)
-	key := fontRegistryKey{font: font, vertical: vertical && std == ""}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if entry, ok := r.entries[key]; ok {
-		return entry.Name, entry.Ref, entry
-	}
-	ref := r.allocRef()
-	name := pdfgo.Name("F" + strconv.Itoa(len(r.order)))
-	entry := &FontEntry{
-		Ref:          ref,
-		Name:         name,
-		Font:         font,
-		Vertical:     key.vertical,
-		StandardName: std,
-	}
-	if std == "" {
-		entry.subset = canvas.NewFontSubsetter()
-	}
-	r.entries[key] = entry
-	r.order = append(r.order, entry)
-	return name, ref, entry
-}
-
-// WriteAll 多核并发完成全部字体的子集化、ToUnicode构建与Flate压缩，并按序流式写出
-// 入参: ctx 取消上下文, writer 流式PDF写出器, workers 并发工作协程数
-// 返回: error 子集化或写出错误
-func (r *FontRegistry) WriteAll(ctx context.Context, writer *StreamWriter, workers int) error {
-	r.mu.Lock()
-	list := slices.Clone(r.order)
-	r.mu.Unlock()
-	if len(list) == 0 {
-		return ctx.Err()
-	}
-	slices.SortFunc(list, func(a, b *FontEntry) int { return cmp.Compare(a.Ref.Number, b.Ref.Number) })
-	results := make([]compiledFont, len(list))
-	if workers < 1 {
-		workers = 1
-	}
-	if workers > len(list) {
-		workers = len(list)
-	}
-	if workers == 1 {
-		var zw *zlib.Writer
-		var zbuf bytes.Buffer
-		for i, entry := range list {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			results[i], zw = compileFontEntry(entry, r.subset, r.compress, r.level, zw, &zbuf)
-			if results[i].err != nil {
-				return results[i].err
-			}
-		}
-	} else {
-		jobs := make(chan int, len(list))
-		for i := range list {
-			jobs <- i
-		}
-		close(jobs)
-		var wg sync.WaitGroup
-		for range workers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				var zw *zlib.Writer
-				var zbuf bytes.Buffer
-				for i := range jobs {
-					if ctx.Err() != nil {
-						return
-					}
-					results[i], zw = compileFontEntry(list[i], r.subset, r.compress, r.level, zw, &zbuf)
-				}
-			}()
-		}
-		wg.Wait()
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-	}
-	usedTags := make(map[string]bool, len(results))
-	for i := range results {
-		res := &results[i]
-		if res.err != nil {
-			return res.err
-		}
-		if res.entry.StandardName != "" {
-			if err := writer.WriteObject(res.entry.Ref, res.dict); err != nil {
-				return err
-			}
-			continue
-		}
-		toUnicodeRef := writer.AllocRef()
-		toUnicodeDict := pdfgo.Dictionary{}
-		if r.compress {
-			toUnicodeDict["Filter"] = pdfgo.Name("FlateDecode")
-		}
-		if err := writer.WritePreencodedStream(toUnicodeRef, toUnicodeDict, res.toUnicodeData); err != nil {
-			return err
-		}
-		res.toUnicodeData = nil
-		fontFileRef := writer.AllocRef()
-		if err := writer.WritePreencodedStream(fontFileRef, res.fontFileDict, res.fontFileData); err != nil {
-			return err
-		}
-		res.fontFileData = nil
-		res.dict["ToUnicode"] = toUnicodeRef
-		descendants := res.dict["DescendantFonts"].(pdfgo.Array)
-		cidFont := descendants[0].(pdfgo.Dictionary)
-		descriptor := cidFont["FontDescriptor"].(pdfgo.Dictionary)
-		descriptor[res.fontFileKey] = fontFileRef
-		if res.subsetTag != "" {
-			tag := res.subsetTag
-			for usedTags[tag] {
-				tag = nextSubsetTag(tag)
-			}
-			usedTags[tag] = true
-			if tag != res.subsetTag {
-				fullName := pdfgo.Name(tag + "+" + res.baseFontName)
-				res.dict["BaseFont"] = fullName
-				cidFont["BaseFont"] = fullName
-				descriptor["FontName"] = fullName
-			}
-		}
-		if res.encodingCMapData != nil {
-			encRef := writer.AllocRef()
-			if err := writer.WritePreencodedStream(encRef, res.encodingCMapDict, res.encodingCMapData); err != nil {
-				return err
-			}
-			res.encodingCMapData = nil
-			res.encodingCMapDict = nil
-			res.dict["Encoding"] = encRef
-		}
-		if res.cidMapData != nil {
-			cidMapRef := writer.AllocRef()
-			cidMapDict := pdfgo.Dictionary{}
-			if r.compress {
-				cidMapDict["Filter"] = pdfgo.Name("FlateDecode")
-			}
-			if err := writer.WritePreencodedStream(cidMapRef, cidMapDict, res.cidMapData); err != nil {
-				return err
-			}
-			res.cidMapData = nil
-			cidFont["CIDToGIDMap"] = cidMapRef
-		}
-		if err := writer.WriteObject(res.entry.Ref, res.dict); err != nil {
-			return err
-		}
-	}
-	return ctx.Err()
-}
-
 // fontRegistryKey 按字体实例与书写方向隔离PDF字体对象
 type fontRegistryKey struct {
 	font     *canvas.Font
@@ -258,6 +80,19 @@ type compiledFont struct {
 	err              error
 }
 
+// NewFontRegistry 创建文档级并发安全字体注册表
+// 入参: allocRef 对象引用分配器, subset 是否启用字形子集化, compress 是否压缩字体流, level zlib压缩级别
+// 返回: *FontRegistry 字体注册表
+func NewFontRegistry(allocRef func() pdfgo.Reference, subset, compress bool, level int) *FontRegistry {
+	return &FontRegistry{
+		allocRef: allocRef,
+		entries:  make(map[fontRegistryKey]*FontEntry),
+		subset:   subset,
+		compress: compress,
+		level:    level,
+	}
+}
+
 // compileFontEntry 将单个字体登记项编译为Type1或Type0+CIDFont字典及压缩字体流
 // 入参: entry 字体登记项, doSubset 是否子集化, compress 是否Flate压缩, level zlib级别, zw 复用压缩器, zbuf 复用缓冲
 // 返回: compiledFont 编译结果, *zlib.Writer 复用后的压缩器
@@ -272,6 +107,9 @@ func compileFontEntry(entry *FontEntry, doSubset, compress bool, level int, zw *
 		return compiledFont{entry: entry, dict: dict}, zw
 	}
 	font := entry.Font
+	if font == nil || font.SFNT == nil || font.SFNT.Head == nil || font.SFNT.Head.UnitsPerEm == 0 {
+		return compiledFont{entry: entry, err: fmt.Errorf("invalid PDF font unitsPerEm")}, zw
+	}
 	glyphIDs := entry.subset.List()
 	fontProgram := font.SFNT.Write()
 	parsed, parseErr := basefont.ParseSFNT(fontProgram)
@@ -362,9 +200,21 @@ func compileFontEntry(entry *FontEntry, doSubset, compress bool, level int, zw *
 	if entry.Vertical {
 		encoding = "Identity-V"
 	}
-	descent := int(f * float64(font.SFNT.Hhea.Descender))
-	if descent > 0 {
-		descent = -descent
+	ascent, descent := 0, 0
+	if font.SFNT.Hhea != nil {
+		ascent = int(f * float64(font.SFNT.Hhea.Ascender))
+		descent = int(f * float64(font.SFNT.Hhea.Descender))
+		if descent > 0 {
+			descent = -descent
+		}
+	}
+	italicAngle := 0.0
+	if font.SFNT.Post != nil && finite(float64(font.SFNT.Post.ItalicAngle)) {
+		italicAngle = float64(font.SFNT.Post.ItalicAngle)
+	}
+	capHeight := 0
+	if font.SFNT.OS2 != nil {
+		capHeight = int(f * float64(font.SFNT.OS2.SCapHeight))
 	}
 	cidDict := pdfgo.Dictionary{
 		"Type":     pdfgo.Name("Font"),
@@ -387,10 +237,10 @@ func compileFontEntry(entry *FontEntry, doSubset, compress bool, level int, zw *
 				pdfgo.Integer(int(f * float64(font.SFNT.Head.XMax))),
 				pdfgo.Integer(int(f * float64(font.SFNT.Head.YMax))),
 			},
-			"ItalicAngle": pdfgo.Real(float64(font.SFNT.Post.ItalicAngle)),
-			"Ascent":      pdfgo.Integer(int(f * float64(font.SFNT.Hhea.Ascender))),
+			"ItalicAngle": pdfgo.Real(italicAngle),
+			"Ascent":      pdfgo.Integer(ascent),
 			"Descent":     pdfgo.Integer(descent),
-			"CapHeight":   pdfgo.Integer(int(f * float64(font.SFNT.OS2.SCapHeight))),
+			"CapHeight":   pdfgo.Integer(capHeight),
 			"StemV":       pdfgo.Integer(80),
 		},
 	}
@@ -527,24 +377,26 @@ func buildToUnicodeCMap(font *canvas.Font, glyphIDs []uint16) []byte {
 			chars = append(chars, bfCharItem{cid: startGID, unicode: startUni})
 		}
 	}
-	for subsetIdx, gid := range glyphIDs[1:] {
-		rs := font.SFNT.GlyphToUnicode(gid)
-		if len(rs) == 0 {
-			continue
-		}
-		uni := uint32(rs[0])
-		if uni >= 0x10000 && uni <= 0x10FFFF {
-			uni -= 0x10000
-			uni = (0xD800+(uni>>10)&0x3FF)<<16 + 0xDC00 + uni&0x3FF
-		}
-		cid := uint16(subsetIdx + 1)
-		if cid == startGID+length && uni == startUni+uint32(length) && (startUni>>8) == (uni>>8) {
-			length++
-		} else {
-			flush()
-			startGID = cid
-			startUni = uni
-			length = 1
+	if len(glyphIDs) > 1 {
+		for subsetIdx, gid := range glyphIDs[1:] {
+			rs := font.SFNT.GlyphToUnicode(gid)
+			if len(rs) == 0 {
+				continue
+			}
+			uni := uint32(rs[0])
+			if uni >= 0x10000 && uni <= 0x10FFFF {
+				uni -= 0x10000
+				uni = (0xD800+(uni>>10)&0x3FF)<<16 + 0xDC00 + uni&0x3FF
+			}
+			cid := uint16(subsetIdx + 1)
+			if cid == startGID+length && uni == startUni+uint32(length) && (startUni>>8) == (uni>>8) {
+				length++
+			} else {
+				flush()
+				startGID = cid
+				startUni = uni
+				length = 1
+			}
 		}
 	}
 	flush()
@@ -638,8 +490,14 @@ func buildCIDWidthsArray(targetCIDs []uint16, widths []int, dw int) pdfgo.Array 
 // 入参: font 源画布字体, glyphIDs 子集字形列表, targetCIDs 可选目标CID映射, widths 水平宽度列表, f 字体单位到千分em换算系数
 // 返回: pdfgo.Array DW2数组, pdfgo.Array W2数组
 func buildFontVerticalMetrics(font *canvas.Font, glyphIDs, targetCIDs []uint16, widths []int, f float64) (pdfgo.Array, pdfgo.Array) {
+	if !finite(f) || f <= 0 {
+		f = 1
+	}
 	defaultOriginY, vorgOverrides, hasVORG := parseVORGTable(font.SFNT.Tables["VORG"])
-	defaultVY := int(math.Round(f * float64(font.SFNT.Hhea.Ascender)))
+	defaultVY := 0
+	if font.SFNT.Hhea != nil {
+		defaultVY = int(math.Round(f * float64(font.SFNT.Hhea.Ascender)))
+	}
 	if hasVORG {
 		defaultVY = int(math.Round(f * float64(defaultOriginY)))
 	} else if defaultVY == 0 {
@@ -899,4 +757,169 @@ func standardPDFFontName(font *canvas.Font) string {
 		}
 	}
 	return ""
+}
+
+// MapGlyph 线程安全地登记源字形编号并返回子集内连续CID编号
+// 入参: gid 源字体字形编号
+// 返回: uint16 子集字形编号
+func (e *FontEntry) MapGlyph(gid uint16) uint16 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.subset.Get(gid)
+}
+
+// Register 线程安全地获取或注册字体对应的PDF资源名、间接引用与字形映射项
+// 入参: font 画布字体, vertical 是否竖排
+// 返回: pdfgo.Name 资源名, pdfgo.Reference 对象引用, *FontEntry 字体登记项
+func (r *FontRegistry) Register(font *canvas.Font, vertical bool) (pdfgo.Name, pdfgo.Reference, *FontEntry) {
+	std := standardPDFFontName(font)
+	key := fontRegistryKey{font: font, vertical: vertical && std == ""}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if entry, ok := r.entries[key]; ok {
+		return entry.Name, entry.Ref, entry
+	}
+	ref := r.allocRef()
+	name := pdfgo.Name("F" + strconv.Itoa(len(r.order)))
+	entry := &FontEntry{
+		Ref:          ref,
+		Name:         name,
+		Font:         font,
+		Vertical:     key.vertical,
+		StandardName: std,
+	}
+	if std == "" {
+		entry.subset = canvas.NewFontSubsetter()
+	}
+	r.entries[key] = entry
+	r.order = append(r.order, entry)
+	return name, ref, entry
+}
+
+// WriteAll 多核并发完成全部字体的子集化、ToUnicode构建与Flate压缩，并按序流式写出
+// 入参: ctx 取消上下文, writer 流式PDF写出器, workers 并发工作协程数
+// 返回: error 子集化或写出错误
+func (r *FontRegistry) WriteAll(ctx context.Context, writer *StreamWriter, workers int) error {
+	r.mu.Lock()
+	list := slices.Clone(r.order)
+	r.mu.Unlock()
+	if len(list) == 0 {
+		return ctx.Err()
+	}
+	slices.SortFunc(list, func(a, b *FontEntry) int { return cmp.Compare(a.Ref.Number, b.Ref.Number) })
+	results := make([]compiledFont, len(list))
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(list) {
+		workers = len(list)
+	}
+	if workers == 1 {
+		var zw *zlib.Writer
+		var zbuf bytes.Buffer
+		for i, entry := range list {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			results[i], zw = compileFontEntry(entry, r.subset, r.compress, r.level, zw, &zbuf)
+			if results[i].err != nil {
+				return results[i].err
+			}
+		}
+	} else {
+		jobs := make(chan int, len(list))
+		for i := range list {
+			jobs <- i
+		}
+		close(jobs)
+		var wg sync.WaitGroup
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				var zw *zlib.Writer
+				var zbuf bytes.Buffer
+				for i := range jobs {
+					if ctx.Err() != nil {
+						return
+					}
+					results[i], zw = compileFontEntry(list[i], r.subset, r.compress, r.level, zw, &zbuf)
+				}
+			}()
+		}
+		wg.Wait()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	usedTags := make(map[string]bool, len(results))
+	for i := range results {
+		res := &results[i]
+		if res.err != nil {
+			return res.err
+		}
+		if res.entry.StandardName != "" {
+			if err := writer.WriteObject(res.entry.Ref, res.dict); err != nil {
+				return err
+			}
+			continue
+		}
+		toUnicodeRef := writer.AllocRef()
+		toUnicodeDict := pdfgo.Dictionary{}
+		if r.compress {
+			toUnicodeDict["Filter"] = pdfgo.Name("FlateDecode")
+		}
+		if err := writer.WritePreencodedStream(toUnicodeRef, toUnicodeDict, res.toUnicodeData); err != nil {
+			return err
+		}
+		res.toUnicodeData = nil
+		fontFileRef := writer.AllocRef()
+		if err := writer.WritePreencodedStream(fontFileRef, res.fontFileDict, res.fontFileData); err != nil {
+			return err
+		}
+		res.fontFileData = nil
+		res.dict["ToUnicode"] = toUnicodeRef
+		descendants := res.dict["DescendantFonts"].(pdfgo.Array)
+		cidFont := descendants[0].(pdfgo.Dictionary)
+		descriptor := cidFont["FontDescriptor"].(pdfgo.Dictionary)
+		descriptor[res.fontFileKey] = fontFileRef
+		if res.subsetTag != "" {
+			tag := res.subsetTag
+			for usedTags[tag] {
+				tag = nextSubsetTag(tag)
+			}
+			usedTags[tag] = true
+			if tag != res.subsetTag {
+				fullName := pdfgo.Name(tag + "+" + res.baseFontName)
+				res.dict["BaseFont"] = fullName
+				cidFont["BaseFont"] = fullName
+				descriptor["FontName"] = fullName
+			}
+		}
+		if res.encodingCMapData != nil {
+			encRef := writer.AllocRef()
+			if err := writer.WritePreencodedStream(encRef, res.encodingCMapDict, res.encodingCMapData); err != nil {
+				return err
+			}
+			res.encodingCMapData = nil
+			res.encodingCMapDict = nil
+			res.dict["Encoding"] = encRef
+		}
+		if res.cidMapData != nil {
+			cidMapRef := writer.AllocRef()
+			cidMapDict := pdfgo.Dictionary{}
+			if r.compress {
+				cidMapDict["Filter"] = pdfgo.Name("FlateDecode")
+			}
+			if err := writer.WritePreencodedStream(cidMapRef, cidMapDict, res.cidMapData); err != nil {
+				return err
+			}
+			res.cidMapData = nil
+			cidFont["CIDToGIDMap"] = cidMapRef
+		}
+		if err := writer.WriteObject(res.entry.Ref, res.dict); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
 }

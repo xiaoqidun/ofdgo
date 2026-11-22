@@ -24,38 +24,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"sync"
 
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
-
-// systemFontIndex 按需建立只读系统字体索引
-var systemFontIndex = sync.OnceValue(indexSystemFonts)
-
-// FontSystemFiles 获取当前系统可访问的字体文件，不读取字体内容
-// 返回: []string 去重后的字体路径，浏览器WASM环境返回空列表
-func FontSystemFiles() []string {
-	if !canLoadSystemFonts() {
-		return nil
-	}
-	var files []string
-	seen := make(map[string]bool)
-	for _, dir := range systemFontDirs() {
-		_ = filepath.WalkDir(dir, func(name string, entry fs.DirEntry, err error) error {
-			if err == nil && !entry.IsDir() && basefont.IsFontFileName(name) && !seen[name] {
-				seen[name] = true
-				files = append(files, name)
-			}
-			return nil
-		})
-	}
-	return files
-}
-
-// fontSourceKind 字体来源类型
-type fontSourceKind uint8
 
 // 字体来源：文件、文件系统和系统字体
 const (
@@ -63,6 +36,12 @@ const (
 	fontSourceFS
 	fontSourceSystem
 )
+
+// systemFontIndex 按需建立只读系统字体索引
+var systemFontIndex = sync.OnceValue(indexSystemFonts)
+
+// fontSourceKind 字体来源类型
+type fontSourceKind uint8
 
 // fontSource 字体来源
 type fontSource struct {
@@ -106,10 +85,69 @@ type sharedFontSourceIndex struct {
 	names       map[int][]string
 }
 
+// fontSourceCache 保存字体候选及独立字体数据，按字节预算淘汰，不包含绘图库对象
+type fontSourceCache struct {
+	shared       *sharedFontSourceIndex
+	data         *renderCache[fontSourceKey, fontSourceData]
+	collections  *renderCache[fontSourceKey, []byte]
+	fallback     ResolvedFont
+	fallbackRead bool
+}
+
 // newSharedFontSourceIndex 创建并发安全的共享字体来源索引
 // 返回: *sharedFontSourceIndex 共享字体来源索引
 func newSharedFontSourceIndex() *sharedFontSourceIndex {
 	return &sharedFontSourceIndex{candidates: make(map[fontCandidateKey][]fontSource), directories: make(map[string][]basefont.FileCandidate), filesystems: make(map[int][]basefont.FileCandidate), names: make(map[int][]string)}
+}
+
+// newFontSourceCache 创建独立字体来源缓存
+// 入参: resources 共享资源策略
+// 返回: *fontSourceCache 字体来源缓存
+func newFontSourceCache(resources *Resources) *fontSourceCache {
+	return &fontSourceCache{
+		shared:      newSharedFontSourceIndex(),
+		data:        resourceCache[fontSourceKey, fontSourceData](resources, 64<<20),
+		collections: resourceCache[fontSourceKey, []byte](resources, 64<<20),
+	}
+}
+
+// sortFontSources 将完整名称匹配排在回退候选之前
+// 入参: sources 字体来源列表
+func sortFontSources(sources []fontSource) {
+	sort.SliceStable(sources, func(i, j int) bool {
+		return sources[i].priority < sources[j].priority
+	})
+}
+
+// appendFontSource 追加字体来源
+// 入参: sources 字体来源列表, seen 去重映射, source 字体来源
+// 返回: []fontSource 字体来源列表
+func appendFontSource(sources []fontSource, seen map[fontSourceKey]bool, source fontSource) []fontSource {
+	if source.name == "" {
+		return sources
+	}
+	key := fontSourceKey{kind: source.kind, index: source.index, name: source.name, face: source.face}
+	if seen[key] {
+		return sources
+	}
+	seen[key] = true
+	return append(sources, source)
+}
+
+// indexSystemFonts 递归读取系统字体名称，保留集合索引
+// 返回: []basefont.FileCandidate 字体候选
+func indexSystemFonts() []basefont.FileCandidate {
+	files := basefont.SystemFiles()
+	candidates := basefont.FileCandidates(files, filepath.Base)
+	for i, candidate := range candidates {
+		file, err := os.Open(candidate.Name)
+		if err != nil {
+			continue
+		}
+		candidates = basefont.AppendFileNames(candidates, i, basefont.FileNames(file))
+		file.Close()
+	}
+	return candidates
 }
 
 // getCandidates 读取共享字体候选列表
@@ -184,22 +222,6 @@ func (s *sharedFontSourceIndex) setNames(index int, names []string) {
 	s.mu.Unlock()
 }
 
-// fontSourceCache 保存字体候选及独立字体数据，原始集合按字节预算淘汰，不包含绘图库对象
-type fontSourceCache struct {
-	shared       *sharedFontSourceIndex
-	data         map[fontSourceKey]fontSourceData
-	collections  *renderCache[fontSourceKey, []byte]
-	fallback     ResolvedFont
-	fallbackRead bool
-}
-
-// newFontSourceCache 创建独立字体来源缓存
-// 入参: resources 共享资源策略
-// 返回: *fontSourceCache 字体来源缓存
-func newFontSourceCache(resources *Resources) *fontSourceCache {
-	return &fontSourceCache{shared: newSharedFontSourceIndex(), data: make(map[fontSourceKey]fontSourceData), collections: resourceCache[fontSourceKey, []byte](resources, 64<<20)}
-}
-
 // child 复用相同来源的文件索引、候选与数据，回退状态保持独立
 // 返回: *fontSourceCache 独立文档缓存
 func (c *fontSourceCache) child() *fontSourceCache {
@@ -218,7 +240,7 @@ func (r *Renderer) readFontSource(source fontSource, definition *Font) ([]byte, 
 		}
 		key = fontSourceKey{kind: fontSourceFile, name: matches[0].Name, face: matches[0].Face}
 	}
-	if cached, ok := r.fontSourcesCache.data[key]; ok {
+	if cached, ok := r.fontSourcesCache.data.get(key); ok {
 		return cached.data, cached.err
 	}
 	fileKey := key
@@ -247,7 +269,7 @@ func (r *Renderer) readFontSource(source fontSource, definition *Font) ([]byte, 
 		data, _, err = basefont.SymbolProgram(context.Background(), data, "")
 	}
 	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		r.fontSourcesCache.data[key] = fontSourceData{data, err}
+		r.fontSourcesCache.data.put(key, fontSourceData{data, err}, len(data)+256)
 	}
 	return data, err
 }
@@ -276,8 +298,8 @@ func (r *Renderer) fontSourceMatch(backend FontBackend, fontID string, definitio
 // 返回: ResolvedFont 字体及来源, error 解析错误
 func (r *Renderer) resolveFontSource(backend FontBackend, id string, exact bool) (ResolvedFont, error) {
 	definition := r.fontDefinition(id)
-	if definition == nil && r.Reader != nil && !r.Reader.fontResourcesRead && r.Reader.OFD != nil {
-		if _, err := r.Reader.Fonts(); err != nil {
+	if definition == nil && r.reader != nil && !r.reader.fontResourcesRead && r.reader.ofd != nil {
+		if _, err := r.reader.Fonts(); err != nil {
 			return ResolvedFont{}, err
 		}
 		definition = r.fontDefinition(id)
@@ -286,11 +308,11 @@ func (r *Renderer) resolveFontSource(backend FontBackend, id string, exact bool)
 		definition = &Font{ID: id}
 	}
 	if definition.FontFile != "" {
-		data, err := r.Reader.readFontData(definition, true)
+		data, err := r.reader.readFontData(definition, true)
 		if err != nil {
 			return ResolvedFont{}, err
 		}
-		face, err := r.Reader.embeddedFontFace(*definition)
+		face, err := r.reader.embeddedFontFace(*definition)
 		if err != nil {
 			return ResolvedFont{}, err
 		}
@@ -311,7 +333,7 @@ func (r *Renderer) resolveFontSource(backend FontBackend, id string, exact bool)
 	}
 	if !r.fontSourcesCache.fallbackRead {
 		r.fontSourcesCache.fallbackRead = true
-		if canLoadSystemFonts() {
+		if basefont.CanLoadSystemFonts() {
 			for _, name := range basefont.DefaultSystemNames() {
 				data, err := r.readFontSource(fontSource{kind: fontSourceSystem, name: name}, &Font{})
 				if err != nil {
@@ -352,7 +374,7 @@ func (r *Renderer) fontSources(fontID string, font *Font) []fontSource {
 	}
 	sortFontSources(sources)
 	systemStart := len(sources)
-	if canLoadSystemFonts() {
+	if basefont.CanLoadSystemFonts() {
 		for _, match := range basefont.FileMatches(systemFontIndex(), names, bold, italic) {
 			sources = appendFontSource(sources, seen, fontSource{kind: fontSourceFile, name: match.Name, face: match.Face, exact: match.Rank == basefont.MatchExact, priority: min(match.Priority, 0)})
 		}
@@ -467,77 +489,4 @@ func (r *Renderer) fontFSNames(index int) ([]string, error) {
 		r.fontSourcesCache.shared.setNames(index, names)
 	}
 	return names, err
-}
-
-// sortFontSources 将完整名称匹配排在回退候选之前
-// 入参: sources 字体来源列表
-func sortFontSources(sources []fontSource) {
-	sort.SliceStable(sources, func(i, j int) bool {
-		return sources[i].priority < sources[j].priority
-	})
-}
-
-// appendFontSource 追加字体来源
-// 入参: sources 字体来源列表, seen 去重映射, source 字体来源
-// 返回: []fontSource 字体来源列表
-func appendFontSource(sources []fontSource, seen map[fontSourceKey]bool, source fontSource) []fontSource {
-	if source.name == "" {
-		return sources
-	}
-	key := fontSourceKey{kind: source.kind, index: source.index, name: source.name, face: source.face}
-	if seen[key] {
-		return sources
-	}
-	seen[key] = true
-	return append(sources, source)
-}
-
-// systemFontDirs 获取系统字体目录
-// 返回: []string 字体目录列表
-func systemFontDirs() []string {
-	home, _ := os.UserHomeDir()
-	switch runtime.GOOS {
-	case "android":
-		return []string{"/product/fonts", "/system/fonts"}
-	case "darwin":
-		return []string{"/System/Library/Fonts", "/Library/Fonts", filepath.Join(home, "Library", "Fonts")}
-	case "linux":
-		dirs := []string{"/usr/share/fonts", "/usr/local/share/fonts", filepath.Join(home, ".fonts")}
-		data := os.Getenv("XDG_DATA_HOME")
-		if data == "" {
-			data = filepath.Join(home, ".local", "share")
-		}
-		dirs = append(dirs, filepath.Join(data, "fonts"))
-		for _, dir := range filepath.SplitList(os.Getenv("XDG_DATA_DIRS")) {
-			dirs = append(dirs, filepath.Join(dir, "fonts"))
-		}
-		return dirs
-	case "windows":
-		windows := os.Getenv("WINDIR")
-		if windows == "" {
-			windows = `C:\Windows`
-		}
-		dirs := []string{filepath.Join(windows, "Fonts")}
-		if local := os.Getenv("LOCALAPPDATA"); local != "" {
-			dirs = append(dirs, filepath.Join(local, "Microsoft", "Windows", "Fonts"))
-		}
-		return dirs
-	}
-	return nil
-}
-
-// indexSystemFonts 递归读取系统字体名称，保留集合索引
-// 返回: []basefont.FileCandidate 字体候选
-func indexSystemFonts() []basefont.FileCandidate {
-	files := FontSystemFiles()
-	candidates := basefont.FileCandidates(files, filepath.Base)
-	for i, candidate := range candidates {
-		file, err := os.Open(candidate.Name)
-		if err != nil {
-			continue
-		}
-		candidates = basefont.AppendFileNames(candidates, i, basefont.FileNames(file))
-		file.Close()
-	}
-	return candidates
 }

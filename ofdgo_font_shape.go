@@ -46,6 +46,64 @@ type fontShaper struct {
 	shapeBuffer *harfbuzz.Buffer
 }
 
+// shapingFace 固定双向排版的字体来源，不隐式替换字体
+type shapingFace struct{ face *typefont.Face }
+
+// canonicalLanguageTag 按BCP47语法校验并规范化语言标签，不引入外部语言包
+// 入参: raw 原始语言标签
+// 返回: string 规范化语言标签, error 语法错误
+func canonicalLanguageTag(raw string) (string, error) {
+	normalized := strings.ReplaceAll(raw, "_", "-")
+	if normalized == "" || strings.HasPrefix(normalized, "-") || strings.HasSuffix(normalized, "-") {
+		return "", fmt.Errorf("invalid language tag %q", raw)
+	}
+	parts := strings.Split(normalized, "-")
+	for i, part := range parts {
+		if len(part) == 0 || len(part) > 8 {
+			return "", fmt.Errorf("invalid language tag %q", raw)
+		}
+		alphaOnly := true
+		for j := 0; j < len(part); j++ {
+			c := part[j]
+			isAlpha := c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
+			isDigit := c >= '0' && c <= '9'
+			if !isAlpha && !isDigit {
+				return "", fmt.Errorf("invalid language tag %q", raw)
+			}
+			if !isAlpha {
+				alphaOnly = false
+			}
+		}
+		if i == 0 {
+			if part == "x" || part == "X" {
+				if len(parts) < 2 {
+					return "", fmt.Errorf("invalid language tag %q", raw)
+				}
+				parts[i] = "x"
+				continue
+			}
+			if !alphaOnly || len(part) == 1 || len(part) == 4 {
+				return "", fmt.Errorf("invalid language tag %q", raw)
+			}
+			parts[i] = strings.ToLower(part)
+			continue
+		}
+		if len(part) == 1 {
+			if i == len(parts)-1 {
+				return "", fmt.Errorf("invalid language tag %q", raw)
+			}
+			parts[i] = strings.ToLower(part)
+		} else if len(part) == 4 && alphaOnly && len(parts[i-1]) > 1 {
+			parts[i] = strings.ToUpper(part[:1]) + strings.ToLower(part[1:])
+		} else if (len(part) == 2 && alphaOnly || len(part) == 3 && !alphaOnly) && len(parts[i-1]) > 1 {
+			parts[i] = strings.ToUpper(part)
+		} else {
+			parts[i] = strings.ToLower(part)
+		}
+	}
+	return strings.Join(parts, "-"), nil
+}
+
 // ShapeText 使用默认选项塑形单行文字，不改动原文定位
 // 入参: value 单行原文, size 毫米字号
 // 返回: []ShapedGlyph 定位字形, error 塑形错误
@@ -271,65 +329,7 @@ func (f *fontShaper) shapeBidiText(runes []rune, size float64, props harfbuzz.Se
 	return result, nil
 }
 
-// shapingFace 固定双向排版的字体来源，不隐式替换字体
-type shapingFace struct{ face *typefont.Face }
-
 // ResolveFace 返回指定字体
 // 入参: char 字符
 // 返回: *typefont.Face 字体
 func (f shapingFace) ResolveFace(char rune) *typefont.Face { return f.face }
-
-// canonicalLanguageTag 按BCP47语法校验并规范化语言标签，不引入外部语言包
-// 入参: raw 原始语言标签
-// 返回: string 规范化语言标签, error 语法错误
-func canonicalLanguageTag(raw string) (string, error) {
-	normalized := strings.ReplaceAll(raw, "_", "-")
-	if normalized == "" || strings.HasPrefix(normalized, "-") || strings.HasSuffix(normalized, "-") {
-		return "", fmt.Errorf("invalid language tag %q", raw)
-	}
-	parts := strings.Split(normalized, "-")
-	for i, part := range parts {
-		if len(part) == 0 || len(part) > 8 {
-			return "", fmt.Errorf("invalid language tag %q", raw)
-		}
-		alphaOnly := true
-		for j := 0; j < len(part); j++ {
-			c := part[j]
-			isAlpha := c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
-			isDigit := c >= '0' && c <= '9'
-			if !isAlpha && !isDigit {
-				return "", fmt.Errorf("invalid language tag %q", raw)
-			}
-			if !isAlpha {
-				alphaOnly = false
-			}
-		}
-		if i == 0 {
-			if part == "x" || part == "X" {
-				if len(parts) < 2 {
-					return "", fmt.Errorf("invalid language tag %q", raw)
-				}
-				parts[i] = "x"
-				continue
-			}
-			if !alphaOnly || len(part) == 1 || len(part) == 4 {
-				return "", fmt.Errorf("invalid language tag %q", raw)
-			}
-			parts[i] = strings.ToLower(part)
-			continue
-		}
-		if len(part) == 1 {
-			if i == len(parts)-1 {
-				return "", fmt.Errorf("invalid language tag %q", raw)
-			}
-			parts[i] = strings.ToLower(part)
-		} else if len(part) == 4 && alphaOnly && len(parts[i-1]) > 1 {
-			parts[i] = strings.ToUpper(part[:1]) + strings.ToLower(part[1:])
-		} else if (len(part) == 2 && alphaOnly || len(part) == 3 && !alphaOnly) && len(parts[i-1]) > 1 {
-			parts[i] = strings.ToUpper(part)
-		} else {
-			parts[i] = strings.ToLower(part)
-		}
-	}
-	return strings.Join(parts, "-"), nil
-}

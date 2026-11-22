@@ -31,6 +31,67 @@ type WatermarkOptions struct {
 	Gap     float64
 }
 
+// layoutWatermark 按绘制范围布局独立水印外观，保留页面原点及图元变换
+// 入参: ctx 取消上下文, base 水印图元, bounds 绘制范围, box 原始尺寸, options 布局选项, page 页面范围
+// 返回: Annotation 水印注解, error 取消或布局错误
+func layoutWatermark(ctx context.Context, base GraphicObject, bounds, box Box, options WatermarkOptions, page Box) (Annotation, error) {
+	area := page
+	if options.Area != nil {
+		area = Box{X: page.X + options.Area.X*page.W, Y: page.Y + options.Area.Y*page.H, W: options.Area.W * page.W, H: options.Area.H * page.H}
+	}
+	if !finite(page.X) || !finite(page.Y) || !finite(page.W) || !finite(page.H) || page.W <= 0 || page.H <= 0 {
+		return Annotation{}, fmt.Errorf("invalid watermark page area")
+	}
+	scale := 1.0
+	if area.W > 0 && area.H > 0 {
+		scale = math.Min(1, math.Min(area.W/bounds.W, area.H/bounds.H))
+	}
+	if scale != 1 {
+		matrix := Matrix{a: scale, d: scale}
+		base = transformEditorMatrix(base, matrix)
+		bounds = matrix.TransformBox(bounds)
+	}
+	var extent Box
+	if base.Type == "TextObject" {
+		extent, _ = ParseBox(base.TextObject.Boundary)
+	} else {
+		extent, _ = ParseBox(base.ImageObject.Boundary)
+	}
+	columns, rows := 1.0, 1.0
+	if options.Tile {
+		angle := math.Mod(options.Angle, 360) * math.Pi / 180
+		width := math.Max(bounds.W, (math.Abs(math.Cos(angle))*box.W+math.Abs(math.Sin(angle))*box.H)*scale)
+		height := math.Max(bounds.H, (math.Abs(math.Sin(angle))*box.W+math.Abs(math.Cos(angle))*box.H)*scale)
+		columns = math.Max(1, math.Floor((area.W+options.Gap)/(width+options.Gap)))
+		rows = math.Max(1, math.Floor((area.H+options.Gap)/(height+options.Gap)))
+	} else {
+		area = Box{X: area.X + (area.W-bounds.W)/2, Y: area.Y + (area.H-bounds.H)/2, W: bounds.W, H: bounds.H}
+	}
+	if !finite(columns*rows) || columns*rows > 100000 {
+		return Annotation{}, fmt.Errorf("too many watermark tiles")
+	}
+	annotation := Annotation{Type: "Watermark", Creator: options.Creator, Appearance: Appearance{Boundary: editorBoxString(area)}}
+	annotation.Appearance.Objects = make([]GraphicObject, 0, int(columns*rows))
+	for row := 0; row < int(rows); row++ {
+		if err := ctx.Err(); err != nil {
+			return Annotation{}, err
+		}
+		for column := 0; column < int(columns); column++ {
+			x := (float64(column)+0.5)*area.W/columns - bounds.X - bounds.W/2
+			y := (float64(row)+0.5)*area.H/rows - bounds.Y - bounds.H/2
+			object := base
+			boundary := editorBoxString(Box{X: x, Y: y, W: extent.W, H: extent.H})
+			if object.Type == "TextObject" {
+				object.TextObject.Boundary = boundary
+			} else {
+				object.ImageObject.Boundary = boundary
+			}
+			annotation.Appearance.Objects = append(annotation.Appearance.Objects, object)
+		}
+	}
+	return annotation, nil
+}
+
 // AddWatermarks 向指定页面添加文字或图片水印，复用编辑器字体来源及后端，一次操作计入一条撤销记录
 // 图元Boundary提供原始尺寸，忽略其位置；按实际绘制范围居中，超出区域时等比缩小
 // 失败或取消时保留原文档，输入图元不被修改
@@ -216,67 +277,6 @@ func (e *Editor) AddWatermarks(ctx context.Context, indexes []int, object Graphi
 		return nil, err
 	}
 	return ids, nil
-}
-
-// layoutWatermark 按绘制范围布局独立水印外观，保留页面原点及图元变换
-// 入参: ctx 取消上下文, base 水印图元, bounds 绘制范围, box 原始尺寸, options 布局选项, page 页面范围
-// 返回: Annotation 水印注解, error 取消或布局错误
-func layoutWatermark(ctx context.Context, base GraphicObject, bounds, box Box, options WatermarkOptions, page Box) (Annotation, error) {
-	area := page
-	if options.Area != nil {
-		area = Box{X: page.X + options.Area.X*page.W, Y: page.Y + options.Area.Y*page.H, W: options.Area.W * page.W, H: options.Area.H * page.H}
-	}
-	if !finite(page.X) || !finite(page.Y) || !finite(page.W) || !finite(page.H) || page.W <= 0 || page.H <= 0 {
-		return Annotation{}, fmt.Errorf("invalid watermark page area")
-	}
-	scale := 1.0
-	if area.W > 0 && area.H > 0 {
-		scale = math.Min(1, math.Min(area.W/bounds.W, area.H/bounds.H))
-	}
-	if scale != 1 {
-		matrix := Matrix{a: scale, d: scale}
-		base = transformEditorMatrix(base, matrix)
-		bounds = matrix.TransformBox(bounds)
-	}
-	var extent Box
-	if base.Type == "TextObject" {
-		extent, _ = ParseBox(base.TextObject.Boundary)
-	} else {
-		extent, _ = ParseBox(base.ImageObject.Boundary)
-	}
-	columns, rows := 1.0, 1.0
-	if options.Tile {
-		angle := math.Mod(options.Angle, 360) * math.Pi / 180
-		width := math.Max(bounds.W, (math.Abs(math.Cos(angle))*box.W+math.Abs(math.Sin(angle))*box.H)*scale)
-		height := math.Max(bounds.H, (math.Abs(math.Sin(angle))*box.W+math.Abs(math.Cos(angle))*box.H)*scale)
-		columns = math.Max(1, math.Floor((area.W+options.Gap)/(width+options.Gap)))
-		rows = math.Max(1, math.Floor((area.H+options.Gap)/(height+options.Gap)))
-	} else {
-		area = Box{X: area.X + (area.W-bounds.W)/2, Y: area.Y + (area.H-bounds.H)/2, W: bounds.W, H: bounds.H}
-	}
-	if !finite(columns*rows) || columns*rows > 100000 {
-		return Annotation{}, fmt.Errorf("too many watermark tiles")
-	}
-	annotation := Annotation{Type: "Watermark", Creator: options.Creator, Appearance: Appearance{Boundary: editorBoxString(area)}}
-	annotation.Appearance.Objects = make([]GraphicObject, 0, int(columns*rows))
-	for row := 0; row < int(rows); row++ {
-		if err := ctx.Err(); err != nil {
-			return Annotation{}, err
-		}
-		for column := 0; column < int(columns); column++ {
-			x := (float64(column)+0.5)*area.W/columns - bounds.X - bounds.W/2
-			y := (float64(row)+0.5)*area.H/rows - bounds.Y - bounds.H/2
-			object := base
-			boundary := editorBoxString(Box{X: x, Y: y, W: extent.W, H: extent.H})
-			if object.Type == "TextObject" {
-				object.TextObject.Boundary = boundary
-			} else {
-				object.ImageObject.Boundary = boundary
-			}
-			annotation.Appearance.Objects = append(annotation.Appearance.Objects, object)
-		}
-	}
-	return annotation, nil
 }
 
 // watermarkPageScope 仅读取单页页头资源作用域，避免全量解析页面正文图元

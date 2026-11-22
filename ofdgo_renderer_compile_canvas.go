@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"image/color"
@@ -23,15 +24,80 @@ import (
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
+// canvasPageCompiler 将已解释的页面绘制转换为自有数据，不保存第三方绘图对象
+type canvasPageCompiler struct {
+	page     *RasterPage
+	geometry GeometryBackend
+	err      error
+}
+
+// rasterPaddedImage 为旋转采样提供透明边距，共享原图而不复制整幅像素
+type rasterPaddedImage struct {
+	source image.Image
+	rect   image.Rectangle
+}
+
+// canvasRasterPath 转换曲线路径，保留各子路径和闭合标记
+// 入参: path Canvas路径
+// 返回: []RasterSegment 独立路径, error 未知指令错误
+func canvasRasterPath(path *canvas.Path) ([]RasterSegment, error) {
+	segments := make([]RasterSegment, 0, path.Len())
+	parts := path.Split()
+	if len(parts) == 0 {
+		parts = []*canvas.Path{path}
+	}
+	for _, part := range parts {
+		scanner := part.ReplaceArcs().Scanner()
+		for scanner.Scan() {
+			s := RasterSegment{End: rasterPoint(scanner.End())}
+			switch scanner.Cmd() {
+			case canvas.MoveToCmd:
+				s.Verb = RasterMove
+			case canvas.LineToCmd:
+				s.Verb = RasterLine
+			case canvas.QuadToCmd:
+				s.Verb, s.Control1 = RasterQuad, rasterPoint(scanner.CP1())
+			case canvas.CubeToCmd:
+				s.Verb, s.Control1, s.Control2 = RasterCubic, rasterPoint(scanner.CP1()), rasterPoint(scanner.CP2())
+			case canvas.CloseCmd:
+				s.Verb = RasterClose
+			default:
+				return nil, fmt.Errorf("unsupported raster path command %g", scanner.Cmd())
+			}
+			segments = append(segments, s)
+		}
+	}
+	data := path.Data()
+	last := parts[len(parts)-1].Data()
+	if len(data) >= 4 && data[len(data)-4] == canvas.MoveToCmd && len(last) != 0 && last[len(last)-1] != canvas.MoveToCmd {
+		segments = append(segments, RasterSegment{Verb: RasterMove, End: RasterPoint{X: data[len(data)-3], Y: data[len(data)-2]}})
+	}
+	return segments, nil
+}
+
+// rasterPoint 转换局部坐标点
+// 入参: p 默认引擎坐标点
+// 返回: RasterPoint 独立坐标点
+func rasterPoint(p canvas.Point) RasterPoint { return RasterPoint{X: p.X, Y: p.Y} }
+
 // CompilePage 使用Canvas页面解释器和配置的字体、几何后端生成独立绘制数据
-// 入参: r 渲染器, page 页面内容
-// 返回: *RasterPage 绘制页面, error 编译错误
-func (CanvasBackend) CompilePage(r *Renderer, page *PageContent) (*RasterPage, error) {
-	box, err := r.GetPageBox(page)
+// 入参: ctx 取消上下文, r 渲染器, page 页面内容
+// 返回: *RasterPage 绘制页面, error 编译或取消错误
+func (CanvasBackend) CompilePage(ctx context.Context, r *Renderer, page *PageContent) (*RasterPage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
+	box, err := r.GetPageBoxContext(ctx, page)
 	if err != nil {
 		return nil, err
 	}
-	result := &RasterPage{Width: box.W, Height: box.H, DPI: r.DPI}
+	result := &RasterPage{Width: box.W, Height: box.H, DPI: r.dpi}
 	if _, _, err := result.PixelSize(); err != nil {
 		return nil, err
 	}
@@ -47,13 +113,6 @@ func (CanvasBackend) CompilePage(r *Renderer, page *PageContent) (*RasterPage, e
 		return nil, compiler.err
 	}
 	return result, nil
-}
-
-// canvasPageCompiler 将已解释的页面绘制转换为自有数据，不保存第三方绘图对象
-type canvasPageCompiler struct {
-	page     *RasterPage
-	geometry GeometryBackend
-	err      error
 }
 
 // Size 返回物理页面尺寸
@@ -163,12 +222,6 @@ func (c *canvasPageCompiler) fill(path *canvas.Path, paint canvas.Paint, rule ca
 	c.page.Commands = append(c.page.Commands, cmd)
 }
 
-// rasterPaddedImage 为旋转采样提供透明边距，共享原图而不复制整幅像素
-type rasterPaddedImage struct {
-	source image.Image
-	rect   image.Rectangle
-}
-
 // Bounds 返回含四像素边距的图像边界
 // 返回: image.Rectangle 图像边界
 func (s *rasterPaddedImage) Bounds() image.Rectangle { return s.rect }
@@ -206,46 +259,3 @@ func (s *rasterPaddedImage) RGBA64At(x, y int) color.RGBA64 {
 	r, g, b, a := s.source.At(x, y).RGBA()
 	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
 }
-
-// canvasRasterPath 转换曲线路径，保留各子路径和闭合标记
-// 入参: path Canvas路径
-// 返回: []RasterSegment 独立路径, error 未知指令错误
-func canvasRasterPath(path *canvas.Path) ([]RasterSegment, error) {
-	segments := make([]RasterSegment, 0, path.Len())
-	parts := path.Split()
-	if len(parts) == 0 {
-		parts = []*canvas.Path{path}
-	}
-	for _, part := range parts {
-		scanner := part.ReplaceArcs().Scanner()
-		for scanner.Scan() {
-			s := RasterSegment{End: rasterPoint(scanner.End())}
-			switch scanner.Cmd() {
-			case canvas.MoveToCmd:
-				s.Verb = RasterMove
-			case canvas.LineToCmd:
-				s.Verb = RasterLine
-			case canvas.QuadToCmd:
-				s.Verb, s.Control1 = RasterQuad, rasterPoint(scanner.CP1())
-			case canvas.CubeToCmd:
-				s.Verb, s.Control1, s.Control2 = RasterCubic, rasterPoint(scanner.CP1()), rasterPoint(scanner.CP2())
-			case canvas.CloseCmd:
-				s.Verb = RasterClose
-			default:
-				return nil, fmt.Errorf("unsupported raster path command %g", scanner.Cmd())
-			}
-			segments = append(segments, s)
-		}
-	}
-	data := path.Data()
-	last := parts[len(parts)-1].Data()
-	if len(data) >= 4 && data[len(data)-4] == canvas.MoveToCmd && len(last) != 0 && last[len(last)-1] != canvas.MoveToCmd {
-		segments = append(segments, RasterSegment{Verb: RasterMove, End: RasterPoint{X: data[len(data)-3], Y: data[len(data)-2]}})
-	}
-	return segments, nil
-}
-
-// rasterPoint 转换局部坐标点
-// 入参: p 默认引擎坐标点
-// 返回: RasterPoint 独立坐标点
-func rasterPoint(p canvas.Point) RasterPoint { return RasterPoint{X: p.X, Y: p.Y} }

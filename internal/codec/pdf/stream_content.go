@@ -59,6 +59,238 @@ type ContentBuilder struct {
 	localGlyphMaps map[*FontEntry]map[uint16]uint16
 }
 
+// contentGState 保存当前内容流的PDF图形状态缓存
+type contentGState struct {
+	alpha          uint8
+	fill           canvas.Paint
+	fillValid      bool
+	stroke         canvas.Paint
+	strokeValid    bool
+	lineWidth      float64
+	lineCap        int
+	lineJoin       int
+	miterLimit     float64
+	dashes         []float64
+	font           *canvas.Font
+	fontEntry      *FontEntry
+	fontSize       float64
+	fontDirection  ctext.Direction
+	textPos        canvas.Matrix
+	textRenderMode int
+}
+
+// contentPathAdapter 适配canvas.Renderer接口以接收文字下划线等装饰路径
+type contentPathAdapter struct {
+	b *ContentBuilder
+}
+
+// NewContentBuilder 创建内容流构建器并初始化毫米到点的缩放矩阵
+// 入参: sink 全局资源登记回调
+// 返回: *ContentBuilder 内容流构建器
+func NewContentBuilder(sink ContentResourceSink) *ContentBuilder {
+	b := &ContentBuilder{
+		sink: sink,
+		buf:  make([]byte, 0, 1024),
+		state: contentGState{
+			alpha:          255,
+			fill:           canvas.Paint{Color: canvas.Black},
+			fillValid:      true,
+			stroke:         canvas.Paint{Color: canvas.Black},
+			strokeValid:    true,
+			lineWidth:      1,
+			lineCap:        0,
+			lineJoin:       0,
+			miterLimit:     10,
+			dashes:         []float64{0},
+			fontDirection:  ctext.LeftToRight,
+			textPos:        canvas.Identity,
+			textRenderMode: 0,
+		},
+	}
+	b.buf = appendCompactFloatBytes(b.buf, PtPerMM, 7)
+	b.buf = append(b.buf, " 0 0 "...)
+	b.buf = appendCompactFloatBytes(b.buf, PtPerMM, 7)
+	b.buf = append(b.buf, " 0 0 cm"...)
+	return b
+}
+
+// appendClipPathOps 将页面坐标系裁剪路径转为紧凑PDF裁剪指令并追加W n
+// 入参: dst 目标缓冲, clip 裁剪路径
+// 返回: []byte 追加后的缓冲
+func appendClipPathOps(dst []byte, clip *canvas.Path) []byte {
+	if rect, ok := transformedAxisRect(clip, canvas.Identity, false); ok {
+		dst = append(dst, ' ')
+		dst = appendCompactFloatBytes(dst, rect.X0, 4)
+		dst = append(dst, ' ')
+		dst = appendCompactFloatBytes(dst, rect.Y0, 4)
+		dst = append(dst, ' ')
+		dst = appendCompactFloatBytes(dst, rect.W(), 4)
+		dst = append(dst, ' ')
+		dst = appendCompactFloatBytes(dst, rect.H(), 4)
+		return append(dst, " re W n"...)
+	}
+	dst, _ = appendTransformedPathPDF(dst, clip, canvas.Identity, false)
+	return append(dst, " W n"...)
+}
+
+// transformedAxisRect 识别变换后为单一轴对齐矩形的路径以启用紧凑re操作符
+// 入参: path 源路径, m 变换矩阵, requireClosed 是否要求显式闭合
+// 返回: canvas.Rect 矩形范围, bool 是否为单一轴对齐矩形
+func transformedAxisRect(path *canvas.Path, m canvas.Matrix, requireClosed bool) (canvas.Rect, bool) {
+	if path == nil {
+		return canvas.Rect{}, false
+	}
+	sc := path.Scanner()
+	var pts [5]canvas.Point
+	n := 0
+	closed := false
+	for sc.Scan() {
+		cmd := sc.Cmd()
+		switch cmd {
+		case canvas.MoveToCmd:
+			if n != 0 {
+				return canvas.Rect{}, false
+			}
+			pts[0] = m.Dot(sc.End())
+			n = 1
+		case canvas.LineToCmd:
+			if closed || n == 0 || n >= 5 {
+				return canvas.Rect{}, false
+			}
+			pts[n] = m.Dot(sc.End())
+			n++
+		case canvas.CloseCmd:
+			if closed {
+				return canvas.Rect{}, false
+			}
+			closed = true
+		default:
+			return canvas.Rect{}, false
+		}
+	}
+	explicitlyClosed := closed
+	if n == 5 {
+		if !pts[4].Equals(pts[0]) {
+			return canvas.Rect{}, false
+		}
+		n = 4
+		explicitlyClosed = true
+	}
+	if n != 4 || (requireClosed && !explicitlyClosed) {
+		return canvas.Rect{}, false
+	}
+	a, b, c, d := pts[0], pts[1], pts[2], pts[3]
+	const eps = 1e-6
+	eq := func(u, v float64) bool { return math.Abs(u-v) <= eps }
+	axisAligned := (eq(a.Y, b.Y) && eq(b.X, c.X) && eq(c.Y, d.Y) && eq(d.X, a.X)) ||
+		(eq(a.X, b.X) && eq(b.Y, c.Y) && eq(c.X, d.X) && eq(d.Y, a.Y))
+	if !axisAligned {
+		return canvas.Rect{}, false
+	}
+	x0, x1 := min(a.X, c.X), max(a.X, c.X)
+	y0, y1 := min(a.Y, c.Y), max(a.Y, c.Y)
+	if x1 <= x0 || y1 <= y0 {
+		return canvas.Rect{}, false
+	}
+	return canvas.Rect{X0: x0, Y0: y0, X1: x1, Y1: y1}, true
+}
+
+// appendTransformedPathPDF 零拷贝变换并序列化画布路径为紧凑PDF路径指令，圆弧自动转为三次贝塞尔
+// 入参: dst 目标字节切片, path 源路径, m 变换矩阵, stripTrailingClose 是否剥离尾部h指令
+// 返回: []byte 追加后的切片, bool 尾部是否含闭合指令
+func appendTransformedPathPDF(dst []byte, path *canvas.Path, m canvas.Matrix, stripTrailingClose bool) ([]byte, bool) {
+	startLen := len(dst)
+	sc := path.Scanner()
+	var prev canvas.Point
+	lastClosed := false
+	lastCloseOffset := -1
+	for sc.Scan() {
+		lastClosed = false
+		lastCloseOffset = -1
+		cmd := sc.Cmd()
+		switch cmd {
+		case canvas.ArcToCmd:
+			replaced := path.Copy().Transform(m).ReplaceArcs()
+			return appendTransformedPathPDF(dst[:startLen], replaced, canvas.Identity, stripTrailingClose)
+		case canvas.MoveToCmd:
+			p := m.Dot(sc.End())
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, p.X, 4)
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, p.Y, 4)
+			dst = append(dst, " m"...)
+			prev = p
+		case canvas.LineToCmd:
+			p := m.Dot(sc.End())
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, p.X, 4)
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, p.Y, 4)
+			dst = append(dst, " l"...)
+			prev = p
+		case canvas.QuadToCmd:
+			cp := m.Dot(sc.CP1())
+			end := m.Dot(sc.End())
+			c1 := canvas.Point{X: prev.X + 2*(cp.X-prev.X)/3, Y: prev.Y + 2*(cp.Y-prev.Y)/3}
+			c2 := canvas.Point{X: end.X + 2*(cp.X-end.X)/3, Y: end.Y + 2*(cp.Y-end.Y)/3}
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, c1.X, 4)
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, c1.Y, 4)
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, c2.X, 4)
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, c2.Y, 4)
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, end.X, 4)
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, end.Y, 4)
+			dst = append(dst, " c"...)
+			prev = end
+		case canvas.CubeToCmd:
+			c1 := m.Dot(sc.CP1())
+			c2 := m.Dot(sc.CP2())
+			end := m.Dot(sc.End())
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, c1.X, 4)
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, c1.Y, 4)
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, c2.X, 4)
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, c2.Y, 4)
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, end.X, 4)
+			dst = append(dst, ' ')
+			dst = appendCompactFloatBytes(dst, end.Y, 4)
+			dst = append(dst, " c"...)
+			prev = end
+		case canvas.CloseCmd:
+			lastCloseOffset = len(dst)
+			dst = append(dst, " h"...)
+			lastClosed = true
+			prev = m.Dot(sc.End())
+		}
+	}
+	if stripTrailingClose && lastClosed && lastCloseOffset >= 0 {
+		dst = dst[:lastCloseOffset]
+		return dst, true
+	}
+	return dst, lastClosed
+}
+
+// isPDFDelimiterOrSpace 判断字节是否为PDF词法空白或分隔符
+// 入参: c 字节值
+// 返回: bool 是否为空白或分隔符
+func isPDFDelimiterOrSpace(c byte) bool {
+	switch c {
+	case 0x00, '\t', '\n', '\f', '\r', ' ', '(', ')', '<', '>', '[', ']', '{', '}', '/', '%':
+		return true
+	default:
+		return false
+	}
+}
+
 // Dictionary 将资源集合转换为标准PDF Resources字典
 // 返回: pdfgo.Dictionary 资源字典
 func (r *ContentResources) Dictionary() pdfgo.Dictionary {
@@ -120,36 +352,6 @@ func (r *ContentResources) Key() string {
 	writeMap('G', r.ExtGStates)
 	writeMap('P', r.Patterns)
 	return buf.String()
-}
-
-// NewContentBuilder 创建内容流构建器并初始化毫米到点的缩放矩阵
-// 入参: sink 全局资源登记回调
-// 返回: *ContentBuilder 内容流构建器
-func NewContentBuilder(sink ContentResourceSink) *ContentBuilder {
-	b := &ContentBuilder{
-		sink: sink,
-		buf:  make([]byte, 0, 1024),
-		state: contentGState{
-			alpha:          255,
-			fill:           canvas.Paint{Color: canvas.Black},
-			fillValid:      true,
-			stroke:         canvas.Paint{Color: canvas.Black},
-			strokeValid:    true,
-			lineWidth:      1,
-			lineCap:        0,
-			lineJoin:       0,
-			miterLimit:     10,
-			dashes:         []float64{0},
-			fontDirection:  ctext.LeftToRight,
-			textPos:        canvas.Identity,
-			textRenderMode: 0,
-		},
-	}
-	b.buf = appendCompactFloatBytes(b.buf, PtPerMM, 7)
-	b.buf = append(b.buf, " 0 0 "...)
-	b.buf = appendCompactFloatBytes(b.buf, PtPerMM, 7)
-	b.buf = append(b.buf, " 0 0 cm"...)
-	return b
 }
 
 // Resources 返回当前内容流实际引用的资源集合
@@ -216,8 +418,12 @@ func (b *ContentBuilder) RenderPath(path *canvas.Path, style canvas.Style, m can
 	if !strokeUnsupported {
 		if m.IsSimilarity() {
 			scale := math.Sqrt(math.Abs(m.Det()))
-			style.StrokeWidth *= scale
-			style.DashOffset, style.Dashes = canvas.ScaleDash(style.StrokeWidth, style.DashOffset, style.Dashes)
+			if !finite(scale) {
+				strokeUnsupported = true
+			} else {
+				style.StrokeWidth *= scale
+				style.DashOffset, style.Dashes = canvas.ScaleDash(style.StrokeWidth, style.DashOffset, style.Dashes)
+			}
 		} else {
 			strokeUnsupported = true
 		}
@@ -458,31 +664,6 @@ func (b *ContentBuilder) DrawForm(name pdfgo.Name, ref pdfgo.Reference, m canvas
 	b.buf = append(b.buf, " /"...)
 	b.buf = append(b.buf, name...)
 	b.buf = append(b.buf, " Do Q"...)
-}
-
-// contentGState 保存当前内容流的PDF图形状态缓存
-type contentGState struct {
-	alpha          uint8
-	fill           canvas.Paint
-	fillValid      bool
-	stroke         canvas.Paint
-	strokeValid    bool
-	lineWidth      float64
-	lineCap        int
-	lineJoin       int
-	miterLimit     float64
-	dashes         []float64
-	font           *canvas.Font
-	fontEntry      *FontEntry
-	fontSize       float64
-	fontDirection  ctext.Direction
-	textPos        canvas.Matrix
-	textRenderMode int
-}
-
-// contentPathAdapter 适配canvas.Renderer接口以接收文字下划线等装饰路径
-type contentPathAdapter struct {
-	b *ContentBuilder
 }
 
 // Size 返回装饰适配器的名义尺寸
@@ -898,11 +1079,11 @@ func (b *ContentBuilder) setTextRenderMode(mode int) {
 // writeGlyphs 编码并写入字形序列及精确字距调整，无字距调整时直接输出Tj
 // 入参: mode 排版方向, glyphs 字形列表
 func (b *ContentBuilder) writeGlyphs(mode canvas.WritingMode, glyphs []ctext.Glyph) {
-	if len(glyphs) == 0 || b.state.font == nil || b.state.fontEntry == nil {
+	if len(glyphs) == 0 || b.state.font == nil || b.state.fontEntry == nil || b.state.font.SFNT == nil || b.state.font.SFNT.Head == nil || b.state.font.SFNT.Head.UnitsPerEm == 0 {
 		return
 	}
 	entry := b.state.fontEntry
-	if mode != canvas.HorizontalTB && !glyphs[0].Vertical && glyphs[0].SFNT != nil {
+	if mode != canvas.HorizontalTB && !glyphs[0].Vertical && glyphs[0].SFNT != nil && glyphs[0].SFNT.Head != nil && glyphs[0].SFNT.Head.UnitsPerEm > 0 {
 		rot := glyphs[0].Rotation()
 		off := glyphs[0].YOffset - int32(glyphs[0].SFNT.Head.UnitsPerEm/2)
 		if rot != ctext.NoRotation || off != 0 {
@@ -1072,181 +1253,4 @@ func (b *ContentBuilder) appendPath(path *canvas.Path, m canvas.Matrix, stripTra
 	var closed bool
 	b.buf, closed = appendTransformedPathPDF(b.buf, path, m, stripTrailingClose)
 	return closed
-}
-
-// appendClipPathOps 将页面坐标系裁剪路径转为紧凑PDF裁剪指令并追加W n
-// 入参: dst 目标缓冲, clip 裁剪路径
-// 返回: []byte 追加后的缓冲
-func appendClipPathOps(dst []byte, clip *canvas.Path) []byte {
-	if rect, ok := transformedAxisRect(clip, canvas.Identity, false); ok {
-		dst = append(dst, ' ')
-		dst = appendCompactFloatBytes(dst, rect.X0, 4)
-		dst = append(dst, ' ')
-		dst = appendCompactFloatBytes(dst, rect.Y0, 4)
-		dst = append(dst, ' ')
-		dst = appendCompactFloatBytes(dst, rect.W(), 4)
-		dst = append(dst, ' ')
-		dst = appendCompactFloatBytes(dst, rect.H(), 4)
-		return append(dst, " re W n"...)
-	}
-	dst, _ = appendTransformedPathPDF(dst, clip, canvas.Identity, false)
-	return append(dst, " W n"...)
-}
-
-// transformedAxisRect 识别变换后为单一轴对齐矩形的路径以启用紧凑re操作符
-// 入参: path 源路径, m 变换矩阵, requireClosed 是否要求显式闭合
-// 返回: canvas.Rect 矩形范围, bool 是否为单一轴对齐矩形
-func transformedAxisRect(path *canvas.Path, m canvas.Matrix, requireClosed bool) (canvas.Rect, bool) {
-	if path == nil {
-		return canvas.Rect{}, false
-	}
-	sc := path.Scanner()
-	var pts [5]canvas.Point
-	n := 0
-	closed := false
-	for sc.Scan() {
-		cmd := sc.Cmd()
-		switch cmd {
-		case canvas.MoveToCmd:
-			if n != 0 {
-				return canvas.Rect{}, false
-			}
-			pts[0] = m.Dot(sc.End())
-			n = 1
-		case canvas.LineToCmd:
-			if closed || n == 0 || n >= 5 {
-				return canvas.Rect{}, false
-			}
-			pts[n] = m.Dot(sc.End())
-			n++
-		case canvas.CloseCmd:
-			if closed {
-				return canvas.Rect{}, false
-			}
-			closed = true
-		default:
-			return canvas.Rect{}, false
-		}
-	}
-	explicitlyClosed := closed
-	if n == 5 {
-		if !pts[4].Equals(pts[0]) {
-			return canvas.Rect{}, false
-		}
-		n = 4
-		explicitlyClosed = true
-	}
-	if n != 4 || (requireClosed && !explicitlyClosed) {
-		return canvas.Rect{}, false
-	}
-	a, b, c, d := pts[0], pts[1], pts[2], pts[3]
-	const eps = 1e-6
-	eq := func(u, v float64) bool { return math.Abs(u-v) <= eps }
-	axisAligned := (eq(a.Y, b.Y) && eq(b.X, c.X) && eq(c.Y, d.Y) && eq(d.X, a.X)) ||
-		(eq(a.X, b.X) && eq(b.Y, c.Y) && eq(c.X, d.X) && eq(d.Y, a.Y))
-	if !axisAligned {
-		return canvas.Rect{}, false
-	}
-	x0, x1 := min(a.X, c.X), max(a.X, c.X)
-	y0, y1 := min(a.Y, c.Y), max(a.Y, c.Y)
-	if x1 <= x0 || y1 <= y0 {
-		return canvas.Rect{}, false
-	}
-	return canvas.Rect{X0: x0, Y0: y0, X1: x1, Y1: y1}, true
-}
-
-// appendTransformedPathPDF 零拷贝变换并序列化画布路径为紧凑PDF路径指令，圆弧自动转为三次贝塞尔
-// 入参: dst 目标字节切片, path 源路径, m 变换矩阵, stripTrailingClose 是否剥离尾部h指令
-// 返回: []byte 追加后的切片, bool 尾部是否含闭合指令
-func appendTransformedPathPDF(dst []byte, path *canvas.Path, m canvas.Matrix, stripTrailingClose bool) ([]byte, bool) {
-	startLen := len(dst)
-	sc := path.Scanner()
-	var prev canvas.Point
-	lastClosed := false
-	lastCloseOffset := -1
-	for sc.Scan() {
-		lastClosed = false
-		lastCloseOffset = -1
-		cmd := sc.Cmd()
-		switch cmd {
-		case canvas.ArcToCmd:
-			replaced := path.Copy().Transform(m).ReplaceArcs()
-			return appendTransformedPathPDF(dst[:startLen], replaced, canvas.Identity, stripTrailingClose)
-		case canvas.MoveToCmd:
-			p := m.Dot(sc.End())
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, p.X, 4)
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, p.Y, 4)
-			dst = append(dst, " m"...)
-			prev = p
-		case canvas.LineToCmd:
-			p := m.Dot(sc.End())
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, p.X, 4)
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, p.Y, 4)
-			dst = append(dst, " l"...)
-			prev = p
-		case canvas.QuadToCmd:
-			cp := m.Dot(sc.CP1())
-			end := m.Dot(sc.End())
-			c1 := canvas.Point{X: prev.X + 2*(cp.X-prev.X)/3, Y: prev.Y + 2*(cp.Y-prev.Y)/3}
-			c2 := canvas.Point{X: end.X + 2*(cp.X-end.X)/3, Y: end.Y + 2*(cp.Y-end.Y)/3}
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, c1.X, 4)
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, c1.Y, 4)
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, c2.X, 4)
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, c2.Y, 4)
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, end.X, 4)
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, end.Y, 4)
-			dst = append(dst, " c"...)
-			prev = end
-		case canvas.CubeToCmd:
-			c1 := m.Dot(sc.CP1())
-			c2 := m.Dot(sc.CP2())
-			end := m.Dot(sc.End())
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, c1.X, 4)
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, c1.Y, 4)
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, c2.X, 4)
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, c2.Y, 4)
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, end.X, 4)
-			dst = append(dst, ' ')
-			dst = appendCompactFloatBytes(dst, end.Y, 4)
-			dst = append(dst, " c"...)
-			prev = end
-		case canvas.CloseCmd:
-			lastCloseOffset = len(dst)
-			dst = append(dst, " h"...)
-			lastClosed = true
-			prev = m.Dot(sc.End())
-		}
-	}
-	if stripTrailingClose && lastClosed && lastCloseOffset >= 0 {
-		dst = dst[:lastCloseOffset]
-		return dst, true
-	}
-	return dst, lastClosed
-}
-
-// isPDFDelimiterOrSpace 判断字节是否为PDF词法空白或分隔符
-// 入参: c 字节值
-// 返回: bool 是否为空白或分隔符
-func isPDFDelimiterOrSpace(c byte) bool {
-	switch c {
-	case 0x00, '\t', '\n', '\f', '\r', ' ', '(', ')', '<', '>', '[', ']', '{', '}', '/', '%':
-		return true
-	default:
-		return false
-	}
 }

@@ -20,65 +20,6 @@ import (
 	"math"
 )
 
-// viewLayers 按ECMA-363第9.5.4节依次绘制背景层或覆盖层
-// 入参: layers 按后至前排列的纹理层
-// 返回: error 参数、资源、预算或取消错误
-func (r *Renderer) viewLayers(layers []U3DViewLayer) error {
-	for _, layer := range layers {
-		if err := r.ctx.Err(); err != nil {
-			return err
-		}
-		for _, value := range [...]float32{layer.Blend, layer.Rotation, layer.Location[0], layer.Location[1], layer.Scale[0], layer.Scale[1]} {
-			if !finite(float64(value)) {
-				return fmt.Errorf("invalid U3D view layer values")
-			}
-		}
-		texture, err := r.texture(layer.Texture)
-		if err != nil {
-			return err
-		}
-		blend := min(1, max(0, float64(layer.Blend)))
-		if blend == 0 || layer.Scale[0] == 0 || layer.Scale[1] == 0 {
-			continue
-		}
-		sin, cos := math.Sincos(float64(layer.Rotation))
-		x, y := float64(layer.Location[0]), float64(layer.Location[1])
-		if r.view.Attributes&1 != 0 {
-			x *= float64(r.output.Rect.Dx())
-			y *= float64(r.output.Rect.Dy())
-		}
-		sx, sy := float64(layer.Scale[0]), float64(layer.Scale[1])
-		rx, ry := float64(layer.Registration[0]), float64(layer.Registration[1])
-		m := [6]float64{cos * sx, -sin * sx, sin * sy, cos * sy, x - cos*sx*rx - sin*sy*ry, y + sin*sx*rx - cos*sy*ry}
-		bounds := viewImageBounds(texture.Bounds(), m, r.output.Bounds())
-		for py := bounds.Min.Y; py < bounds.Max.Y; py++ {
-			for px := bounds.Min.X; px < bounds.Max.X; px++ {
-				if px%4096 == 0 || px == bounds.Min.X {
-					if err := r.ctx.Err(); err != nil {
-						return err
-					}
-				}
-				cx, cy := float64(px)+.5, float64(py)+.5
-				if cx < r.viewport[0] || cy < r.viewport[1] || cx >= r.viewport[0]+r.viewport[2] || cy >= r.viewport[1]+r.viewport[3] {
-					continue
-				}
-				dx, dy := cx-x, cy-y
-				u, v := (cos*dx-sin*dy)/sx+rx, (sin*dx+cos*dy)/sy+ry
-				if u < 0 || v < 0 || u >= float64(texture.Rect.Dx()) || v >= float64(texture.Rect.Dy()) {
-					continue
-				}
-				value := u3dTextureSample(texture, u, v)
-				pixel := &r.frame[py*r.output.Rect.Dx()+px]
-				alpha := value[3] * blend
-				for i := range pixel.color {
-					pixel.color[i] = value[i]*blend + pixel.color[i]*(1-alpha)
-				}
-			}
-		}
-	}
-	return r.ctx.Err()
-}
-
 // u3dTextureSample 在像素中心进行双线性采样，使用预乘颜色避免透明边缘色晕
 // 入参: texture 纹理, x 横向像素坐标, y 纵向像素坐标
 // 返回: [4]float64 预乘颜色及透明度
@@ -100,4 +41,68 @@ func u3dTextureSample(texture *image.NRGBA64, x, y float64) [4]float64 {
 		}
 	}
 	return result
+}
+
+// viewLayers 按ECMA-363第9.5.4节依次绘制背景层或覆盖层
+// 入参: layers 按后至前排列的纹理层
+// 返回: error 参数、资源、预算或取消错误
+func (r *Renderer) viewLayers(layers []U3DViewLayer) error {
+	for _, layer := range layers {
+		if err := r.ctx.Err(); err != nil {
+			return err
+		}
+		for _, value := range [...]float32{layer.Blend, layer.Rotation, layer.Location[0], layer.Location[1], layer.Scale[0], layer.Scale[1]} {
+			if !finite(float64(value)) {
+				return fmt.Errorf("invalid U3D view layer values")
+			}
+		}
+		texture, err := r.texture(layer.Texture)
+		if err != nil {
+			return err
+		}
+		blend := min(1, max(0, float64(layer.Blend)))
+		if blend == 0 || layer.Scale[0] == 0 || layer.Scale[1] == 0 || texture.Rect.Empty() {
+			continue
+		}
+		sin, cos := math.Sincos(float64(layer.Rotation))
+		x, y := float64(layer.Location[0]), float64(layer.Location[1])
+		if r.view.Attributes&1 != 0 {
+			x *= float64(r.output.Rect.Dx())
+			y *= float64(r.output.Rect.Dy())
+		}
+		sx, sy := float64(layer.Scale[0]), float64(layer.Scale[1])
+		rx, ry := float64(layer.Registration[0]), float64(layer.Registration[1])
+		m := [6]float64{cos * sx, -sin * sx, sin * sy, cos * sy, x - cos*sx*rx - sin*sy*ry, y + sin*sx*rx - cos*sy*ry}
+		for _, v := range m {
+			if !finite(v) {
+				return fmt.Errorf("invalid U3D view layer transform")
+			}
+		}
+		bounds := viewImageBounds(texture.Bounds(), m, r.output.Bounds())
+		for py := bounds.Min.Y; py < bounds.Max.Y; py++ {
+			for px := bounds.Min.X; px < bounds.Max.X; px++ {
+				if px%4096 == 0 || px == bounds.Min.X {
+					if err := r.ctx.Err(); err != nil {
+						return err
+					}
+				}
+				cx, cy := float64(px)+.5, float64(py)+.5
+				if cx < r.viewport[0] || cy < r.viewport[1] || cx >= r.viewport[0]+r.viewport[2] || cy >= r.viewport[1]+r.viewport[3] {
+					continue
+				}
+				dx, dy := cx-x, cy-y
+				u, v := (cos*dx-sin*dy)/sx+rx, (sin*dx+cos*dy)/sy+ry
+				if !finite(u) || !finite(v) || u < 0 || v < 0 || u >= float64(texture.Rect.Dx()) || v >= float64(texture.Rect.Dy()) {
+					continue
+				}
+				value := u3dTextureSample(texture, u, v)
+				pixel := &r.frame[py*r.output.Rect.Dx()+px]
+				alpha := value[3] * blend
+				for i := range pixel.color {
+					pixel.color[i] = value[i]*blend + pixel.color[i]*(1-alpha)
+				}
+			}
+		}
+	}
+	return r.ctx.Err()
 }

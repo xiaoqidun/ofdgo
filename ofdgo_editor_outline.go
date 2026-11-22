@@ -24,6 +24,33 @@ import (
 	"strings"
 )
 
+// editorOutlineChildren 获取标准目录子节点
+// 入参: node 父节点
+// 返回: []*editorXML 子节点
+func editorOutlineChildren(node *editorXML) []*editorXML {
+	var children []*editorXML
+	for _, child := range node.children {
+		if child.matchesOFD("OutlineElem") {
+			children = append(children, child)
+		}
+	}
+	return children
+}
+
+// editorOutlineNode 按层级路径定位目录
+// 入参: root 目录根节点, path 层级索引
+// 返回: *editorXML 节点, error 错误信息
+func editorOutlineNode(root *editorXML, path []int) (*editorXML, error) {
+	for _, index := range path {
+		children := editorOutlineChildren(root)
+		if index < 0 || index >= len(children) {
+			return nil, fmt.Errorf("outline index %d out of range", index)
+		}
+		root = children[index]
+	}
+	return root, nil
+}
+
 // Outlines 获取当前目录层级，目标页码从1开始，无目标时为0
 // 返回: []OutlineInfo 目录信息, error 错误信息
 func (e *Editor) Outlines() ([]OutlineInfo, error) {
@@ -358,33 +385,6 @@ func (e *Editor) outlineAction(page int) []byte {
 		x.end("Actions")
 	})
 	return bytes.TrimPrefix(data, []byte(xml.Header))
-}
-
-// editorOutlineChildren 获取标准目录子节点
-// 入参: node 父节点
-// 返回: []*editorXML 子节点
-func editorOutlineChildren(node *editorXML) []*editorXML {
-	var children []*editorXML
-	for _, child := range node.children {
-		if child.matchesOFD("OutlineElem") {
-			children = append(children, child)
-		}
-	}
-	return children
-}
-
-// editorOutlineNode 按层级路径定位目录
-// 入参: root 目录根节点, path 层级索引
-// 返回: *editorXML 节点, error 错误信息
-func editorOutlineNode(root *editorXML, path []int) (*editorXML, error) {
-	for _, index := range path {
-		children := editorOutlineChildren(root)
-		if index < 0 || index >= len(children) {
-			return nil, fmt.Errorf("outline index %d out of range", index)
-		}
-		root = children[index]
-	}
-	return root, nil
 }
 
 // setOutlineXML 更新目录及可选叶节点计数，保存一次撤销记录

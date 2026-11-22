@@ -107,7 +107,7 @@ func fixTrueType(data []byte, fixCmap, fixName bool) (bool, []byte, map[rune]uin
 			malformedDirectory = true
 		}
 	}
-	cmap, err := NormalizeCmap(existingTables["cmap"])
+	cmap, err := normalizeCmap(existingTables["cmap"])
 	if err != nil {
 		return false, data, nil, false, err
 	}

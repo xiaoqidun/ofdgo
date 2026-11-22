@@ -33,46 +33,6 @@ type PathStyle struct {
 	DashOffset  *float64
 }
 
-// UpdatePathStyle 原子更新选中路径对象的页面坐标样式，保留未修改属性并计入一次撤销记录
-// 线宽按各对象CTM折算为局部线宽，直线与箭头路径自动禁填并保持描边
-// 入参: page 页面索引, ids 不重复的路径对象标识列表, style 样式增量
-// 返回: error 校验或更新错误
-func (e *Editor) UpdatePathStyle(page int, ids []string, style PathStyle) error {
-	defer e.bindPageIndex(page)()
-	for _, value := range []*FillColor{style.FillColor, (*FillColor)(style.StrokeColor)} {
-		if value != nil {
-			if err := e.editorColor(value); err != nil {
-				return err
-			}
-		}
-	}
-	objects, _, err := e.selectedObjects(page, ids)
-	if err != nil || len(objects) == 0 {
-		return err
-	}
-	paint := style.Fill != nil || style.Stroke != nil || style.FillColor != nil || style.StrokeColor != nil || style.LineWidth != nil || style.Cap != nil || style.Join != nil || style.MiterLimit != nil || style.DashPattern != nil || style.DashOffset != nil
-	for i := range objects {
-		if objects[i].Type != "PathObject" {
-			return fmt.Errorf("object %q is not a path", ids[i])
-		}
-		if paint {
-			capability, err := e.ObjectCapabilities(page, ids[i])
-			if err != nil {
-				return err
-			}
-			if !capability.Paint {
-				return fmt.Errorf("object %q cannot be painted: %w", ids[i], capability.editError())
-			}
-		}
-		updated, err := StylePath(objects[i].PathObject, style)
-		if err != nil {
-			return err
-		}
-		objects[i].PathObject = updated
-	}
-	return e.updateObjects(page, objects, true)
-}
-
 // StylePath 按页面坐标增量更新单个路径样式，保留未指定属性并处理CTM线宽折算与直线禁填规则
 // 可用于NewShape创建后配置样式，或配合Editor.UpdateObject写入文档
 // 入参: object 原路径对象, style 样式增量
@@ -141,7 +101,7 @@ func StylePath(object PathObject, style PathStyle) (PathObject, error) {
 	}
 	if style.DashPattern != nil {
 		object.DashPattern = *style.DashPattern
-		object.dashPatternSet = object.DashPattern == ""
+		object.DashPatternSet = object.DashPattern == ""
 	}
 	if style.DashOffset != nil {
 		object.DashOffset = cloneEditorData(style.DashOffset)
@@ -152,4 +112,44 @@ func StylePath(object PathObject, style PathStyle) (PathObject, error) {
 		}
 	}
 	return object, nil
+}
+
+// UpdatePathStyle 原子更新选中路径对象的页面坐标样式，保留未修改属性并计入一次撤销记录
+// 线宽按各对象CTM折算为局部线宽，直线与箭头路径自动禁填并保持描边
+// 入参: page 页面索引, ids 不重复的路径对象标识列表, style 样式增量
+// 返回: error 校验或更新错误
+func (e *Editor) UpdatePathStyle(page int, ids []string, style PathStyle) error {
+	defer e.bindPageIndex(page)()
+	for _, value := range []*FillColor{style.FillColor, (*FillColor)(style.StrokeColor)} {
+		if value != nil {
+			if err := e.editorColor(value); err != nil {
+				return err
+			}
+		}
+	}
+	objects, _, err := e.selectedObjects(page, ids)
+	if err != nil || len(objects) == 0 {
+		return err
+	}
+	paint := style.Fill != nil || style.Stroke != nil || style.FillColor != nil || style.StrokeColor != nil || style.LineWidth != nil || style.Cap != nil || style.Join != nil || style.MiterLimit != nil || style.DashPattern != nil || style.DashOffset != nil
+	for i := range objects {
+		if objects[i].Type != "PathObject" {
+			return fmt.Errorf("object %q is not a path", ids[i])
+		}
+		if paint {
+			capability, err := e.ObjectCapabilities(page, ids[i])
+			if err != nil {
+				return err
+			}
+			if !capability.Paint {
+				return fmt.Errorf("object %q cannot be painted: %w", ids[i], capability.editError())
+			}
+		}
+		updated, err := StylePath(objects[i].PathObject, style)
+		if err != nil {
+			return err
+		}
+		objects[i].PathObject = updated
+	}
+	return e.updateObjects(page, objects, true)
 }

@@ -35,6 +35,34 @@ type ImageInfo struct {
 	Location string `json:"-"`
 }
 
+// imageDedupKey 按规范化资源标识与包内文件路径对图片清单去重
+type imageDedupKey struct {
+	id       string
+	location string
+}
+
+// imageOutput 在分块写出图片时检查调用方取消状态
+type imageOutput struct {
+	ctx    context.Context
+	writer io.Writer
+}
+
+// imageInput 在读取资源数据时检查调用方取消状态
+type imageInput struct {
+	io.ReadCloser
+	ctx context.Context
+}
+
+// imageResourceKey 合并有效十进制标识，非标准标识保留原值，不相互混淆
+// 入参: id 图片标识
+// 返回: string 查找键
+func imageResourceKey(id string) string {
+	if key := editorResourceID(id); key != "" {
+		return key
+	}
+	return id
+}
+
 // Images 列出文档、页面和模板声明的图片资源，不解码图片像素
 // 包含未使用及重复引用的资源声明，同一资源标识与路径组合只返回一次，不加载注解或签名
 // 入参: ctx 取消上下文
@@ -284,18 +312,6 @@ func (r *Reader) WriteImages(ctx context.Context, writer io.Writer, ids ...strin
 	return archive.Close()
 }
 
-// imageDedupKey 按规范化资源标识与包内文件路径对图片清单去重
-type imageDedupKey struct {
-	id       string
-	location string
-}
-
-// imageOutput 在分块写出图片时检查调用方取消状态
-type imageOutput struct {
-	ctx    context.Context
-	writer io.Writer
-}
-
 // Write 检查取消状态后写出原始数据
 // 入参: data 数据块
 // 返回: int 写入字节数, error 写入或取消错误
@@ -304,12 +320,6 @@ func (w imageOutput) Write(data []byte) (int, error) {
 		return 0, err
 	}
 	return w.writer.Write(data)
-}
-
-// imageInput 在读取资源数据时检查调用方取消状态
-type imageInput struct {
-	io.ReadCloser
-	ctx context.Context
 }
 
 // Read 检查取消状态后读取原始数据
@@ -368,14 +378,4 @@ func (r *Reader) parseImageResFileContext(ctx context.Context, name string) ([]I
 		items = append(items, item)
 	}
 	return items, mediaTypes, ctx.Err()
-}
-
-// imageResourceKey 合并有效十进制标识，非标准标识保留原值，不相互混淆
-// 入参: id 图片标识
-// 返回: string 查找键
-func imageResourceKey(id string) string {
-	if key := editorResourceID(id); key != "" {
-		return key
-	}
-	return id
 }

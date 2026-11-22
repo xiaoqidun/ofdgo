@@ -26,6 +26,307 @@ import (
 	"strings"
 )
 
+// resourceStyleReference 保存资源依赖及可选的类型要求，不持有XML节点
+type resourceStyleReference struct {
+	scope   string
+	ownerID string
+	key     string
+	kind    string
+	exact   bool
+}
+
+// applyResourceStyleParts 合并资源声明及独立索引，统一更新最大标识并隔离其他文档和历史版本
+// 入参: ctx 取消上下文, reader 独立快照, maximumID 最大注册标识, data 合并声明, parts 附属文件, indexes 独立索引路径
+// 返回: error 结构、读取或隔离错误
+func applyResourceStyleParts(ctx context.Context, reader *Reader, maximumID uint64, data []byte, parts map[string][]byte, indexes []string) error {
+	if maximumID > maxUnitID {
+		return fmt.Errorf("MaxUnitID %d exceeds uint32 range", maximumID)
+	}
+	doc, err := reader.DocContext(ctx)
+	if err != nil {
+		return err
+	}
+	if len(data) != 0 {
+		name, added, err := mergePackageResources(ctx, reader, parts, doc, path.Dir(reader.documentRoot), data)
+		if err != nil {
+			return err
+		}
+		if added {
+			indexes = append(slices.Clone(indexes), name)
+		}
+	}
+	entry := reader.documentRoot
+	content, err := reader.readFileViewContext(ctx, entry)
+	if err != nil {
+		return err
+	}
+	root, err := parseEditorXMLContext(ctx, content)
+	if err != nil {
+		return err
+	}
+	common := root.child("CommonData")
+	if common == nil {
+		return fmt.Errorf("missing CommonData")
+	}
+	patch := editorXMLPatch{common.open, common.open, common.textXML("MaxUnitID", formatUnitID(maximumID))}
+	if maximum := common.child("MaxUnitID"); maximum != nil {
+		current, err := strconv.ParseUint(strings.TrimSpace(editorImportText(content, maximum)), 10, 32)
+		if err != nil {
+			return err
+		}
+		patch = editorXMLPatch{maximum.start, maximum.end, maximum.textXML("MaxUnitID", formatUnitID(max(current, maximumID)))}
+	}
+	patches := []editorXMLPatch{patch}
+	if len(indexes) != 0 {
+		position := common.close
+		for _, child := range common.children {
+			if child.matchesOFD("TemplatePage") || child.matchesOFD("DefaultCS") {
+				position = child.start
+				break
+			}
+		}
+		var refs []byte
+		for _, name := range indexes {
+			refs = append(refs, common.textXML("DocumentRes", "/"+name)...)
+		}
+		patches = append(patches, editorXMLPatch{position, position, refs})
+	}
+	parts[entry] = editorPatchXML(content, patches)
+	scan := &editorFontDocument{reader: reader, index: reader.DocumentIndex()}
+	return scan.apply(ctx, parts)
+}
+
+// replaceResourceStyle 更新声明原文并验证资源依赖，清除受影响的复合及底纹预览
+// 入参: ctx 取消上下文, catalog 当前目录, item 目标条目, targetFile 目标所在资源文件, target 目标节点, fragment 新声明, changes 待提交修改
+// 返回: error 不支持的定义、引用或预览处理错误
+func replaceResourceStyle(ctx context.Context, catalog *resourceCatalog, item ResourceInfo, targetFile string, target editorFontText, fragment []byte, changes map[string][]byte) error {
+	if item.Kind == "DrawParam" && (target.node.attr("Link") != "" || target.node.attr("BaseLoc") != "" || target.node.attr("ResourceID") != "") {
+		return fmt.Errorf("external draw parameter cannot be replaced")
+	}
+	changes[target.file.name] = editorPatchXML(target.file.data, []editorXMLPatch{{target.node.start, target.node.end, fragment}})
+	if err := validateResourceStyleGraph(ctx, catalog, target.file.name, item.ID, changes); err != nil {
+		return err
+	}
+	return invalidateScopedResourcePreviews(ctx, catalog, changes, targetFile, item.Kind, item.ID)
+}
+
+// resourceColorNode 判断可携带基本颜色或复杂填充的标准节点
+// 入参: node XML节点
+// 返回: bool 是否为颜色节点
+func resourceColorNode(node *editorXML) bool {
+	return node.matchesOFD(node.name.Local) && slices.Contains([]string{"FillColor", "StrokeColor", "BorderColor", "Color", "BackColor"}, node.name.Local)
+}
+
+// validateResourceColors 校验按作用域精确命中目标颜色空间的显式及默认颜色，不误伤其他页面的同名颜色空间
+// 入参: ctx 取消上下文, catalog 当前资源目录, targetFile 目标颜色空间所在文件, space 替换后的颜色空间
+// 返回: error 不兼容的色值或调色板索引
+func validateResourceColors(ctx context.Context, catalog *resourceCatalog, targetFile string, space ColorSpace) error {
+	doc, err := catalog.scan.reader.DocContext(ctx)
+	if err != nil {
+		return err
+	}
+	defaultCS := ""
+	if doc.CommonData.DefaultCS != 0 {
+		defaultCS = formatUnitID(doc.CommonData.DefaultCS)
+	}
+	expectedKey := ""
+	if targetFile != "" {
+		expectedKey = "res:" + cleanPackagePath(targetFile) + ":ColorSpace:" + editorResourceID(space.ID)
+	}
+	working := NewEditor()
+	space.Profile, space.profile = "", nil
+	working.resources = []editorResource{{space: &space}}
+	for _, file := range catalog.scan.files {
+		cleanName := cleanPackagePath(file.name)
+		root, err := parseEditorXMLContext(ctx, file.data)
+		if err != nil {
+			return err
+		}
+		var visit func(*editorXML) error
+		visit = func(node *editorXML) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if !node.matchesOFD(node.name.Local) {
+				return nil
+			}
+			if resourceColorNode(node) {
+				id := node.attr("ColorSpace")
+				if id == "" {
+					id = defaultCS
+				}
+				matched := sameResourceID(id, space.ID)
+				if matched && expectedKey != "" {
+					matched = resolveCatalogScopedKey(catalog, cleanName, node.name.Local, "", "ColorSpace", id) == expectedKey
+				}
+				if matched {
+					var paint FillColor
+					decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(file.data[node.start:node.end])), ctx: ctx})
+					if err := decoder.Decode(&paint); err != nil {
+						return err
+					}
+					if _, err := working.Color(&FillColor{Value: paint.Value, Index: paint.Index, Alpha: paint.Alpha, ColorSpace: space.ID}); err != nil {
+						return fmt.Errorf("color in %s: %w", file.name, err)
+					}
+				}
+			}
+			for _, child := range node.children {
+				if err := visit(child); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if err := visit(root); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+// validateResourceStyleGraph 检查替换定义的传递依赖，拒绝缺失资源、错误类型及跨底纹复合资源的循环
+// 逐文件收集依赖后统一校验，不同时保留所有结构文件的XML树
+// 入参: ctx 取消上下文, catalog 当前目录, targetFile 目标定义所在资源文件，空值使用文档级作用域, id 替换标识, changes 待提交修改
+// 返回: error 资源引用或循环错误
+func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, targetFile, id string, changes map[string][]byte) error {
+	types := make(map[string]string)
+	graph := make(map[string][]resourceStyleReference)
+	for name, file := range catalog.scan.files {
+		data, ok := changes[name]
+		if !ok {
+			data = file.data
+		}
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			return err
+		}
+		cleanName := cleanPackagePath(name)
+		types["file/"+cleanName] = "File"
+		if root.matchesOFD("Res") {
+			for _, group := range root.children {
+				for _, node := range group.children {
+					if node.matchesOFD(editorResourceElement(group.name.Local)) {
+						key := editorResourceID(node.attr("ID"))
+						resKey := cleanName + "\x00" + key
+						if key == "" || types[resKey] != "" {
+							return fmt.Errorf("invalid or duplicate resource ID %q", key)
+						}
+						types[resKey] = node.name.Local
+						location := ""
+						if node.matchesOFD("CompositeGraphicUnit") {
+							location = node.attr("BaseLoc")
+						} else if node.matchesOFD("DrawParam") {
+							location = node.attr("Link")
+						}
+						if location != "" {
+							extFile := "file/" + cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), location))
+							graph[resKey] = append(graph[resKey], resourceStyleReference{key: extFile, exact: true})
+						}
+					}
+				}
+			}
+		}
+		var visit func(*editorXML) error
+		visit = func(node *editorXML) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if !node.matchesOFD(node.name.Local) {
+				return nil
+			}
+			owner := "file/" + cleanName
+			ownerResID := ""
+			if root.matchesOFD("Res") {
+				owner = ""
+				if ownerID := resourceReferenceOwner(node); ownerID != "" {
+					ownerResID = ownerID
+					owner = cleanName + "\x00" + ownerID
+				}
+			}
+			if owner != "" {
+				if slices.Contains([]string{"Thumbnail", "Substitution"}, node.name.Local) {
+					graph[owner] = append(graph[owner], resourceStyleReference{scope: cleanName, key: editorResourceID(editorImportText(data, node))})
+				}
+				for _, attr := range node.attrs {
+					if attr.Name.Space == "" && attr.Value != "" && slices.Contains([]string{"Relative", "DrawParam", "ColorSpace", "Font", "ResourceID", "ImageMask", "Substitution", "Thumbnail"}, attr.Name.Local) {
+						key := editorResourceID(attr.Value)
+						kind := ""
+						refOwner := ""
+						switch attr.Name.Local {
+						case "Relative":
+							kind = "DrawParam"
+							refOwner = ownerResID
+						case "DrawParam":
+							kind = "DrawParam"
+						case "ColorSpace", "Font":
+							kind = attr.Name.Local
+						}
+						graph[owner] = append(graph[owner], resourceStyleReference{scope: cleanName, ownerID: refOwner, key: key, kind: kind})
+					}
+				}
+			}
+			for _, child := range node.children {
+				if err := visit(child); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if err := visit(root); err != nil {
+			return err
+		}
+	}
+	state := make(map[string]int)
+	var visit func(resourceStyleReference) error
+	visit = func(reference resourceStyleReference) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		nodeKey := reference.key
+		if !reference.exact {
+			nodeKey = ""
+			if reference.key != "" {
+				scope := catalog.scopeForFile(reference.scope)
+				if reference.ownerID != "" {
+					if pos := slices.Index(scope, reference.scope); pos >= 0 {
+						if reference.key == reference.ownerID {
+							scope = scope[pos+1:]
+						} else {
+							scope = scope[pos:]
+						}
+					}
+				}
+				for _, resFile := range scope {
+					candidate := resFile + "\x00" + reference.key
+					if types[candidate] != "" {
+						nodeKey = candidate
+						break
+					}
+				}
+			}
+		}
+		if types[nodeKey] == "" || reference.kind != "" && types[nodeKey] != reference.kind || state[nodeKey] == 1 {
+			return fmt.Errorf("missing, mistyped or cyclic style resource %q", reference.key)
+		}
+		if state[nodeKey] == 2 {
+			return nil
+		}
+		state[nodeKey] = 1
+		for _, dependency := range graph[nodeKey] {
+			if err := visit(dependency); err != nil {
+				return err
+			}
+		}
+		state[nodeKey] = 2
+		return nil
+	}
+	start := resourceStyleReference{scope: "", key: editorResourceID(id)}
+	if targetFile != "" {
+		start = resourceStyleReference{key: cleanPackagePath(targetFile) + "\x00" + editorResourceID(id), exact: true}
+	}
+	return visit(start)
+}
+
 // ColorSpace 获取当前文档及版本的颜色空间定义，不读取或解析ICC文件
 // 入参: ctx 取消上下文, id 资源标识
 // 返回: *ColorSpace 独立副本，Profile为包内绝对引用, error 查询或解析错误
@@ -256,6 +557,7 @@ func (e *Editor) ReplaceDrawParam(ctx context.Context, id string, draw DrawParam
 		if err != nil {
 			return err
 		}
+		defer working.Close()
 		if err := working.prepareSourceIDsContext(ctx); err != nil {
 			return err
 		}
@@ -300,15 +602,6 @@ func (e *Editor) ReplaceDrawParam(ctx context.Context, id string, draw DrawParam
 	})
 }
 
-// resourceStyleReference 保存资源依赖及可选的类型要求，不持有XML节点
-type resourceStyleReference struct {
-	scope   string
-	ownerID string
-	key     string
-	kind    string
-	exact   bool
-}
-
 // styleDefinitionAt 从指定资源文件的声明原文解码样式定义，补齐继承的XML命名空间
 // 入参: ctx 取消上下文, resFile 声明所在资源文件, item 目录条目, target 解码目标
 // 返回: error 取消或XML解析错误
@@ -341,10 +634,12 @@ func (e *Editor) importResourceStyle(ctx context.Context, create func(*Editor) (
 	if err != nil {
 		return "", err
 	}
+	defer reader.Close()
 	working, err := reader.EditorContext(ctx)
 	if err != nil {
 		return "", err
 	}
+	defer working.Close()
 	if err := working.prepareSourceIDsContext(ctx); err != nil {
 		return "", err
 	}
@@ -369,11 +664,16 @@ func (e *Editor) importResourceStyle(ctx context.Context, create func(*Editor) (
 // 复用内容扫描收集已有标识，不重复解析结构文件或构建未使用的资源目录
 // 入参: ctx 取消上下文
 // 返回: *Reader 包含待注册字体、颜色空间及参数依赖的独立快照, error 读取或隔离错误
-func (e *Editor) resourceStyleReader(ctx context.Context) (*Reader, error) {
+func (e *Editor) resourceStyleReader(ctx context.Context) (result *Reader, err error) {
 	reader, err := e.Reader(ctx)
 	if err != nil || len(e.resources) == 0 {
 		return reader, err
 	}
+	defer func() {
+		if result == nil {
+			_ = reader.Close()
+		}
+	}()
 	known := make(map[string]bool)
 	_, err = scanEditorFontFiles(ctx, reader, reader.DocumentIndex(), func(_ *editorFontXML, root *editorXML) error {
 		if !root.matchesOFD("Res") {
@@ -429,7 +729,10 @@ func (e *Editor) resourceStyleReader(ctx context.Context) (*Reader, error) {
 		}
 	}
 	if len(fonts)+len(images)+len(spaces)+len(indexes) == 0 {
-		return reader, ctx.Err()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return reader, nil
 	}
 	var data []byte
 	if len(fonts)+len(images)+len(spaces) != 0 {
@@ -441,68 +744,10 @@ func (e *Editor) resourceStyleReader(ctx context.Context) (*Reader, error) {
 	if err := applyResourceStyleParts(ctx, reader, e.maxID, data, parts, indexes); err != nil {
 		return nil, err
 	}
-	return reader, ctx.Err()
-}
-
-// applyResourceStyleParts 合并资源声明及独立索引，统一更新最大标识并隔离其他文档和历史版本
-// 入参: ctx 取消上下文, reader 独立快照, maximumID 最大注册标识, data 合并声明, parts 附属文件, indexes 独立索引路径
-// 返回: error 结构、读取或隔离错误
-func applyResourceStyleParts(ctx context.Context, reader *Reader, maximumID uint64, data []byte, parts map[string][]byte, indexes []string) error {
-	if maximumID > maxUnitID {
-		return fmt.Errorf("MaxUnitID %d exceeds uint32 range", maximumID)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	doc, err := reader.DocContext(ctx)
-	if err != nil {
-		return err
-	}
-	if len(data) != 0 {
-		name, added, err := mergePackageResources(ctx, reader, parts, doc, path.Dir(reader.documentRoot), data)
-		if err != nil {
-			return err
-		}
-		if added {
-			indexes = append(slices.Clone(indexes), name)
-		}
-	}
-	entry := reader.documentRoot
-	content, err := reader.readFileViewContext(ctx, entry)
-	if err != nil {
-		return err
-	}
-	root, err := parseEditorXMLContext(ctx, content)
-	if err != nil {
-		return err
-	}
-	common := root.child("CommonData")
-	if common == nil {
-		return fmt.Errorf("missing CommonData")
-	}
-	patch := editorXMLPatch{common.open, common.open, common.textXML("MaxUnitID", formatUnitID(maximumID))}
-	if maximum := common.child("MaxUnitID"); maximum != nil {
-		current, err := strconv.ParseUint(strings.TrimSpace(editorImportText(content, maximum)), 10, 32)
-		if err != nil {
-			return err
-		}
-		patch = editorXMLPatch{maximum.start, maximum.end, maximum.textXML("MaxUnitID", formatUnitID(max(current, maximumID)))}
-	}
-	patches := []editorXMLPatch{patch}
-	if len(indexes) != 0 {
-		position := common.close
-		for _, child := range common.children {
-			if child.matchesOFD("TemplatePage") || child.matchesOFD("DefaultCS") {
-				position = child.start
-				break
-			}
-		}
-		var refs []byte
-		for _, name := range indexes {
-			refs = append(refs, common.textXML("DocumentRes", "/"+name)...)
-		}
-		patches = append(patches, editorXMLPatch{position, position, refs})
-	}
-	parts[entry] = editorPatchXML(content, patches)
-	scan := &editorFontDocument{reader: reader, index: reader.DocumentIndex()}
-	return scan.apply(ctx, parts)
+	return reader, nil
 }
 
 // changeResourceStyle 在补齐待注册资源的快照中替换定义，依赖与目标仅在全部校验通过后一次提交
@@ -513,6 +758,7 @@ func (e *Editor) changeResourceStyle(ctx context.Context, kind, id string, repla
 	if err != nil {
 		return err
 	}
+	defer reader.Close()
 	catalog, err := reader.resourceCatalog(ctx)
 	if err != nil {
 		return err
@@ -535,237 +781,6 @@ func (e *Editor) changeResourceStyle(ctx context.Context, kind, id string, repla
 		return err
 	}
 	return e.commitResourceSnapshot(ctx, reader)
-}
-
-// replaceResourceStyle 更新声明原文并验证资源依赖，清除受影响的复合及底纹预览
-// 入参: ctx 取消上下文, catalog 当前目录, item 目标条目, targetFile 目标所在资源文件, target 目标节点, fragment 新声明, changes 待提交修改
-// 返回: error 不支持的定义、引用或预览处理错误
-func replaceResourceStyle(ctx context.Context, catalog *resourceCatalog, item ResourceInfo, targetFile string, target editorFontText, fragment []byte, changes map[string][]byte) error {
-	if item.Kind == "DrawParam" && (target.node.attr("Link") != "" || target.node.attr("BaseLoc") != "" || target.node.attr("ResourceID") != "") {
-		return fmt.Errorf("external draw parameter cannot be replaced")
-	}
-	changes[target.file.name] = editorPatchXML(target.file.data, []editorXMLPatch{{target.node.start, target.node.end, fragment}})
-	if err := validateResourceStyleGraph(ctx, catalog, target.file.name, item.ID, changes); err != nil {
-		return err
-	}
-	return invalidateScopedResourcePreviews(ctx, catalog, changes, targetFile, item.Kind, item.ID)
-}
-
-// resourceColorNode 判断可携带基本颜色或复杂填充的标准节点
-// 入参: node XML节点
-// 返回: bool 是否为颜色节点
-func resourceColorNode(node *editorXML) bool {
-	return node.matchesOFD(node.name.Local) && slices.Contains([]string{"FillColor", "StrokeColor", "BorderColor", "Color", "BackColor"}, node.name.Local)
-}
-
-// validateResourceColors 校验按作用域精确命中目标颜色空间的显式及默认颜色，不误伤其他页面的同名颜色空间
-// 入参: ctx 取消上下文, catalog 当前资源目录, targetFile 目标颜色空间所在文件, space 替换后的颜色空间
-// 返回: error 不兼容的色值或调色板索引
-func validateResourceColors(ctx context.Context, catalog *resourceCatalog, targetFile string, space ColorSpace) error {
-	doc, err := catalog.scan.reader.DocContext(ctx)
-	if err != nil {
-		return err
-	}
-	defaultCS := ""
-	if doc.CommonData.DefaultCS != 0 {
-		defaultCS = formatUnitID(uint64(doc.CommonData.DefaultCS))
-	}
-	expectedKey := ""
-	if targetFile != "" {
-		expectedKey = "res:" + cleanPackagePath(targetFile) + ":ColorSpace:" + editorResourceID(space.ID)
-	}
-	working := NewEditor()
-	space.Profile, space.profile = "", nil
-	working.resources = []editorResource{{space: &space}}
-	for _, file := range catalog.scan.files {
-		cleanName := cleanPackagePath(file.name)
-		root, err := parseEditorXMLContext(ctx, file.data)
-		if err != nil {
-			return err
-		}
-		var visit func(*editorXML) error
-		visit = func(node *editorXML) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if !node.matchesOFD(node.name.Local) {
-				return nil
-			}
-			if resourceColorNode(node) {
-				id := node.attr("ColorSpace")
-				if id == "" {
-					id = defaultCS
-				}
-				matched := sameResourceID(id, space.ID)
-				if matched && expectedKey != "" {
-					matched = resolveCatalogScopedKey(catalog, cleanName, node.name.Local, "", "ColorSpace", id) == expectedKey
-				}
-				if matched {
-					var paint FillColor
-					decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(file.data[node.start:node.end])), ctx: ctx})
-					if err := decoder.Decode(&paint); err != nil {
-						return err
-					}
-					if _, err := working.Color(&FillColor{Value: paint.Value, Index: paint.Index, Alpha: paint.Alpha, ColorSpace: space.ID}); err != nil {
-						return fmt.Errorf("color in %s: %w", file.name, err)
-					}
-				}
-			}
-			for _, child := range node.children {
-				if err := visit(child); err != nil {
-					return err
-				}
-			}
-			return nil
-		}
-		if err := visit(root); err != nil {
-			return err
-		}
-	}
-	return ctx.Err()
-}
-
-// validateResourceStyleGraph 检查替换定义的传递依赖，拒绝缺失资源、错误类型及跨底纹复合资源的循环
-// 逐文件收集依赖后统一校验，不同时保留所有结构文件的XML树
-// 入参: ctx 取消上下文, catalog 当前目录, targetFile 目标定义所在资源文件，空值使用文档级作用域, id 替换标识, changes 待提交修改
-// 返回: error 资源引用或循环错误
-func validateResourceStyleGraph(ctx context.Context, catalog *resourceCatalog, targetFile, id string, changes map[string][]byte) error {
-	types := make(map[string]string)
-	graph := make(map[string][]resourceStyleReference)
-	for name, file := range catalog.scan.files {
-		data, ok := changes[name]
-		if !ok {
-			data = file.data
-		}
-		root, err := parseEditorXMLContext(ctx, data)
-		if err != nil {
-			return err
-		}
-		cleanName := cleanPackagePath(name)
-		types["file/"+cleanName] = "File"
-		if root.matchesOFD("Res") {
-			for _, group := range root.children {
-				for _, node := range group.children {
-					if node.matchesOFD(editorResourceElement(group.name.Local)) {
-						key := editorResourceID(node.attr("ID"))
-						resKey := cleanName + "\x00" + key
-						if key == "" || types[resKey] != "" {
-							return fmt.Errorf("invalid or duplicate resource ID %q", key)
-						}
-						types[resKey] = node.name.Local
-						location := ""
-						if node.matchesOFD("CompositeGraphicUnit") {
-							location = node.attr("BaseLoc")
-						} else if node.matchesOFD("DrawParam") {
-							location = node.attr("Link")
-						}
-						if location != "" {
-							extFile := "file/" + cleanPackagePath(resolveResourcePath(name, root.attr("BaseLoc"), location))
-							graph[resKey] = append(graph[resKey], resourceStyleReference{key: extFile, exact: true})
-						}
-					}
-				}
-			}
-		}
-		var visit func(*editorXML) error
-		visit = func(node *editorXML) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if !node.matchesOFD(node.name.Local) {
-				return nil
-			}
-			owner := "file/" + cleanName
-			ownerResID := ""
-			if root.matchesOFD("Res") {
-				owner = ""
-				if ownerID := resourceReferenceOwner(node); ownerID != "" {
-					ownerResID = ownerID
-					owner = cleanName + "\x00" + ownerID
-				}
-			}
-			if owner != "" {
-				if slices.Contains([]string{"Thumbnail", "Substitution"}, node.name.Local) {
-					graph[owner] = append(graph[owner], resourceStyleReference{scope: cleanName, key: editorResourceID(editorImportText(data, node))})
-				}
-				for _, attr := range node.attrs {
-					if attr.Name.Space == "" && attr.Value != "" && slices.Contains([]string{"Relative", "DrawParam", "ColorSpace", "Font", "ResourceID", "ImageMask", "Substitution", "Thumbnail"}, attr.Name.Local) {
-						key := editorResourceID(attr.Value)
-						kind := ""
-						refOwner := ""
-						switch attr.Name.Local {
-						case "Relative":
-							kind = "DrawParam"
-							refOwner = ownerResID
-						case "DrawParam":
-							kind = "DrawParam"
-						case "ColorSpace", "Font":
-							kind = attr.Name.Local
-						}
-						graph[owner] = append(graph[owner], resourceStyleReference{scope: cleanName, ownerID: refOwner, key: key, kind: kind})
-					}
-				}
-			}
-			for _, child := range node.children {
-				if err := visit(child); err != nil {
-					return err
-				}
-			}
-			return nil
-		}
-		if err := visit(root); err != nil {
-			return err
-		}
-	}
-	state := make(map[string]int)
-	var visit func(resourceStyleReference) error
-	visit = func(reference resourceStyleReference) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		nodeKey := reference.key
-		if !reference.exact {
-			nodeKey = ""
-			if reference.key != "" {
-				scope := catalog.scopeForFile(reference.scope)
-				if reference.ownerID != "" {
-					if pos := slices.Index(scope, reference.scope); pos >= 0 {
-						if reference.key == reference.ownerID {
-							scope = scope[pos+1:]
-						} else {
-							scope = scope[pos:]
-						}
-					}
-				}
-				for _, resFile := range scope {
-					candidate := resFile + "\x00" + reference.key
-					if types[candidate] != "" {
-						nodeKey = candidate
-						break
-					}
-				}
-			}
-		}
-		if types[nodeKey] == "" || reference.kind != "" && types[nodeKey] != reference.kind || state[nodeKey] == 1 {
-			return fmt.Errorf("missing, mistyped or cyclic style resource %q", reference.key)
-		}
-		if state[nodeKey] == 2 {
-			return nil
-		}
-		state[nodeKey] = 1
-		for _, dependency := range graph[nodeKey] {
-			if err := visit(dependency); err != nil {
-				return err
-			}
-		}
-		state[nodeKey] = 2
-		return nil
-	}
-	start := resourceStyleReference{scope: "", key: editorResourceID(id)}
-	if targetFile != "" {
-		start = resourceStyleReference{key: cleanPackagePath(targetFile) + "\x00" + editorResourceID(id), exact: true}
-	}
-	return visit(start)
 }
 
 // drawParamXMLContext 读取并提取绘制参数原文，保留扩展信息并响应取消

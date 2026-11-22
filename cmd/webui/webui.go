@@ -36,6 +36,7 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:8080", "listen address")
 	flag.Parse()
 	if err := http.ListenAndServe(*listen, serveWebUI()); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }

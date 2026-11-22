@@ -111,7 +111,7 @@ type DrawParam struct {
 	MiterLimitSet  bool         `xml:"-"`
 	WeightSet      bool         `xml:"-"`
 	ItalicSet      bool         `xml:"-"`
-	dashPatternSet bool
+	DashPatternSet bool         `xml:"-"`
 }
 
 // CompositeGraphicUnits 复合图元集合
@@ -150,9 +150,160 @@ type CompositeGraphicUnit struct {
 	Actions              []Action               `xml:"Actions>Action"`
 	LineWidthSet         bool                   `xml:"-"`
 	MiterLimitSet        bool                   `xml:"-"`
-	dashPatternSet       bool
+	DashPatternSet       bool                   `xml:"-"`
 	states               map[string]editorCompositeState
 	extentSet            bool
+}
+
+// resourceIndex 提供原始标识与标准十进制标识的常数时间查找索引
+type resourceIndex[T comparable] struct {
+	exact     map[string]T
+	canonical map[string]T
+	ambiguous map[string]bool
+}
+
+// parsedRes 保存单个资源描述文件的局部解析结果与常数时间索引
+type parsedRes struct {
+	path        string
+	colorSpaces resourceIndex[*ColorSpace]
+	medias      resourceIndex[MultiMedia]
+	resPaths    resourceIndex[string]
+	fonts       resourceIndex[*Font]
+	drawParams  resourceIndex[*DrawParam]
+	composites  resourceIndex[*CompositeGraphicUnit]
+}
+
+// cloneResourceIndexPtr 按指针映射深拷贝指针型资源索引表
+// 入参: idx 源索引, memo 指针映射表, copyFn 单项深拷贝函数
+// 返回: *resourceIndex[*T] 独立索引副本
+func cloneResourceIndexPtr[T any](idx *resourceIndex[*T], memo map[*T]*T, copyFn func(*T) *T) *resourceIndex[*T] {
+	if idx == nil {
+		return &resourceIndex[*T]{}
+	}
+	mapPtr := func(src *T) *T {
+		if src == nil {
+			return nil
+		}
+		if dst, ok := memo[src]; ok {
+			return dst
+		}
+		dst := copyFn(src)
+		memo[src] = dst
+		return dst
+	}
+	out := &resourceIndex[*T]{}
+	if len(idx.exact) != 0 {
+		out.exact = make(map[string]*T, len(idx.exact))
+		for k, v := range idx.exact {
+			out.exact[k] = mapPtr(v)
+		}
+	}
+	if len(idx.canonical) != 0 {
+		out.canonical = make(map[string]*T, len(idx.canonical))
+		for k, v := range idx.canonical {
+			out.canonical[k] = mapPtr(v)
+		}
+	}
+	if len(idx.ambiguous) != 0 {
+		out.ambiguous = maps.Clone(idx.ambiguous)
+	}
+	return out
+}
+
+// cloneResourceMapPtr 按指针映射深拷贝指针型资源字典
+// 入参: values 源字典, memo 指针映射表, copyFn 单项深拷贝函数
+// 返回: map[string]*T 独立字典副本
+func cloneResourceMapPtr[T any](values map[string]*T, memo map[*T]*T, copyFn func(*T) *T) map[string]*T {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]*T, len(values))
+	for k, v := range values {
+		if v == nil {
+			out[k] = nil
+			continue
+		}
+		dst, ok := memo[v]
+		if !ok {
+			dst = copyFn(v)
+			memo[v] = dst
+		}
+		out[k] = dst
+	}
+	return out
+}
+
+// cloneColorSpacePtr 深拷贝颜色空间定义及调色板切片
+// 入参: cs 原颜色空间
+// 返回: *ColorSpace 独立颜色空间副本
+func cloneColorSpacePtr(cs *ColorSpace) *ColorSpace {
+	cloned := *cs
+	cloned.Palette = slices.Clone(cs.Palette)
+	return &cloned
+}
+
+// cloneFontPtr 深拷贝字体声明定义
+// 入参: f 原字体定义
+// 返回: *Font 独立字体副本
+func cloneFontPtr(f *Font) *Font {
+	cloned := *f
+	return &cloned
+}
+
+// cloneDrawParamPtr 深拷贝绘制参数定义及嵌套颜色结构
+// 入参: dp 原绘制参数
+// 返回: *DrawParam 独立绘制参数副本
+func cloneDrawParamPtr(dp *DrawParam) *DrawParam {
+	cloned := cloneEditorData(*dp)
+	return &cloned
+}
+
+// cloneCompositeUnitPtr 深拷贝复合图元定义及成员切片
+// 入参: cgu 原复合图元
+// 返回: *CompositeGraphicUnit 独立复合图元副本
+func cloneCompositeUnitPtr(cgu *CompositeGraphicUnit) *CompositeGraphicUnit {
+	cloned := copyEditorCompositeGraphicUnit(*cgu)
+	return &cloned
+}
+
+// sameResourceID 判断资源标识是否相同，数字标识按数值比较
+// 入参: first 第一个标识, second 第二个标识
+// 返回: bool 是否相同
+func sameResourceID(first, second string) bool {
+	if first == second {
+		return true
+	}
+	id := editorResourceID(first)
+	return id != "" && id == editorResourceID(second)
+}
+
+// resourceValue 优先查找原标识与标准十进制标识，回退时检查别名冲突
+// 入参: values 已加载资源, id 标识文本
+// 返回: T 资源值, bool 是否存在唯一结果
+func resourceValue[T comparable](values map[string]T, id string) (T, bool) {
+	if value, ok := values[id]; ok {
+		return value, true
+	}
+	var value T
+	key := editorResourceID(id)
+	if key == "" {
+		return value, false
+	}
+	if value, ok := values[key]; ok {
+		return value, true
+	}
+	found := false
+	for alias, candidate := range values {
+		if len(alias) == 0 || alias[0] != '0' || editorResourceID(alias) != key {
+			continue
+		}
+		if found && value != candidate {
+			var zero T
+			return zero, false
+		}
+		value, found = candidate, true
+	}
+	return value, found
 }
 
 // UnmarshalXML 解析资源文件，隔离外部命名空间的同名集合
@@ -292,13 +443,6 @@ func (units *CompositeGraphicUnits) UnmarshalXML(d *xml.Decoder, start xml.Start
 	return decodeOFDCollection(d, start, "CompositeGraphicUnit", &units.CompositeGraphicUnit)
 }
 
-// resourceIndex 提供原始标识与标准十进制标识的常数时间查找索引
-type resourceIndex[T comparable] struct {
-	exact     map[string]T
-	canonical map[string]T
-	ambiguous map[string]bool
-}
-
 // put 写入资源项并同步维护无歧义十进制标准键
 // 入参: id 原始标识, value 资源值
 func (idx *resourceIndex[T]) put(id string, value T) {
@@ -380,23 +524,6 @@ func (idx *resourceIndex[T]) clone() *resourceIndex[T] {
 	return out
 }
 
-// parsedRes 保存单个资源描述文件的局部解析结果与常数时间索引
-type parsedRes struct {
-	path        string
-	colorSpaces resourceIndex[*ColorSpace]
-	medias      resourceIndex[MultiMedia]
-	resPaths    resourceIndex[string]
-	fonts       resourceIndex[*Font]
-	drawParams  resourceIndex[*DrawParam]
-	composites  resourceIndex[*CompositeGraphicUnit]
-}
-
-// clone 复制局部资源表及其内部可变资源定义
-// 返回: *parsedRes 独立局部资源表副本
-func (p *parsedRes) clone() *parsedRes {
-	return p.cloneWith(make(map[*ColorSpace]*ColorSpace), make(map[*Font]*Font), make(map[*DrawParam]*DrawParam), make(map[*CompositeGraphicUnit]*CompositeGraphicUnit))
-}
-
 // cloneWith 按共享指针映射表深拷贝局部资源表，保持同一阅读器内的指针等价关系
 // 入参: spaces 颜色空间映射, fonts 字体映射, drawParams 绘制参数映射, composites 复合图元映射
 // 返回: *parsedRes 独立局部资源表副本
@@ -413,137 +540,4 @@ func (p *parsedRes) cloneWith(spaces map[*ColorSpace]*ColorSpace, fonts map[*Fon
 		drawParams:  *cloneResourceIndexPtr(&p.drawParams, drawParams, cloneDrawParamPtr),
 		composites:  *cloneResourceIndexPtr(&p.composites, composites, cloneCompositeUnitPtr),
 	}
-}
-
-// cloneResourceIndexPtr 按指针映射深拷贝指针型资源索引表
-// 入参: idx 源索引, memo 指针映射表, copyFn 单项深拷贝函数
-// 返回: *resourceIndex[*T] 独立索引副本
-func cloneResourceIndexPtr[T any](idx *resourceIndex[*T], memo map[*T]*T, copyFn func(*T) *T) *resourceIndex[*T] {
-	if idx == nil {
-		return &resourceIndex[*T]{}
-	}
-	mapPtr := func(src *T) *T {
-		if src == nil {
-			return nil
-		}
-		if dst, ok := memo[src]; ok {
-			return dst
-		}
-		dst := copyFn(src)
-		memo[src] = dst
-		return dst
-	}
-	out := &resourceIndex[*T]{}
-	if len(idx.exact) != 0 {
-		out.exact = make(map[string]*T, len(idx.exact))
-		for k, v := range idx.exact {
-			out.exact[k] = mapPtr(v)
-		}
-	}
-	if len(idx.canonical) != 0 {
-		out.canonical = make(map[string]*T, len(idx.canonical))
-		for k, v := range idx.canonical {
-			out.canonical[k] = mapPtr(v)
-		}
-	}
-	if len(idx.ambiguous) != 0 {
-		out.ambiguous = maps.Clone(idx.ambiguous)
-	}
-	return out
-}
-
-// cloneResourceMapPtr 按指针映射深拷贝指针型资源字典
-// 入参: values 源字典, memo 指针映射表, copyFn 单项深拷贝函数
-// 返回: map[string]*T 独立字典副本
-func cloneResourceMapPtr[T any](values map[string]*T, memo map[*T]*T, copyFn func(*T) *T) map[string]*T {
-	if values == nil {
-		return nil
-	}
-	out := make(map[string]*T, len(values))
-	for k, v := range values {
-		if v == nil {
-			out[k] = nil
-			continue
-		}
-		dst, ok := memo[v]
-		if !ok {
-			dst = copyFn(v)
-			memo[v] = dst
-		}
-		out[k] = dst
-	}
-	return out
-}
-
-// cloneColorSpacePtr 深拷贝颜色空间定义及调色板切片
-// 入参: cs 原颜色空间
-// 返回: *ColorSpace 独立颜色空间副本
-func cloneColorSpacePtr(cs *ColorSpace) *ColorSpace {
-	cloned := *cs
-	cloned.Palette = slices.Clone(cs.Palette)
-	return &cloned
-}
-
-// cloneFontPtr 深拷贝字体声明定义
-// 入参: f 原字体定义
-// 返回: *Font 独立字体副本
-func cloneFontPtr(f *Font) *Font {
-	cloned := *f
-	return &cloned
-}
-
-// cloneDrawParamPtr 深拷贝绘制参数定义及嵌套颜色结构
-// 入参: dp 原绘制参数
-// 返回: *DrawParam 独立绘制参数副本
-func cloneDrawParamPtr(dp *DrawParam) *DrawParam {
-	cloned := cloneEditorData(*dp)
-	return &cloned
-}
-
-// cloneCompositeUnitPtr 深拷贝复合图元定义及成员切片
-// 入参: cgu 原复合图元
-// 返回: *CompositeGraphicUnit 独立复合图元副本
-func cloneCompositeUnitPtr(cgu *CompositeGraphicUnit) *CompositeGraphicUnit {
-	cloned := copyEditorCompositeGraphicUnit(*cgu)
-	return &cloned
-}
-
-// sameResourceID 判断资源标识是否相同，数字标识按数值比较
-// 入参: first 第一个标识, second 第二个标识
-// 返回: bool 是否相同
-func sameResourceID(first, second string) bool {
-	if first == second {
-		return true
-	}
-	id := editorResourceID(first)
-	return id != "" && id == editorResourceID(second)
-}
-
-// resourceValue 优先查找原标识与标准十进制标识，回退时检查别名冲突
-// 入参: values 已加载资源, id 标识文本
-// 返回: T 资源值, bool 是否存在唯一结果
-func resourceValue[T comparable](values map[string]T, id string) (T, bool) {
-	if value, ok := values[id]; ok {
-		return value, true
-	}
-	var value T
-	key := editorResourceID(id)
-	if key == "" {
-		return value, false
-	}
-	if value, ok := values[key]; ok {
-		return value, true
-	}
-	found := false
-	for alias, candidate := range values {
-		if len(alias) == 0 || alias[0] != '0' || editorResourceID(alias) != key {
-			continue
-		}
-		if found && value != candidate {
-			var zero T
-			return zero, false
-		}
-		value, found = candidate, true
-	}
-	return value, found
 }

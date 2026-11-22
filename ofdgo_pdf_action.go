@@ -321,8 +321,8 @@ func (p *pdfImporter) destinationBounds(page *pdfgo.Page) (Box, error) {
 	}
 	defer reader.Close()
 	renderer := p.renderer.childRenderer(reader)
-	renderer.TransparentBackground = true
-	renderer.RenderAnnotations = false
+	renderer.transparentBackground = true
+	renderer.renderAnnotations = false
 	if renderer.backends.Fonts != nil {
 		renderer.backends.Fonts = pdfDestinationFontBackend{renderer.backends.Fonts}
 	}

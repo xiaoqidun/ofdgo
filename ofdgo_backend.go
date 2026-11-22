@@ -24,6 +24,14 @@ import (
 	"sync"
 )
 
+// SVG输出模式，控制资源内嵌和对象结构
+const (
+	SVGEmbedded SVGMode = iota
+	SVGExternalFonts
+	SVGExternalResources
+	SVGObjects
+)
+
 // ErrBackendUnavailable 表示未配置所需后端，不会自动切换其他实现
 var ErrBackendUnavailable = errors.New("render backend unavailable")
 
@@ -41,7 +49,7 @@ type Backend interface {
 // RasterBackend 消费只读页面，返回独立图像，不得静默跳过指令或切换其他后端
 type RasterBackend interface {
 	Backend
-	Render(*RasterPage) (image.Image, error)
+	Render(ctx context.Context, page *RasterPage) (image.Image, error)
 }
 
 // RasterBufferBackend 可选的目标缓冲绘制能力，不改变后端和采样精度
@@ -49,7 +57,7 @@ type RasterBackend interface {
 // 绘制前清空目标像素，不保留目标引用；失败时目标可能包含部分结果
 type RasterBufferBackend interface {
 	RasterBackend
-	RenderInto(*RasterPage, *image.RGBA) error
+	RenderInto(ctx context.Context, page *RasterPage, dst *image.RGBA) error
 }
 
 // PageCompiler 统一页面编译、文字提取和对象度量，不得修改源数据
@@ -58,9 +66,9 @@ type RasterBufferBackend interface {
 // CompilePage在配置OnPageText时需同步回报文字，PageText和MeasureObject不触发回调
 type PageCompiler interface {
 	Backend
-	CompilePage(renderer *Renderer, page *PageContent) (*RasterPage, error)
-	PageText(renderer *Renderer, page *PageContent) (*PageText, error)
-	MeasureObject(renderer *Renderer, object GraphicObject, options MeasureOptions) (ObjectMeasurement, error)
+	CompilePage(ctx context.Context, renderer *Renderer, page *PageContent) (*RasterPage, error)
+	PageText(ctx context.Context, renderer *Renderer, page *PageContent) (*PageText, error)
+	MeasureObject(ctx context.Context, renderer *Renderer, object GraphicObject, options MeasureOptions) (ObjectMeasurement, error)
 }
 
 // MeasureOptions 描述对象度量上下文，坐标以页面左上角为原点，单位为毫米
@@ -84,19 +92,11 @@ type ObjectMeasurement struct {
 // SVGMode 指定SVG资源封装方式，Objects模式还需保留稳定的对象分组
 type SVGMode uint8
 
-// SVG输出模式，控制资源内嵌和对象结构
-const (
-	SVGEmbedded SVGMode = iota
-	SVGExternalFonts
-	SVGExternalResources
-	SVGObjects
-)
-
 // SVGBackend 输出SVG及资源，不得修改源页面或省略不支持的内容
 // renderer提供文档和排版能力，输出时不得再次调用RenderToSVG系列方法
 type SVGBackend interface {
 	Backend
-	RenderSVG(renderer *Renderer, page *PageContent, writer io.Writer, mode SVGMode) (SVGResources, error)
+	RenderSVG(ctx context.Context, renderer *Renderer, page *PageContent, writer io.Writer, mode SVGMode) (SVGResources, error)
 }
 
 // RenderDocumentPage 保存输出页面及物理区域，Content非空时优先使用已解析内容
@@ -109,17 +109,16 @@ type RenderDocumentPage struct {
 
 // PDFBackend 输出完整PDF，保留文字、链接、目录和文档信息
 // pages交由后端消费，通过ReadContent逐页读取，可清空Content释放引用，不得改变页面顺序
-// 通过Renderer调用时，OutputContext为当前导出的取消上下文
 // progress返回错误时应停止输出，调用方在失败后丢弃输出
 type PDFBackend interface {
 	Backend
-	RenderPDF(renderer *Renderer, pages []RenderDocumentPage, writer io.Writer, progress func(int, int) error) error
+	RenderPDF(ctx context.Context, renderer *Renderer, pages []RenderDocumentPage, writer io.Writer, progress func(int, int) error) error
 }
 
 // EPSBackend 输出单页EPS，不得修改源页面
 type EPSBackend interface {
 	Backend
-	RenderEPS(renderer *Renderer, page *PageContent, writer io.Writer) error
+	RenderEPS(ctx context.Context, renderer *Renderer, page *PageContent, writer io.Writer) error
 }
 
 // RenderBackends 按职责组合后端，nil表示明确禁用，不隐式回退
@@ -147,25 +146,6 @@ type BackendInfo struct {
 	EPS           string `json:"eps"`
 }
 
-// ReadContent 返回已有页面或按文档引用读取，不在描述对象中保留新解析的内容
-// 入参: ctx 取消上下文，nil使用后台上下文, reader 页面所属阅读器
-// 返回: *PageContent 只读页面内容, error 读取或取消错误
-func (p RenderDocumentPage) ReadContent(ctx context.Context, reader *Reader) (*PageContent, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if p.Content != nil {
-		return p.Content, nil
-	}
-	if reader == nil || p.Source.BaseLoc == "" {
-		return nil, fmt.Errorf("missing document page source")
-	}
-	return reader.PageContentContext(ctx, p.Source)
-}
-
 // NewRenderBackends 创建已注册后端组合，各项能力通过Info报告实际提供者
 // 入参: name 已注册后端标识
 // 返回: RenderBackends 后端组合, error 未知后端错误
@@ -177,12 +157,6 @@ func NewRenderBackends(name string) (RenderBackends, error) {
 		return RenderBackends{}, fmt.Errorf("unknown render backend %q", name)
 	}
 	return factory(), nil
-}
-
-// Info 返回配置中各能力的提供者，不依赖WebUI推断
-// 返回: BackendInfo 后端能力
-func (b RenderBackends) Info() BackendInfo {
-	return BackendInfo{FontResources: backendName(b.FontResources), Fonts: backendName(b.Fonts), Geometry: backendName(b.Geometry), Compiler: backendName(b.Compiler), Raster: backendName(b.Raster), SVG: backendName(b.SVG), PDF: backendName(b.PDF), EPS: backendName(b.EPS)}
 }
 
 // WithRenderBackends 替换完整后端组合，未配置的能力不会沿用默认实现
@@ -221,44 +195,6 @@ func WithRasterBackend(backend RasterBackend) RendererOption {
 		r.rasterDisabled = backend == nil && (r.backends.Raster != nil || r.rasterDisabled)
 		r.backends.Raster = backend
 	}
-}
-
-// Backends 返回当前后端配置副本，可修改后通过WithRenderBackends应用
-// 返回: RenderBackends 后端组合
-func (r *Renderer) Backends() RenderBackends {
-	return r.backends
-}
-
-// CompilePage 编译与后端无关的光栅页面，可交给任意RasterBackend绘制
-// 字形、描边、裁剪和底纹沿用文档语义，不交由后端重新排版
-// 入参: page 页面内容
-// 返回: *RasterPage 只读绘制页面, error 编译错误
-func (r *Renderer) CompilePage(page *PageContent) (*RasterPage, error) {
-	return r.CompilePageContext(r.pageContext, page)
-}
-
-// CompilePageContext 编译页面并在对象遍历间响应取消，不返回未完成场景
-// 单次后端操作完成后检查取消，nil使用后台上下文
-// 入参: ctx 取消上下文, page 页面内容
-// 返回: *RasterPage 只读绘制页面, error 编译或取消错误
-func (r *Renderer) CompilePageContext(ctx context.Context, page *PageContent) (*RasterPage, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if r.backends.Compiler == nil {
-		return nil, fmt.Errorf("page compiler: %w", ErrBackendUnavailable)
-	}
-	previous := r.pageContext
-	r.pageContext = ctx
-	defer func() { r.pageContext = previous }()
-	result, err := r.backends.Compiler.CompilePage(r, page)
-	if canceled := ctx.Err(); canceled != nil {
-		return nil, canceled
-	}
-	return result, err
 }
 
 // RegisterRenderBackend 注册后端组合，工厂应返回独立实例，重复标识不会覆盖已有实现
@@ -337,4 +273,67 @@ func immutableBackendValue(value reflect.Value) bool {
 		}
 	}
 	return true
+}
+
+// ReadContent 返回已有页面或按文档引用读取，不在描述对象中保留新解析的内容
+// 入参: ctx 取消上下文，nil使用后台上下文, reader 页面所属阅读器
+// 返回: *PageContent 只读页面内容, error 读取或取消错误
+func (p RenderDocumentPage) ReadContent(ctx context.Context, reader *Reader) (*PageContent, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p.Content != nil {
+		return p.Content, nil
+	}
+	if reader == nil || p.Source.BaseLoc == "" {
+		return nil, fmt.Errorf("missing document page source")
+	}
+	return reader.PageContentContext(ctx, p.Source)
+}
+
+// Info 返回配置中各能力的提供者，不依赖WebUI推断
+// 返回: BackendInfo 后端能力
+func (b RenderBackends) Info() BackendInfo {
+	return BackendInfo{FontResources: backendName(b.FontResources), Fonts: backendName(b.Fonts), Geometry: backendName(b.Geometry), Compiler: backendName(b.Compiler), Raster: backendName(b.Raster), SVG: backendName(b.SVG), PDF: backendName(b.PDF), EPS: backendName(b.EPS)}
+}
+
+// Backends 返回当前后端配置副本，可修改后通过WithRenderBackends应用
+// 返回: RenderBackends 后端组合
+func (r *Renderer) Backends() RenderBackends {
+	return r.backends
+}
+
+// CompilePage 编译与后端无关的光栅页面，可交给任意RasterBackend绘制
+// 字形、描边、裁剪和底纹沿用文档语义，不交由后端重新排版
+// 入参: page 页面内容
+// 返回: *RasterPage 只读绘制页面, error 编译错误
+func (r *Renderer) CompilePage(page *PageContent) (*RasterPage, error) {
+	return r.CompilePageContext(context.Background(), page)
+}
+
+// CompilePageContext 编译页面并在对象遍历间响应取消，不返回未完成场景
+// 单次后端操作完成后检查取消，nil使用后台上下文
+// 入参: ctx 取消上下文, page 页面内容
+// 返回: *RasterPage 只读绘制页面, error 编译或取消错误
+func (r *Renderer) CompilePageContext(ctx context.Context, page *PageContent) (*RasterPage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r.backends.Compiler == nil {
+		return nil, fmt.Errorf("page compiler: %w", ErrBackendUnavailable)
+	}
+	previous := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = previous }()
+	result, err := r.backends.Compiler.CompilePage(ctx, r, page)
+	if canceled := ctx.Err(); canceled != nil {
+		return nil, canceled
+	}
+	return result, err
 }

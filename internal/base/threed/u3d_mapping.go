@@ -105,6 +105,9 @@ func (s *u3dTextureSet) generated(channel int, input [3]float64, position u3dVec
 				point[row] += s.wrap[channel][col*4+row] * value
 			}
 		}
+		if !finite(point[3]) || point[3] == 0 {
+			return [3]float64{}, fmt.Errorf("invalid U3D texture wrap projection")
+		}
 		for i := range 3 {
 			point[i] /= point[3]
 			if !finite(point[i]) {

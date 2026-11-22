@@ -23,6 +23,12 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// imageValueBudget 限制图像描述的检查深度和保留字节数
+type imageValueBudget struct {
+	nodes int
+	bytes int
+}
+
 // ImageDigest 对无间接依赖的小图像生成编码摘要，超预算时不参与内容缓存
 // 入参: ctx 取消上下文, source 图像描述
 // 返回: [32]byte 编码摘要, bool 是否可复用, error 取消错误
@@ -60,12 +66,6 @@ func SameImage(left, right *pdfgo.Image) bool {
 		bytes.Equal(left.Stream.Data, right.Stream.Data) && reflect.DeepEqual(left.Stream.Dictionary, right.Stream.Dictionary) &&
 		reflect.DeepEqual(left.ColorSpace, right.ColorSpace) && reflect.DeepEqual(left.Decode, right.Decode) &&
 		reflect.DeepEqual(left.Mask, right.Mask) && reflect.DeepEqual(left.SoftMask, right.SoftMask)
-}
-
-// imageValueBudget 限制图像描述的检查深度和保留字节数
-type imageValueBudget struct {
-	nodes int
-	bytes int
 }
 
 // imageDirectValue 检查图像描述是否完全独立，拒绝间接引用和嵌套流

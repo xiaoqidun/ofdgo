@@ -39,6 +39,30 @@ import (
 // outputOptimizationBufferLimit 限制压缩时的单个输出缓冲，单位为字节
 const outputOptimizationBufferLimit = 64 << 20
 
+// 与PDFGo共用输出压缩模式
+const (
+	CompressionUnchanged = pdfgo.CompressionUnchanged
+	CompressionLossless  = pdfgo.CompressionLossless
+	CompressionLossy     = pdfgo.CompressionLossy
+)
+
+// 与PDFGo共用有损压缩等级
+const (
+	CompressionLight  = pdfgo.CompressionLight
+	CompressionMedium = pdfgo.CompressionMedium
+	CompressionStrong = pdfgo.CompressionStrong
+)
+
+// 并行预压缩条目的写出方式枚举
+const (
+	zipPreparedBytes zipPreparedKind = iota
+	zipPreparedRawFile
+	zipPreparedStoreFile
+	zipPreparedDir
+	zipPreparedStaged
+	zipPreparedLargeEntry
+)
+
 // outputDeflaterPool 复用最高压缩等级编码器，不保留输出流引用
 var outputDeflaterPool = sync.Pool{
 	New: func() any {
@@ -50,22 +74,8 @@ var outputDeflaterPool = sync.Pool{
 // CompressionMode 选择原始、无损或有损输出策略
 type CompressionMode = pdfgo.CompressionMode
 
-// 与PDFGo共用输出压缩模式
-const (
-	CompressionUnchanged = pdfgo.CompressionUnchanged
-	CompressionLossless  = pdfgo.CompressionLossless
-	CompressionLossy     = pdfgo.CompressionLossy
-)
-
 // CompressionLevel 选择轻压、均衡或强压，仅用于有损模式
 type CompressionLevel = pdfgo.CompressionLevel
-
-// 与PDFGo共用有损压缩等级
-const (
-	CompressionLight  = pdfgo.CompressionLight
-	CompressionMedium = pdfgo.CompressionMedium
-	CompressionStrong = pdfgo.CompressionStrong
-)
 
 // CompressionOptions 配置输出压缩，原始模式沿用现有输出策略，不额外优化
 // Quality和MaxDPI为零时按Level使用预设，不改变页面尺寸或整页导出精度
@@ -74,6 +84,251 @@ type CompressionOptions = pdfgo.CompressionOptions
 
 // WriteOptions 配置OFD输出副本，不修改编辑资源和撤销记录
 type WriteOptions struct{ Compression CompressionOptions }
+
+// outputOptimization 保存单次写出的配置、图片路径及压缩进度，复用压缩器
+type outputOptimization struct {
+	ctx            context.Context
+	options        CompressionOptions
+	images         map[string]bool
+	sizes          map[string]image.Point
+	protected      bool
+	protectedDocs  map[int]bool
+	protectedFiles map[string]bool
+	completed      int
+	deflater       *flate.Writer
+	resources      *editorResourceSelection
+	references     *renderCache[editorScanKey, editorScanValue]
+}
+
+// outputCompressionBuffer 限制候选ZIP编码，不能缩小时终止本次压缩
+type outputCompressionBuffer struct {
+	buffer   *bytes.Buffer
+	limit    int
+	exceeded bool
+}
+
+// zipPreparedKind 标识并行预压缩条目的最终写出方式
+type zipPreparedKind uint8
+
+// zipPreparedEntry 保存单个ZIP条目的预压缩输入、结果与同步信号
+type zipPreparedEntry struct {
+	kind     zipPreparedKind
+	header   zip.FileHeader
+	data     []byte
+	payload  []byte
+	file     *zip.File
+	staged   *editorStagedPage
+	estBytes int64
+	err      error
+	done     chan struct{}
+}
+
+// zipParallelWriter 在有界滑动窗口与内存预算内并行预压缩ZIP条目，主线程按确定顺序写出
+type zipParallelWriter struct {
+	editor   *Editor
+	archive  *zip.Writer
+	ctx      context.Context
+	cancel   context.CancelFunc
+	jobs     chan *zipPreparedEntry
+	pending  []*zipPreparedEntry
+	window   int
+	maxBytes int64
+	inFlight int64
+	copyBuf  []byte
+	group    sync.WaitGroup
+	closed   bool
+}
+
+// newZipParallelWriter 在压缩写包且具备多核预算时创建有界并行预压缩流水线
+// 入参: editor 编辑器快照, archive 输出归档, ctx 取消上下文
+// 返回: *zipParallelWriter 并行预压缩流水线，无需并行时返回nil
+func newZipParallelWriter(editor *Editor, archive *zip.Writer, ctx context.Context) *zipParallelWriter {
+	if editor.output == nil || editor.output.options.Mode == CompressionUnchanged {
+		return nil
+	}
+	workers := conversionWorkers(ctx)
+	if workers <= 1 {
+		return nil
+	}
+	window := min(workers*2, 32)
+	maxBytes := int64(min(int64(workers)*(8<<20), 64<<20))
+	if pool, _ := ctx.Value(conversionPoolKey{}).(*ConversionPool); pool != nil {
+		if available := pool.memoryLimit(); available > 0 {
+			maxBytes = max(int64(8<<20), min(maxBytes, available/2))
+		}
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	writer := &zipParallelWriter{
+		editor:   editor,
+		archive:  archive,
+		ctx:      runCtx,
+		cancel:   cancel,
+		jobs:     make(chan *zipPreparedEntry, window),
+		pending:  make([]*zipPreparedEntry, 0, window),
+		window:   window,
+		maxBytes: maxBytes,
+		copyBuf:  make([]byte, 32*1024),
+	}
+	for range workers {
+		writer.group.Go(writer.workerLoop)
+	}
+	return writer
+}
+
+// acquireOutputDeflater 从对象池获取并重置最高等级压缩器
+// 入参: writer 编码目标
+// 返回: *flate.Writer 压缩器
+func acquireOutputDeflater(writer io.Writer) *flate.Writer {
+	deflater := outputDeflaterPool.Get().(*flate.Writer)
+	deflater.Reset(writer)
+	return deflater
+}
+
+// releaseOutputDeflater 清理输出引用并归还压缩器到对象池
+// 入参: deflater 压缩器
+func releaseOutputDeflater(deflater *flate.Writer) {
+	if deflater == nil {
+		return
+	}
+	deflater.Reset(io.Discard)
+	outputDeflaterPool.Put(deflater)
+}
+
+// isPrecompressedOutputExt 判断条目扩展名是否属于已高度压缩的媒体或归档格式
+// 入参: name 条目路径
+// 返回: bool 是否属于已压缩后缀
+func isPrecompressedOutputExt(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".jpg", ".jpeg", ".png", ".jp2", ".j2k", ".jb2", ".webp", ".zip", ".pdf", ".ofd":
+		return true
+	}
+	return false
+}
+
+// compressOutputBytesWithDeflater 使用指定压缩器压缩内存数据并限制候选体积
+// 入参: ctx 取消上下文, deflater 压缩器, data 未压缩数据, limit 候选体积上限
+// 返回: []byte 更小的DEFLATE编码, error 取消或编码错误
+func compressOutputBytesWithDeflater(ctx context.Context, deflater *flate.Writer, data []byte, limit int) ([]byte, error) {
+	var compressed bytes.Buffer
+	output := &outputCompressionBuffer{buffer: &compressed, limit: min(limit, outputOptimizationBufferLimit)}
+	deflater.Reset(output)
+	for offset := 0; offset < len(data); {
+		if err := ctx.Err(); err != nil {
+			deflater.Reset(io.Discard)
+			return nil, err
+		}
+		end := min(offset+64<<10, len(data))
+		if _, err := deflater.Write(data[offset:end]); err != nil {
+			deflater.Reset(io.Discard)
+			if err == io.ErrShortBuffer {
+				return nil, ctx.Err()
+			}
+			return nil, err
+		}
+		offset = end
+	}
+	if err := deflater.Close(); err != nil {
+		deflater.Reset(io.Discard)
+		if err == io.ErrShortBuffer {
+			return nil, ctx.Err()
+		}
+		return nil, err
+	}
+	if compressed.Len() >= limit {
+		return nil, ctx.Err()
+	}
+	return compressed.Bytes(), ctx.Err()
+}
+
+// compressOutputFileWithDeflater 分块重压缩ZIP条目，超过体积上限时立即早停
+// 入参: ctx 取消上下文, deflater 压缩器, file 原始条目, buffer 读取缓冲, limit 候选体积上限
+// 返回: []byte 更小的DEFLATE编码, error 读取、编码或取消错误
+func compressOutputFileWithDeflater(ctx context.Context, deflater *flate.Writer, file *zip.File, buffer []byte, limit int) ([]byte, error) {
+	input, err := file.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer input.Close()
+	var compressed bytes.Buffer
+	output := &outputCompressionBuffer{buffer: &compressed, limit: min(limit, outputOptimizationBufferLimit)}
+	deflater.Reset(output)
+	source := imageInput{ReadCloser: input, ctx: ctx}
+	_, err = io.CopyBuffer(deflater, source, buffer)
+	if output.exceeded {
+		deflater.Reset(io.Discard)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, nil
+	}
+	closeErr := deflater.Close()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		deflater.Reset(io.Discard)
+		return nil, ctxErr
+	}
+	if err != nil {
+		deflater.Reset(io.Discard)
+		return nil, err
+	}
+	if output.exceeded {
+		deflater.Reset(io.Discard)
+		return nil, nil
+	}
+	if closeErr != nil {
+		deflater.Reset(io.Discard)
+		return nil, closeErr
+	}
+	if compressed.Len() >= limit {
+		return nil, nil
+	}
+	return compressed.Bytes(), nil
+}
+
+// prepareOutputHeader 更新原始ZIP编码属性，保留名称、备注和字符集标记
+// 入参: header 条目属性, method 编码方法, size 原始尺寸, packed 编码尺寸, checksum 校验值
+func prepareOutputHeader(header *zip.FileHeader, method uint16, size, packed uint64, checksum uint32) {
+	header.Method, header.ReaderVersion = method, 20
+	header.CreatorVersion = header.CreatorVersion&0xff00 | 20
+	header.CRC32, header.UncompressedSize64, header.CompressedSize64 = checksum, size, packed
+	header.Flags &^= 8
+	header.Extra = outputZIPExtra(header.Extra)
+	if header.NonUTF8 {
+		header.Flags &^= 0x800
+	} else if utf8.ValidString(header.Name) && utf8.ValidString(header.Comment) {
+		for _, value := range header.Name + header.Comment {
+			if value < 0x20 || value > 0x7d || value == 0x5c {
+				header.Flags |= 0x800
+				break
+			}
+		}
+	}
+}
+
+// outputZIPExtra 保留扩展属性，移除由新归档重新生成的ZIP64尺寸及偏移
+// 入参: extra 原始扩展属性
+// 返回: []byte 输出扩展属性，不修改原始缓冲
+func outputZIPExtra(extra []byte) []byte {
+	var output []byte
+	start := 0
+	for offset := 0; offset+4 <= len(extra); {
+		size := 4 + int(binary.LittleEndian.Uint16(extra[offset+2:]))
+		if size > len(extra)-offset {
+			break
+		}
+		if binary.LittleEndian.Uint16(extra[offset:]) == 1 {
+			if output == nil {
+				output = make([]byte, 0, len(extra))
+			}
+			output = append(output, extra[start:offset]...)
+			start = offset + size
+		}
+		offset += size
+	}
+	if output == nil {
+		return extra
+	}
+	return append(output, extra[start:]...)
+}
 
 // WriteToWithOptions 按压缩策略写出OFD，签名文档不额外改写资源内容
 // 入参: ctx 取消上下文, writer 输出流, options 输出配置
@@ -144,28 +399,6 @@ func (e *Editor) WritePagesToOutput(ctx context.Context, target Output, indexes 
 	return n, tx.Commit()
 }
 
-// WithCompression 设置导出策略，不修改文档资源和渲染缓存
-// 入参: options 压缩配置，写出时校验
-// 返回: RendererOption 渲染器配置
-func WithCompression(options CompressionOptions) RendererOption {
-	return func(r *Renderer) { r.Compression = options }
-}
-
-// outputOptimization 保存单次写出的配置、图片路径及压缩进度，复用压缩器
-type outputOptimization struct {
-	ctx            context.Context
-	options        CompressionOptions
-	images         map[string]bool
-	sizes          map[string]image.Point
-	protected      bool
-	protectedDocs  map[int]bool
-	protectedFiles map[string]bool
-	completed      int
-	deflater       *flate.Writer
-	resources      *editorResourceSelection
-	references     *renderCache[editorScanKey, editorScanValue]
-}
-
 // compressor 获取当前输出独占的压缩器，重置后不复用上一次编码状态
 // 入参: writer 编码目标
 // 返回: *flate.Writer 压缩器
@@ -187,13 +420,6 @@ func (o *outputOptimization) release() {
 	o.deflater = nil
 }
 
-// outputCompressionBuffer 限制候选ZIP编码，不能缩小时终止本次压缩
-type outputCompressionBuffer struct {
-	buffer   *bytes.Buffer
-	limit    int
-	exceeded bool
-}
-
 // Write 写入有界候选编码，超过体积上限时返回短缓冲错误
 // 入参: data 编码数据
 // 返回: int 写入字节数, error 容量错误
@@ -203,84 +429,6 @@ func (b *outputCompressionBuffer) Write(data []byte) (int, error) {
 		return 0, io.ErrShortBuffer
 	}
 	return b.buffer.Write(data)
-}
-
-// zipPreparedKind 标识并行预压缩条目的最终写出方式
-type zipPreparedKind uint8
-
-// 并行预压缩条目的写出方式枚举
-const (
-	zipPreparedBytes zipPreparedKind = iota
-	zipPreparedRawFile
-	zipPreparedStoreFile
-	zipPreparedDir
-	zipPreparedStaged
-	zipPreparedLargeEntry
-)
-
-// zipPreparedEntry 保存单个ZIP条目的预压缩输入、结果与同步信号
-type zipPreparedEntry struct {
-	kind     zipPreparedKind
-	header   zip.FileHeader
-	data     []byte
-	payload  []byte
-	file     *zip.File
-	staged   *editorStagedPage
-	estBytes int64
-	err      error
-	done     chan struct{}
-}
-
-// zipParallelWriter 在有界滑动窗口与内存预算内并行预压缩ZIP条目，主线程按确定顺序写出
-type zipParallelWriter struct {
-	editor   *Editor
-	archive  *zip.Writer
-	ctx      context.Context
-	cancel   context.CancelFunc
-	jobs     chan *zipPreparedEntry
-	pending  []*zipPreparedEntry
-	window   int
-	maxBytes int64
-	inFlight int64
-	copyBuf  []byte
-	group    sync.WaitGroup
-	closed   bool
-}
-
-// newZipParallelWriter 在压缩写包且具备多核预算时创建有界并行预压缩流水线
-// 入参: editor 编辑器快照, archive 输出归档, ctx 取消上下文
-// 返回: *zipParallelWriter 并行预压缩流水线，无需并行时返回nil
-func newZipParallelWriter(editor *Editor, archive *zip.Writer, ctx context.Context) *zipParallelWriter {
-	if editor.output == nil || editor.output.options.Mode == CompressionUnchanged {
-		return nil
-	}
-	workers := conversionWorkers(ctx)
-	if workers <= 1 {
-		return nil
-	}
-	window := min(workers*2, 32)
-	maxBytes := int64(min(int64(workers)*(8<<20), 64<<20))
-	if pool, _ := ctx.Value(conversionPoolKey{}).(*ConversionPool); pool != nil {
-		if available := pool.memoryLimit(); available > 0 {
-			maxBytes = max(int64(8<<20), min(maxBytes, available/2))
-		}
-	}
-	runCtx, cancel := context.WithCancel(ctx)
-	writer := &zipParallelWriter{
-		editor:   editor,
-		archive:  archive,
-		ctx:      runCtx,
-		cancel:   cancel,
-		jobs:     make(chan *zipPreparedEntry, window),
-		pending:  make([]*zipPreparedEntry, 0, window),
-		window:   window,
-		maxBytes: maxBytes,
-		copyBuf:  make([]byte, 32*1024),
-	}
-	for range workers {
-		writer.group.Go(writer.workerLoop)
-	}
-	return writer
 }
 
 // workerLoop 复用压缩器与读取缓冲并行处理预压缩任务
@@ -630,7 +778,7 @@ func (e *Editor) outputSnapshot(ctx context.Context, options WriteOptions) (*Edi
 func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo) (map[string]bool, bool, error) {
 	names := make(map[string]bool)
 	safe := true
-	structured := len(r.OFD.DocBody) != 0
+	structured := len(r.ofd.DocBody) != 0
 	if structured {
 		entry, err := r.DocumentRootContext(ctx)
 		if err != nil {
@@ -764,7 +912,7 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 // 入参: ctx 取消上下文
 // 返回: bool 是否声明签名入口, error 取消错误
 func (r *Reader) hasOutputSignatures(ctx context.Context) (bool, error) {
-	for _, body := range r.OFD.DocBody {
+	for _, body := range r.ofd.DocBody {
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
@@ -779,11 +927,11 @@ func (r *Reader) hasOutputSignatures(ctx context.Context) (bool, error) {
 // 入参: ctx 取消上下文
 // 返回: map[int]bool 受签名文档索引, map[string]bool 受保护文件路径, bool 是否整包受保护, error 取消错误
 func (r *Reader) outputSignatureProtection(ctx context.Context) (map[int]bool, map[string]bool, bool, error) {
-	if r == nil || r.OFD == nil {
+	if r == nil || r.ofd == nil {
 		return nil, nil, false, ctx.Err()
 	}
 	var protectedDocs map[int]bool
-	for index, body := range r.OFD.DocBody {
+	for index, body := range r.ofd.DocBody {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, false, err
 		}
@@ -797,7 +945,7 @@ func (r *Reader) outputSignatureProtection(ctx context.Context) (map[int]bool, m
 	if len(protectedDocs) == 0 {
 		return nil, nil, false, ctx.Err()
 	}
-	if len(protectedDocs) == len(r.OFD.DocBody) {
+	if len(protectedDocs) == len(r.ofd.DocBody) {
 		return protectedDocs, nil, true, ctx.Err()
 	}
 	protectedFiles := make(map[string]bool)
@@ -806,7 +954,7 @@ func (r *Reader) outputSignatureProtection(ctx context.Context) (map[int]bool, m
 		if err := ctx.Err(); err != nil {
 			return nil, nil, false, err
 		}
-		body := r.OFD.DocBody[docIndex]
+		body := r.ofd.DocBody[docIndex]
 		sigListPath := cleanPackagePath(resolveResourcePath("OFD.xml", "", body.Signatures))
 		sigListData, err := r.readFileViewContext(ctx, sigListPath)
 		if err != nil {
@@ -998,161 +1146,6 @@ func (e *Editor) compressOutputFile(file *zip.File, buffer []byte, limit int) ([
 	return compressOutputFileWithDeflater(e.output.ctx, e.output.compressor(io.Discard), file, buffer, limit)
 }
 
-// acquireOutputDeflater 从对象池获取并重置最高等级压缩器
-// 入参: writer 编码目标
-// 返回: *flate.Writer 压缩器
-func acquireOutputDeflater(writer io.Writer) *flate.Writer {
-	deflater := outputDeflaterPool.Get().(*flate.Writer)
-	deflater.Reset(writer)
-	return deflater
-}
-
-// releaseOutputDeflater 清理输出引用并归还压缩器到对象池
-// 入参: deflater 压缩器
-func releaseOutputDeflater(deflater *flate.Writer) {
-	if deflater == nil {
-		return
-	}
-	deflater.Reset(io.Discard)
-	outputDeflaterPool.Put(deflater)
-}
-
-// isPrecompressedOutputExt 判断条目扩展名是否属于已高度压缩的媒体或归档格式
-// 入参: name 条目路径
-// 返回: bool 是否属于已压缩后缀
-func isPrecompressedOutputExt(name string) bool {
-	switch strings.ToLower(path.Ext(name)) {
-	case ".jpg", ".jpeg", ".png", ".jp2", ".j2k", ".jb2", ".webp", ".zip", ".pdf", ".ofd":
-		return true
-	}
-	return false
-}
-
-// compressOutputBytesWithDeflater 使用指定压缩器压缩内存数据并限制候选体积
-// 入参: ctx 取消上下文, deflater 压缩器, data 未压缩数据, limit 候选体积上限
-// 返回: []byte 更小的DEFLATE编码, error 取消或编码错误
-func compressOutputBytesWithDeflater(ctx context.Context, deflater *flate.Writer, data []byte, limit int) ([]byte, error) {
-	var compressed bytes.Buffer
-	output := &outputCompressionBuffer{buffer: &compressed, limit: min(limit, outputOptimizationBufferLimit)}
-	deflater.Reset(output)
-	for offset := 0; offset < len(data); {
-		if err := ctx.Err(); err != nil {
-			deflater.Reset(io.Discard)
-			return nil, err
-		}
-		end := min(offset+64<<10, len(data))
-		if _, err := deflater.Write(data[offset:end]); err != nil {
-			deflater.Reset(io.Discard)
-			if err == io.ErrShortBuffer {
-				return nil, ctx.Err()
-			}
-			return nil, err
-		}
-		offset = end
-	}
-	if err := deflater.Close(); err != nil {
-		deflater.Reset(io.Discard)
-		if err == io.ErrShortBuffer {
-			return nil, ctx.Err()
-		}
-		return nil, err
-	}
-	if compressed.Len() >= limit {
-		return nil, ctx.Err()
-	}
-	return compressed.Bytes(), ctx.Err()
-}
-
-// compressOutputFileWithDeflater 分块重压缩ZIP条目，超过体积上限时立即早停
-// 入参: ctx 取消上下文, deflater 压缩器, file 原始条目, buffer 读取缓冲, limit 候选体积上限
-// 返回: []byte 更小的DEFLATE编码, error 读取、编码或取消错误
-func compressOutputFileWithDeflater(ctx context.Context, deflater *flate.Writer, file *zip.File, buffer []byte, limit int) ([]byte, error) {
-	input, err := file.Open()
-	if err != nil {
-		return nil, err
-	}
-	defer input.Close()
-	var compressed bytes.Buffer
-	output := &outputCompressionBuffer{buffer: &compressed, limit: min(limit, outputOptimizationBufferLimit)}
-	deflater.Reset(output)
-	source := imageInput{ReadCloser: input, ctx: ctx}
-	_, err = io.CopyBuffer(deflater, source, buffer)
-	if output.exceeded {
-		deflater.Reset(io.Discard)
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-		return nil, nil
-	}
-	closeErr := deflater.Close()
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		deflater.Reset(io.Discard)
-		return nil, ctxErr
-	}
-	if err != nil {
-		deflater.Reset(io.Discard)
-		return nil, err
-	}
-	if output.exceeded {
-		deflater.Reset(io.Discard)
-		return nil, nil
-	}
-	if closeErr != nil {
-		deflater.Reset(io.Discard)
-		return nil, closeErr
-	}
-	if compressed.Len() >= limit {
-		return nil, nil
-	}
-	return compressed.Bytes(), nil
-}
-
-// prepareOutputHeader 更新原始ZIP编码属性，保留名称、备注和字符集标记
-// 入参: header 条目属性, method 编码方法, size 原始尺寸, packed 编码尺寸, checksum 校验值
-func prepareOutputHeader(header *zip.FileHeader, method uint16, size, packed uint64, checksum uint32) {
-	header.Method, header.ReaderVersion = method, 20
-	header.CreatorVersion = header.CreatorVersion&0xff00 | 20
-	header.CRC32, header.UncompressedSize64, header.CompressedSize64 = checksum, size, packed
-	header.Flags &^= 8
-	header.Extra = outputZIPExtra(header.Extra)
-	if header.NonUTF8 {
-		header.Flags &^= 0x800
-	} else if utf8.ValidString(header.Name) && utf8.ValidString(header.Comment) {
-		for _, value := range header.Name + header.Comment {
-			if value < 0x20 || value > 0x7d || value == 0x5c {
-				header.Flags |= 0x800
-				break
-			}
-		}
-	}
-}
-
-// outputZIPExtra 保留扩展属性，移除由新归档重新生成的ZIP64尺寸及偏移
-// 入参: extra 原始扩展属性
-// 返回: []byte 输出扩展属性，不修改原始缓冲
-func outputZIPExtra(extra []byte) []byte {
-	var output []byte
-	start := 0
-	for offset := 0; offset+4 <= len(extra); {
-		size := 4 + int(binary.LittleEndian.Uint16(extra[offset+2:]))
-		if size > len(extra)-offset {
-			break
-		}
-		if binary.LittleEndian.Uint16(extra[offset:]) == 1 {
-			if output == nil {
-				output = make([]byte, 0, len(extra))
-			}
-			output = append(output, extra[start:offset]...)
-			start = offset + size
-		}
-		offset += size
-	}
-	if output == nil {
-		return extra
-	}
-	return append(output, extra[start:]...)
-}
-
 // writeOutputFile 重压缩未修改条目，已压缩媒体后缀直通，只采用优于原ZIP编码的结果
 // 入参: archive 输出归档, file 原始条目, buffer 流式复制缓冲
 // 返回: error 读取、写入或取消错误
@@ -1212,14 +1205,11 @@ func (e *Editor) writeOutputFile(archive *zip.Writer, file *zip.File, buffer []b
 	return editorProgress(e.OnWriteProgress).report("compress", e.output.completed, 0)
 }
 
-// outputContext 优先使用当前页面上下文，否则使用输出上下文
+// outputContext 返回当前渲染上下文，未设置时返回后台上下文
 // 返回: context.Context 取消上下文
 func (r *Renderer) outputContext() context.Context {
-	if r.pageContext != nil {
+	if r != nil && r.pageContext != nil {
 		return r.pageContext
-	}
-	if r.OutputContext != nil {
-		return r.OutputContext
 	}
 	return context.Background()
 }

@@ -40,65 +40,6 @@ type NativeImage struct {
 	Space  *pdfgo.ColorSpace
 }
 
-// ColorModel 保留填充色和模板的有效采样精度
-// 返回: color.Model 非预乘颜色模型
-func (s *StencilImage) ColorModel() color.Model {
-	model := s.Source.ColorModel()
-	if s.Fill.R%257 == 0 && s.Fill.G%257 == 0 && s.Fill.B%257 == 0 && (model == color.GrayModel || model == color.NRGBAModel || model == color.RGBAModel) {
-		return color.NRGBAModel
-	}
-	return color.NRGBA64Model
-}
-
-// Bounds 返回模板图像的采样边界
-// 返回: image.Rectangle 图像边界
-func (s *StencilImage) Bounds() image.Rectangle { return s.Source.Bounds() }
-
-// At 以模板灰度计算填充覆盖率，不重复变换颜色
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.Color 非预乘颜色
-func (s *StencilImage) At(x, y int) color.Color {
-	return s.NRGBA64At(x, y)
-}
-
-// NRGBA64At 直接读取模板覆盖率，保留填充色的有效精度
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.NRGBA64 非预乘颜色
-func (s *StencilImage) NRGBA64At(x, y int) color.NRGBA64 {
-	if !image.Pt(x, y).In(s.Bounds()) {
-		return color.NRGBA64{}
-	}
-	gray := baseimage.NRGBA64At(s.Source, x, y)
-	pixel := s.Fill
-	pixel.A = uint16(65535 - gray.R)
-	return pixel
-}
-
-// ColorModel 保留16位原生分量与源透明度
-// 返回: color.Model 非预乘颜色模型
-func (s *NativeImage) ColorModel() color.Model { return color.NRGBA64Model }
-
-// Bounds 返回源图像的完整采样边界
-// 返回: image.Rectangle 原始像素边界
-func (s *NativeImage) Bounds() image.Rectangle { return s.Source.Bounds() }
-
-// At 获取按OFD输出映射的原生颜色
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.Color 非预乘颜色
-func (s *NativeImage) At(x, y int) color.Color { return s.NRGBA64At(x, y) }
-
-// NRGBA64At 按原始精度转换设备过程色，不进行页面采样或备用变换
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.NRGBA64 非预乘颜色
-func (s *NativeImage) NRGBA64At(x, y int) color.NRGBA64 {
-	if !image.Pt(x, y).In(s.Bounds()) {
-		return color.NRGBA64{}
-	}
-	values, alpha := s.Source.ValuesAt(x, y)
-	rgb, _ := OutputColor(s.Space, values)
-	return color.NRGBA64{R: uint16(math.Round(rgb[0] * 65535)), G: uint16(math.Round(rgb[1] * 65535)), B: uint16(math.Round(rgb[2] * 65535)), A: uint16(math.Round(alpha * 65535))}
-}
-
 // EncodeCMYKTIFF 将直接四色图像保存为无损TIFF，八位不透明图采用四通道八位压缩，不经过显示颜色转换
 // 入参: ctx 取消上下文, source PDF源图像
 // 返回: []byte 含ICC和非预乘透明度的TIFF，非四色图像为nil, error 解码或编码错误
@@ -285,4 +226,69 @@ func cmykTIFFEntries(width, height, samples, profileLen int) [][4]uint32 {
 		entries = append(entries, [4]uint32{34675, 7, uint32(profileLen), 0})
 	}
 	return entries
+}
+
+// ColorModel 保留填充色和模板的有效采样精度
+// 返回: color.Model 非预乘颜色模型
+func (s *StencilImage) ColorModel() color.Model {
+	model := s.Source.ColorModel()
+	if s.Fill.R%257 == 0 && s.Fill.G%257 == 0 && s.Fill.B%257 == 0 && (model == color.GrayModel || model == color.NRGBAModel || model == color.RGBAModel) {
+		return color.NRGBAModel
+	}
+	return color.NRGBA64Model
+}
+
+// Bounds 返回模板图像的采样边界
+// 返回: image.Rectangle 图像边界
+func (s *StencilImage) Bounds() image.Rectangle { return s.Source.Bounds() }
+
+// At 以模板灰度计算填充覆盖率，不重复变换颜色
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.Color 非预乘颜色
+func (s *StencilImage) At(x, y int) color.Color {
+	return s.NRGBA64At(x, y)
+}
+
+// NRGBA64At 直接读取模板覆盖率，保留填充色的有效精度
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.NRGBA64 非预乘颜色
+func (s *StencilImage) NRGBA64At(x, y int) color.NRGBA64 {
+	if !image.Pt(x, y).In(s.Bounds()) {
+		return color.NRGBA64{}
+	}
+	gray := baseimage.NRGBA64At(s.Source, x, y)
+	pixel := s.Fill
+	pixel.A = uint16(65535 - gray.R)
+	return pixel
+}
+
+// ColorModel 保留16位原生分量与源透明度
+// 返回: color.Model 非预乘颜色模型
+func (s *NativeImage) ColorModel() color.Model { return color.NRGBA64Model }
+
+// Bounds 返回源图像的完整采样边界
+// 返回: image.Rectangle 原始像素边界
+func (s *NativeImage) Bounds() image.Rectangle { return s.Source.Bounds() }
+
+// Opaque 检查原生过程色图像透明度，不执行逐像素色域变换
+// 返回: bool 是否完全不透明
+func (s *NativeImage) Opaque() bool {
+	return s != nil && s.Source.Opaque()
+}
+
+// At 获取按OFD输出映射的原生颜色
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.Color 非预乘颜色
+func (s *NativeImage) At(x, y int) color.Color { return s.NRGBA64At(x, y) }
+
+// NRGBA64At 按原始精度转换设备过程色，不进行页面采样或备用变换
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.NRGBA64 非预乘颜色
+func (s *NativeImage) NRGBA64At(x, y int) color.NRGBA64 {
+	if !image.Pt(x, y).In(s.Bounds()) {
+		return color.NRGBA64{}
+	}
+	values, alpha := s.Source.ValuesAt(x, y)
+	rgb, _ := OutputColor(s.Space, values)
+	return color.NRGBA64{R: uint16(math.Round(rgb[0] * 65535)), G: uint16(math.Round(rgb[1] * 65535)), B: uint16(math.Round(rgb[2] * 65535)), A: uint16(math.Round(alpha * 65535))}
 }

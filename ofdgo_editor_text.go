@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"image/color"
+	"math"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -71,9 +72,229 @@ type TextStyle struct {
 	Reflow bool
 }
 
+// textLayout 保存可恢复的原文与排版选项，不参与阅读渲染
+type textLayout struct {
+	value     string
+	options   TextLayout
+	autoWidth bool
+}
+
+// textMetadata 保存原文、选项与标准定位摘要
+type textMetadata struct {
+	Text      string     `json:"text"`
+	Layout    TextLayout `json:"layout"`
+	AutoWidth bool       `json:"autoWidth"`
+	Digest    string     `json:"digest"`
+}
+
+// missingGlyphError 汇总缺失字符，无缺字时返回nil
+// 入参: id 字体资源标识, characters 缺失字符
+// 返回: error 缺字诊断
+func missingGlyphError(id string, characters []rune) error {
+	if len(characters) == 0 {
+		return nil
+	}
+	seen := make(map[rune]bool)
+	var value strings.Builder
+	for _, char := range characters {
+		if !seen[char] {
+			seen[char] = true
+			value.WriteRune(char)
+		}
+	}
+	return &MissingGlyphError{FontID: id, Characters: value.String()}
+}
+
+// rewriteTextDeltas 按需读取并局部替换字符步进，保留末尾附加位移及其重复编码
+// 入参: value 原位移, old 原字符, replacement 替换字符, start 起点, end 终点, advance 字体步进
+// 返回: string 更新后的位移数组
+func rewriteTextDeltas(value string, old, replacement []rune, start, end int, advance func(rune) float64) string {
+	deltas := textPositionValues{data: value, compressed: true}
+	steps := make([]float64, len(old))
+	complete := len(old) == 0
+	for i, char := range old {
+		steps[i] = advance(char)
+		delta, ok := deltas.next()
+		if ok || i < len(old)-1 && deltas.present {
+			steps[i] = delta
+		}
+		complete = ok
+	}
+	tracking := 0.0
+	if len(old) > 0 && (len(old) > 1 || deltas.present) {
+		index := min(start, max(0, len(old)-2))
+		tracking = steps[index] - advance(old[index])
+	}
+	result := append([]float64(nil), steps[:start]...)
+	for _, char := range replacement {
+		result = append(result, advance(char)+tracking)
+	}
+	result = append(result, steps[end:]...)
+	if !complete {
+		result = result[:len(result)-1]
+	}
+	var output strings.Builder
+	write := func(field string) {
+		if output.Len() != 0 {
+			output.WriteByte(' ')
+		}
+		output.WriteString(field)
+	}
+	for _, delta := range result {
+		write(ofdNumber(delta))
+	}
+	if deltas.repeat > 0 {
+		if deltas.repeat > 1 {
+			write("g")
+			write(strconv.Itoa(deltas.repeat))
+		}
+		write(ofdNumber(deltas.value))
+	}
+	if tail := strings.TrimSpace(deltas.data); tail != "" {
+		write(tail)
+	}
+	return output.String()
+}
+
+// breakTextLines 优先使用Unicode断行机会，过长词仅在字素边界折行，不丢弃空白
+// 入参: runes 段落字符, advances 含字距的字符步进, width 本地排版宽度, wrap 是否自动折行, spacing 附加字距, indent 首行缩进
+// 返回: [][2]int 各行的字符起止索引，左闭右开
+func breakTextLines(runes []rune, advances []float64, width float64, wrap bool, spacing, indent float64) [][2]int {
+	if !wrap || len(runes) == 0 {
+		return [][2]int{{0, len(runes)}}
+	}
+	var seg segmenter.Segmenter
+	seg.Init(runes)
+	breaks := make([]bool, len(runes)+1)
+	for it := seg.LineIterator(); it.Next(); {
+		line := it.Line()
+		breaks[line.Offset+len(line.Text)] = true
+	}
+	var ends []int
+	for it := seg.GraphemeIterator(); it.Next(); {
+		cluster := it.Grapheme()
+		ends = append(ends, cluster.Offset+len(cluster.Text))
+	}
+	sums := make([]float64, len(runes)+1)
+	for i, advance := range advances {
+		sums[i+1] = sums[i] + advance
+	}
+	var lines [][2]int
+	for start, cursor := 0, 0; start < len(runes); {
+		available := width
+		if start == 0 {
+			available -= indent
+		}
+		end, legal, next := start, start, cursor
+		for next < len(ends) {
+			candidate := ends[next]
+			visible := candidate
+			for visible > start && runes[visible-1] == ' ' {
+				visible--
+			}
+			length := sums[visible] - sums[start]
+			if visible > start {
+				length -= spacing
+			}
+			if length > available && end > start {
+				break
+			}
+			end = candidate
+			next++
+			if breaks[end] {
+				legal = end
+			}
+			if length > available {
+				break
+			}
+		}
+		if end < len(runes) && legal > start {
+			end = legal
+		}
+		lines = append(lines, [2]int{start, end})
+		start = end
+		for cursor < len(ends) && ends[cursor] <= start {
+			cursor++
+		}
+	}
+	return lines
+}
+
+// alignTextLine 将段落对齐转换为标准X和DeltaX，两端对齐保留段落末行左对齐
+// 入参: runes 行内字符, advances 含字距的字符步进, width 本地排版宽度, alignment 对齐方式, justify 是否允许本行两端对齐, spacing 附加字距, clusters 可选塑形簇起点
+// 返回: float64 行首X坐标, string 字符间的DeltaX序列
+func alignTextLine(runes []rune, advances []float64, width float64, alignment string, justify bool, spacing float64, clusters map[int]bool) (float64, string) {
+	end := len(runes)
+	for end > 0 && runes[end-1] == ' ' {
+		end--
+	}
+	length := 0.0
+	for _, advance := range advances[:end] {
+		length += advance
+	}
+	if end > 0 {
+		length -= spacing
+	}
+	x, extra := 0.0, max(0, width-length)
+	if alignment == "center" {
+		x = extra / 2
+	} else if alignment == "right" {
+		x = extra
+	}
+	gaps := make(map[int]bool)
+	if alignment == "justify" && justify && extra > 0 {
+		var seg segmenter.Segmenter
+		seg.Init(runes[:end])
+		for it := seg.LineIterator(); it.Next(); {
+			line := it.Line()
+			at := line.Offset + len(line.Text)
+			if at < end {
+				gaps[at-1] = true
+			}
+		}
+	}
+	if alignment == "distributed" && extra > 0 {
+		var seg segmenter.Segmenter
+		seg.Init(runes[:end])
+		for it := seg.GraphemeIterator(); it.Next(); {
+			cluster := it.Grapheme()
+			at := cluster.Offset + len(cluster.Text)
+			if at < end && (clusters == nil || clusters[at]) {
+				gaps[at-1] = true
+			}
+		}
+	}
+	deltas := make([]string, max(0, len(runes)-1))
+	for i := range deltas {
+		advance := advances[i]
+		if gaps[i] {
+			advance += extra / float64(len(gaps))
+		}
+		deltas[i] = ofdNumber(advance)
+	}
+	return x, strings.Join(deltas, " ")
+}
+
+// spaceTextAdvances 将字距加入各字素末尾，不拆散组合字符
+// 入参: runes 段落字符, advances 待更新的字符步进, spacing 附加毫米字距
+func spaceTextAdvances(runes []rune, advances []float64, spacing float64) {
+	if spacing == 0 {
+		return
+	}
+	var seg segmenter.Segmenter
+	seg.Init(runes)
+	for it := seg.GraphemeIterator(); it.Next(); {
+		cluster := it.Grapheme()
+		advances[cluster.Offset+len(cluster.Text)-1] += spacing
+	}
+}
+
 // Error 返回缺失字符的Unicode码点
 // 返回: string 错误描述
 func (e *MissingGlyphError) Error() string {
+	if e == nil {
+		return ""
+	}
 	var codes []string
 	for _, char := range e.Characters {
 		codes = append(codes, fmt.Sprintf("U+%04X", char))
@@ -413,21 +634,6 @@ func (obj TextObject) TextLayout() (string, TextLayout) {
 	return obj.Text(), TextLayout{}
 }
 
-// textLayout 保存可恢复的原文与排版选项，不参与阅读渲染
-type textLayout struct {
-	value     string
-	options   TextLayout
-	autoWidth bool
-}
-
-// textMetadata 保存原文、选项与标准定位摘要
-type textMetadata struct {
-	Text      string     `json:"text"`
-	Layout    TextLayout `json:"layout"`
-	AutoWidth bool       `json:"autoWidth"`
-	Digest    string     `json:"digest"`
-}
-
 // textDigest 计算与字体编号无关的文字定位摘要
 // 返回: string 摘要
 func (obj TextObject) textDigest() string {
@@ -496,7 +702,7 @@ func (e *Editor) styleTextObjects(objects []GraphicObject, style TextStyle) ([]G
 			}
 			var r, g, b float64
 			fmt.Sscan(style.Color, &r, &g, &b)
-			value, err := e.RGBColor(color.NRGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: 255})
+			value, err := e.RGBColor(color.NRGBA{R: uint8(math.Round(r)), G: uint8(math.Round(g)), B: uint8(math.Round(b)), A: 255})
 			if err != nil {
 				return nil, err
 			}
@@ -554,206 +760,4 @@ func (e *Editor) replaceTextFont(text *TextObject, id string) error {
 	}
 	text.Font, text.CGTransform = id, transforms
 	return nil
-}
-
-// missingGlyphError 汇总缺失字符，无缺字时返回nil
-// 入参: id 字体资源标识, characters 缺失字符
-// 返回: error 缺字诊断
-func missingGlyphError(id string, characters []rune) error {
-	if len(characters) == 0 {
-		return nil
-	}
-	seen := make(map[rune]bool)
-	var value strings.Builder
-	for _, char := range characters {
-		if !seen[char] {
-			seen[char] = true
-			value.WriteRune(char)
-		}
-	}
-	return &MissingGlyphError{FontID: id, Characters: value.String()}
-}
-
-// rewriteTextDeltas 按需读取并局部替换字符步进，保留末尾附加位移及其重复编码
-// 入参: value 原位移, old 原字符, replacement 替换字符, start 起点, end 终点, advance 字体步进
-// 返回: string 更新后的位移数组
-func rewriteTextDeltas(value string, old, replacement []rune, start, end int, advance func(rune) float64) string {
-	deltas := textPositionValues{data: value, compressed: true}
-	steps := make([]float64, len(old))
-	complete := len(old) == 0
-	for i, char := range old {
-		steps[i] = advance(char)
-		delta, ok := deltas.next()
-		if ok || i < len(old)-1 && deltas.present {
-			steps[i] = delta
-		}
-		complete = ok
-	}
-	tracking := 0.0
-	if len(old) > 0 && (len(old) > 1 || deltas.present) {
-		index := min(start, max(0, len(old)-2))
-		tracking = steps[index] - advance(old[index])
-	}
-	result := append([]float64(nil), steps[:start]...)
-	for _, char := range replacement {
-		result = append(result, advance(char)+tracking)
-	}
-	result = append(result, steps[end:]...)
-	if !complete {
-		result = result[:len(result)-1]
-	}
-	var output strings.Builder
-	write := func(field string) {
-		if output.Len() != 0 {
-			output.WriteByte(' ')
-		}
-		output.WriteString(field)
-	}
-	for _, delta := range result {
-		write(ofdNumber(delta))
-	}
-	if deltas.repeat > 0 {
-		if deltas.repeat > 1 {
-			write("g")
-			write(strconv.Itoa(deltas.repeat))
-		}
-		write(ofdNumber(deltas.value))
-	}
-	if tail := strings.TrimSpace(deltas.data); tail != "" {
-		write(tail)
-	}
-	return output.String()
-}
-
-// breakTextLines 优先使用Unicode断行机会，过长词仅在字素边界折行，不丢弃空白
-// 入参: runes 段落字符, advances 含字距的字符步进, width 本地排版宽度, wrap 是否自动折行, spacing 附加字距, indent 首行缩进
-// 返回: [][2]int 各行的字符起止索引，左闭右开
-func breakTextLines(runes []rune, advances []float64, width float64, wrap bool, spacing, indent float64) [][2]int {
-	if !wrap || len(runes) == 0 {
-		return [][2]int{{0, len(runes)}}
-	}
-	var seg segmenter.Segmenter
-	seg.Init(runes)
-	breaks := make([]bool, len(runes)+1)
-	for it := seg.LineIterator(); it.Next(); {
-		line := it.Line()
-		breaks[line.Offset+len(line.Text)] = true
-	}
-	var ends []int
-	for it := seg.GraphemeIterator(); it.Next(); {
-		cluster := it.Grapheme()
-		ends = append(ends, cluster.Offset+len(cluster.Text))
-	}
-	sums := make([]float64, len(runes)+1)
-	for i, advance := range advances {
-		sums[i+1] = sums[i] + advance
-	}
-	var lines [][2]int
-	for start, cursor := 0, 0; start < len(runes); {
-		available := width
-		if start == 0 {
-			available -= indent
-		}
-		end, legal, next := start, start, cursor
-		for next < len(ends) {
-			candidate := ends[next]
-			visible := candidate
-			for visible > start && runes[visible-1] == ' ' {
-				visible--
-			}
-			length := sums[visible] - sums[start]
-			if visible > start {
-				length -= spacing
-			}
-			if length > available && end > start {
-				break
-			}
-			end = candidate
-			next++
-			if breaks[end] {
-				legal = end
-			}
-			if length > available {
-				break
-			}
-		}
-		if end < len(runes) && legal > start {
-			end = legal
-		}
-		lines = append(lines, [2]int{start, end})
-		start = end
-		for cursor < len(ends) && ends[cursor] <= start {
-			cursor++
-		}
-	}
-	return lines
-}
-
-// alignTextLine 将段落对齐转换为标准X和DeltaX，两端对齐保留段落末行左对齐
-// 入参: runes 行内字符, advances 含字距的字符步进, width 本地排版宽度, alignment 对齐方式, justify 是否允许本行两端对齐, spacing 附加字距, clusters 可选塑形簇起点
-// 返回: float64 行首X坐标, string 字符间的DeltaX序列
-func alignTextLine(runes []rune, advances []float64, width float64, alignment string, justify bool, spacing float64, clusters map[int]bool) (float64, string) {
-	end := len(runes)
-	for end > 0 && runes[end-1] == ' ' {
-		end--
-	}
-	length := 0.0
-	for _, advance := range advances[:end] {
-		length += advance
-	}
-	if end > 0 {
-		length -= spacing
-	}
-	x, extra := 0.0, max(0, width-length)
-	if alignment == "center" {
-		x = extra / 2
-	} else if alignment == "right" {
-		x = extra
-	}
-	gaps := make(map[int]bool)
-	if alignment == "justify" && justify && extra > 0 {
-		var seg segmenter.Segmenter
-		seg.Init(runes[:end])
-		for it := seg.LineIterator(); it.Next(); {
-			line := it.Line()
-			at := line.Offset + len(line.Text)
-			if at < end {
-				gaps[at-1] = true
-			}
-		}
-	}
-	if alignment == "distributed" && extra > 0 {
-		var seg segmenter.Segmenter
-		seg.Init(runes[:end])
-		for it := seg.GraphemeIterator(); it.Next(); {
-			cluster := it.Grapheme()
-			at := cluster.Offset + len(cluster.Text)
-			if at < end && (clusters == nil || clusters[at]) {
-				gaps[at-1] = true
-			}
-		}
-	}
-	deltas := make([]string, max(0, len(runes)-1))
-	for i := range deltas {
-		advance := advances[i]
-		if gaps[i] {
-			advance += extra / float64(len(gaps))
-		}
-		deltas[i] = ofdNumber(advance)
-	}
-	return x, strings.Join(deltas, " ")
-}
-
-// spaceTextAdvances 将字距加入各字素末尾，不拆散组合字符
-// 入参: runes 段落字符, advances 待更新的字符步进, spacing 附加毫米字距
-func spaceTextAdvances(runes []rune, advances []float64, spacing float64) {
-	if spacing == 0 {
-		return
-	}
-	var seg segmenter.Segmenter
-	seg.Init(runes)
-	for it := seg.GraphemeIterator(); it.Next(); {
-		cluster := it.Grapheme()
-		advances[cluster.Offset+len(cluster.Text)-1] += spacing
-	}
 }

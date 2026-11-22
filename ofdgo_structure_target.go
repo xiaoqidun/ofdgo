@@ -19,6 +19,23 @@ import (
 	"strings"
 )
 
+// structureVisitor 按引用收集图元及复合图元成员的原文和页面范围
+type structureVisitor struct {
+	ctx        context.Context
+	renderer   *Renderer
+	targets    map[string]*StructureTarget
+	stack      []*StructureTarget
+	text       map[*StructureTarget]*strings.Builder
+	boundsOnly bool
+}
+
+// structureObjectVisitor 收集页面、复合图元及注释外观标识，绑定校验不解码字体、图片或裁剪
+type structureObjectVisitor struct {
+	objects     map[string]bool
+	targets     []StructureTarget
+	listTargets bool
+}
+
 // StructureObjects 列出指定页可绑定的图元及原文，包含模板、隐藏内容、复合图元成员和注释外观
 // 不解码字体和图片，返回顺序遵循页面遍历顺序，同一标识仅列出一次
 // 入参: page 从0开始的页面索引
@@ -31,15 +48,15 @@ func (r *Renderer) StructureObjects(page int) ([]StructureTarget, error) {
 // 入参: ctx 取消上下文, page 从0开始的页面索引
 // 返回: []StructureTarget 候选图元，不计算Bounds, error 页面读取、遍历或取消错误
 func (r *Renderer) StructureObjectsContext(ctx context.Context, page int) ([]StructureTarget, error) {
-	content, err := r.Reader.PageContentByIndexContext(ctx, page)
+	content, err := r.reader.PageContentByIndexContext(ctx, page)
 	if err != nil {
 		return nil, err
 	}
 	visitor := &structureObjectVisitor{objects: make(map[string]bool), listTargets: true}
-	view := *r
-	view.RenderAnnotations = true
-	view.pageContext = ctx
-	if err := view.WalkPage(content, visitor); err != nil {
+	prevAnnots, prevPageCtx := r.renderAnnotations, r.pageContext
+	r.renderAnnotations, r.pageContext = true, ctx
+	defer func() { r.renderAnnotations, r.pageContext = prevAnnots, prevPageCtx }()
+	if err := r.WalkPageContext(ctx, content, visitor); err != nil {
 		return nil, err
 	}
 	for i := range visitor.targets {
@@ -52,16 +69,6 @@ func (r *Renderer) StructureObjectsContext(ctx context.Context, page int) ([]Str
 		return nil, err
 	}
 	return visitor.targets, nil
-}
-
-// structureVisitor 按引用收集图元及复合图元成员的原文和页面范围
-type structureVisitor struct {
-	ctx        context.Context
-	renderer   *Renderer
-	targets    map[string]*StructureTarget
-	stack      []*StructureTarget
-	text       map[*StructureTarget]*strings.Builder
-	boundsOnly bool
 }
 
 // BeginObject 记录当前图元的标引目标，使复合图元引用覆盖其成员
@@ -155,13 +162,6 @@ func (v *structureVisitor) DrawObject(object *GraphicObject, state RenderState) 
 // 入参: stamp 签章外观
 // 返回: error 取消错误
 func (v *structureVisitor) DrawStamp(stamp Stamp) error { return v.ctx.Err() }
-
-// structureObjectVisitor 收集页面、复合图元及注释外观标识，绑定校验不解码字体、图片或裁剪
-type structureObjectVisitor struct {
-	objects     map[string]bool
-	targets     []StructureTarget
-	listTargets bool
-}
 
 // BeginObject 登记图元标识，不创建分组状态
 // 入参: object 页面图元

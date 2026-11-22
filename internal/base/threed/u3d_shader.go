@@ -45,6 +45,65 @@ type u3dTextureSet struct {
 	reflection, perspective bool
 }
 
+// u3dShaderSample 按归一化坐标采样纹理，平铺时跨边界插值，未平铺时钳制边缘
+// 全透明采样保留原始RGB，供相加、固定权重混合及透明度覆盖使用
+// 入参: texture 纹理, u 横坐标, v 纵坐标, repeat 平铺位图, alpha 是否使用透明度
+// 返回: [4]float64 未预乘颜色及透明度
+func u3dShaderSample(texture *image.NRGBA64, u, v float64, repeat uint8, alpha bool) [4]float64 {
+	if repeat&1 != 0 {
+		u -= math.Floor(u)
+	} else {
+		u = min(1, max(0, u))
+	}
+	if repeat&2 != 0 {
+		v -= math.Floor(v)
+	} else {
+		v = min(1, max(0, v))
+	}
+	w, h := texture.Rect.Dx(), texture.Rect.Dy()
+	x, y := u*float64(w)-.5, v*float64(h)-.5
+	x0, y0 := int(math.Floor(x)), int(math.Floor(y))
+	fx, fy := x-float64(x0), y-float64(y0)
+	wx, wy := [2]float64{1 - fx, fx}, [2]float64{1 - fy, fy}
+	var result [4]float64
+	var transparent [3]float64
+	for row := range 2 {
+		py := min(h-1, max(0, y0+row))
+		if repeat&2 != 0 {
+			py = (y0 + row + h) % h
+		}
+		for col := range 2 {
+			px := min(w-1, max(0, x0+col))
+			if repeat&1 != 0 {
+				px = (x0 + col + w) % w
+			}
+			c := texture.NRGBA64At(px, py)
+			a := 1.0
+			if alpha {
+				a = float64(c.A) / 65535
+			}
+			weight := wx[col] * wy[row]
+			if a == 0 {
+				transparent[0] += float64(c.R) / 65535 * weight
+				transparent[1] += float64(c.G) / 65535 * weight
+				transparent[2] += float64(c.B) / 65535 * weight
+			}
+			result[0] += float64(c.R) / 65535 * a * weight
+			result[1] += float64(c.G) / 65535 * a * weight
+			result[2] += float64(c.B) / 65535 * a * weight
+			result[3] += a * weight
+		}
+	}
+	if result[3] != 0 {
+		for c := range 3 {
+			result[c] /= result[3]
+		}
+	} else {
+		copy(result[:3], transparent[:])
+	}
+	return result
+}
+
 // coordinates 保存模型纹理坐标或程序化映射的插值输入，避免经线两侧直接插值
 // 入参: vertex 目标顶点, mesh 几何资源, shading 属性布局, corner 属性索引, normal 世界法线
 // 返回: error 坐标、索引或维度错误
@@ -241,63 +300,4 @@ func (r *Renderer) textureColor(textures *u3dTextureSet, color *[4]float64, coor
 		color[3] *= r.opacity
 	}
 	return nil
-}
-
-// u3dShaderSample 按归一化坐标采样纹理，平铺时跨边界插值，未平铺时钳制边缘
-// 全透明采样保留原始RGB，供相加、固定权重混合及透明度覆盖使用
-// 入参: texture 纹理, u 横坐标, v 纵坐标, repeat 平铺位图, alpha 是否使用透明度
-// 返回: [4]float64 未预乘颜色及透明度
-func u3dShaderSample(texture *image.NRGBA64, u, v float64, repeat uint8, alpha bool) [4]float64 {
-	if repeat&1 != 0 {
-		u -= math.Floor(u)
-	} else {
-		u = min(1, max(0, u))
-	}
-	if repeat&2 != 0 {
-		v -= math.Floor(v)
-	} else {
-		v = min(1, max(0, v))
-	}
-	w, h := texture.Rect.Dx(), texture.Rect.Dy()
-	x, y := u*float64(w)-.5, v*float64(h)-.5
-	x0, y0 := int(math.Floor(x)), int(math.Floor(y))
-	fx, fy := x-float64(x0), y-float64(y0)
-	wx, wy := [2]float64{1 - fx, fx}, [2]float64{1 - fy, fy}
-	var result [4]float64
-	var transparent [3]float64
-	for row := range 2 {
-		py := min(h-1, max(0, y0+row))
-		if repeat&2 != 0 {
-			py = (y0 + row + h) % h
-		}
-		for col := range 2 {
-			px := min(w-1, max(0, x0+col))
-			if repeat&1 != 0 {
-				px = (x0 + col + w) % w
-			}
-			c := texture.NRGBA64At(px, py)
-			a := 1.0
-			if alpha {
-				a = float64(c.A) / 65535
-			}
-			weight := wx[col] * wy[row]
-			if a == 0 {
-				transparent[0] += float64(c.R) / 65535 * weight
-				transparent[1] += float64(c.G) / 65535 * weight
-				transparent[2] += float64(c.B) / 65535 * weight
-			}
-			result[0] += float64(c.R) / 65535 * a * weight
-			result[1] += float64(c.G) / 65535 * a * weight
-			result[2] += float64(c.B) / 65535 * a * weight
-			result[3] += a * weight
-		}
-	}
-	if result[3] != 0 {
-		for c := range 3 {
-			result[c] /= result[3]
-		}
-	} else {
-		copy(result[:3], transparent[:])
-	}
-	return result
 }

@@ -43,6 +43,35 @@ type compressionPatternUse struct {
 	paint               *compressionPatternPaint
 }
 
+// compressionObjectPattern 筛选没有原文及绘制参数继承的底纹对象
+// 入参: object 图形对象
+// 返回: *FillColor 填充颜色, *StrokeColor 描边颜色，不适用时均为空
+func compressionObjectPattern(object GraphicObject) (*FillColor, *StrokeColor) {
+	if object.origin != nil {
+		return nil, nil
+	}
+	var fill *FillColor
+	var stroke *StrokeColor
+	switch object.Type {
+	case "PathObject":
+		if object.PathObject.DrawParam != "" {
+			return nil, nil
+		}
+		fill, stroke = object.PathObject.FillColor, object.PathObject.StrokeColor
+	case "TextObject":
+		if object.TextObject.DrawParam != "" {
+			return nil, nil
+		}
+		fill, stroke = object.TextObject.FillColor, object.TextObject.StrokeColor
+	default:
+		return nil, nil
+	}
+	if fill != nil && fill.Pattern != nil || stroke != nil && stroke.Pattern != nil {
+		return fill, stroke
+	}
+	return nil, nil
+}
+
 // compressPatternPaints 将重复的大底纹颜色提取为绘制参数，仅修改输出快照且跳过受签名保护内容
 // 返回: error 编码或取消错误
 func (e *Editor) compressPatternPaints() error {
@@ -189,33 +218,4 @@ func (e *Editor) compressPatternPaints() error {
 		}
 	}
 	return nil
-}
-
-// compressionObjectPattern 筛选没有原文及绘制参数继承的底纹对象
-// 入参: object 图形对象
-// 返回: *FillColor 填充颜色, *StrokeColor 描边颜色，不适用时均为空
-func compressionObjectPattern(object GraphicObject) (*FillColor, *StrokeColor) {
-	if object.origin != nil {
-		return nil, nil
-	}
-	var fill *FillColor
-	var stroke *StrokeColor
-	switch object.Type {
-	case "PathObject":
-		if object.PathObject.DrawParam != "" {
-			return nil, nil
-		}
-		fill, stroke = object.PathObject.FillColor, object.PathObject.StrokeColor
-	case "TextObject":
-		if object.TextObject.DrawParam != "" {
-			return nil, nil
-		}
-		fill, stroke = object.TextObject.FillColor, object.TextObject.StrokeColor
-	default:
-		return nil, nil
-	}
-	if fill != nil && fill.Pattern != nil || stroke != nil && stroke.Pattern != nil {
-		return fill, stroke
-	}
-	return nil, nil
 }

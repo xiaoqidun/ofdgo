@@ -15,12 +15,11 @@
 package ofdgo
 
 import (
+	"context"
 	"fmt"
 	"image/color"
 	"math"
 	"strconv"
-
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
 // maxPatternTiles 限制单次底纹填充展开的最大平铺单元数，防止极小步长引发拒绝服务
@@ -28,90 +27,6 @@ const maxPatternTiles = 262144
 
 // OFDCompiler 使用库自有页面语义，字体和几何操作交给当前后端配置
 type OFDCompiler struct{}
-
-// Name 返回页面编译器标识
-// 返回: string 编译器标识
-func (OFDCompiler) Name() string { return "ofd" }
-
-// CompilePage 使用公共OFD语义和配置的字形、几何能力编译页面
-// 入参: r 渲染器, page 页面
-// 返回: *RasterPage 绘制页面, error 编译错误
-func (OFDCompiler) CompilePage(r *Renderer, page *PageContent) (*RasterPage, error) {
-	defer r.bindPageResources(page)()
-	box, err := r.GetPageBox(page)
-	if err != nil {
-		return nil, err
-	}
-	c, err := newSemanticCompiler(r)
-	if err != nil {
-		return nil, err
-	}
-	c.page = &RasterPage{Width: box.W, Height: box.H, DPI: r.DPI}
-	if _, _, err := c.page.PixelSize(); err != nil {
-		return nil, err
-	}
-	if box.X != 0 || box.Y != 0 {
-		shift := TranslationMatrix(-box.X, -box.Y)
-		c.patternPage = &shift
-	}
-	if !r.TransparentBackground {
-		if err := c.fill(GeometryPath(basegeom.Rectangle(Box{W: box.W, H: box.H})), Paint{Kind: PaintSolid, Color: color.RGBA{255, 255, 255, 255}}, false, nil, IdentityMatrix, IdentityMatrix); err != nil {
-			return nil, err
-		}
-	}
-	if err := r.WalkPage(page, c); err != nil {
-		return nil, err
-	}
-	if r.OnPageText != nil {
-		r.OnPageText(page, &c.text)
-	}
-	return c.page, nil
-}
-
-// PageText 提取与页面绘制相同定位的原文，不读取图片像素
-// 入参: r 渲染器, page 页面
-// 返回: *PageText 页面文字, error 定位错误
-func (OFDCompiler) PageText(r *Renderer, page *PageContent) (*PageText, error) {
-	defer r.bindPageResources(page)()
-	if _, err := r.GetPageBox(page); err != nil {
-		return nil, err
-	}
-	c, err := newSemanticCompiler(r)
-	if err != nil {
-		return nil, err
-	}
-	c.textOnly = true
-	if err := r.WalkPage(page, c); err != nil {
-		return nil, err
-	}
-	return &c.text, nil
-}
-
-// MeasureObject 复用文字和图形编译规则收集范围，不分配页面像素
-// 入参: r 渲染器, object 对象, options 度量上下文
-// 返回: ObjectMeasurement 对象范围与轮廓, error 度量错误
-func (OFDCompiler) MeasureObject(r *Renderer, object GraphicObject, options MeasureOptions) (ObjectMeasurement, error) {
-	if len(r.pageResources) > 0 {
-		defer r.bindParsedResources(r.pageResources)()
-	}
-	c, err := newSemanticCompiler(r)
-	if err != nil {
-		return ObjectMeasurement{}, err
-	}
-	boundary, ctm := editorGeometry(object)
-	if _, err := creationBox(boundary); err != nil {
-		return ObjectMeasurement{}, err
-	}
-	if ctm != "" {
-		if _, err := creationNumbers(ctm, 6); err != nil {
-			return ObjectMeasurement{}, err
-		}
-	}
-	c.measure = true
-	c.contours = options.Contours
-	err = r.WalkObject(&object, RenderState{Defaults: options.Defaults, Parent: options.Parent, BoundaryInCTM: options.BoundaryInCTM, Clip: options.Clip}, c)
-	return c.measurement, err
-}
 
 // semanticStyle 保存已继承的路径颜色、页面描边参数与对象局部描边参数
 type semanticStyle struct {
@@ -141,7 +56,199 @@ func newSemanticCompiler(r *Renderer) (*semanticCompiler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &semanticCompiler{renderer: r, geometry: geometry, patterns: resourceCache[patternCellKey, []RasterCommand](r.Reader.resources, 8<<20)}, nil
+	return &semanticCompiler{renderer: r, geometry: geometry, patterns: resourceCache[patternCellKey, []RasterCommand](r.reader.resources, 8<<20)}, nil
+}
+
+// paintVisible 判断画刷是否产生可见输出
+// 入参: paint 画刷
+// 返回: bool 是否可见
+func paintVisible(paint Paint) bool {
+	return paint.Kind != PaintNone && (paint.Kind != PaintSolid || paint.Color.A != 0)
+}
+
+// matrixIsSimilarity 判断二维线性矩阵是否为非退化相似变换
+// 入参: m 变换矩阵
+// 返回: bool 是否为等比正交变换
+func matrixIsSimilarity(m Matrix) bool {
+	s1 := m.a*m.a + m.b*m.b
+	s2 := m.c*m.c + m.d*m.d
+	if s1 <= 0 || s2 <= 0 {
+		return false
+	}
+	dot := m.a*m.c + m.b*m.d
+	ref := max(s1, s2, 1e-12)
+	return math.Abs(s1-s2) <= 1e-6*ref && math.Abs(dot) <= 1e-6*ref
+}
+
+// semanticGradient 保留渐变周期、延伸与椭圆坐标
+// 入参: paint 渐变画刷, matrix 渐变父矩阵
+// 返回: *RasterGradient 光栅渐变, Matrix 局部到页面矩阵
+func semanticGradient(paint Paint, matrix Matrix) (*RasterGradient, Matrix) {
+	s := paint.Gradient
+	extend, _ := strconv.Atoi(s.Extend)
+	period := 1.0
+	length := math.Hypot(s.End.X-s.Start.X, s.End.Y-s.Start.Y)
+	if s.MapUnit > 0 && length > 0 {
+		period = s.MapUnit / length
+	}
+	g := &RasterGradient{Start: RasterPoint{s.Start.X, s.Start.Y}, End: RasterPoint{s.End.X, s.End.Y}, R0: s.StartRadius, R1: s.EndRadius, Stops: s.Stops, Spread: &RasterSpread{Extend: extend, MapType: s.MapType, Period: period}}
+	g.Sample = s.Sample
+	if paint.Kind == PaintRadial {
+		g.Kind = RasterRadial
+		if s.Eccentricity > 0 && s.Eccentricity < 1 {
+			angle := s.Angle * math.Pi / 180
+			view := TranslationMatrix(s.Start.X, s.Start.Y).Multiply(Matrix{a: math.Cos(angle), b: math.Sin(angle), c: -math.Sin(angle), d: math.Cos(angle)}).Multiply(Matrix{a: 1, d: math.Sqrt(1 - s.Eccentricity*s.Eccentricity)}).Multiply(TranslationMatrix(-s.Start.X, -s.Start.Y))
+			inverse, _ := view.Invert()
+			g.End.X, g.End.Y = inverse.Transform(g.End.X, g.End.Y)
+			matrix = matrix.Multiply(view)
+		}
+	}
+	return g, matrix
+}
+
+// reflectShdPosition 获取镜像周期内的位置
+// 入参: position 渐变位置
+// 返回: float64 周期内的位置
+func reflectShdPosition(position float64) float64 {
+	index := math.Floor(position)
+	position -= index
+	if math.Mod(index, 2) != 0 {
+		return 1 - position
+	}
+	return position
+}
+
+// geometryCircle 构建标准圆弧，不提前折线化
+// 入参: center 圆心, radius 半径
+// 返回: GeometryPath 圆路径
+func geometryCircle(center RasterPoint, radius float64) GeometryPath {
+	return GeometryPath{
+		{Verb: GeometryMove, End: Point{X: center.X + radius, Y: center.Y}},
+		{Verb: GeometryArc, RadiusX: radius, RadiusY: radius, Sweep: true, End: Point{X: center.X - radius, Y: center.Y}},
+		{Verb: GeometryArc, RadiusX: radius, RadiusY: radius, Sweep: true, End: Point{X: center.X + radius, Y: center.Y}},
+		{Verb: GeometryClose},
+	}
+}
+
+// fillAlphaByte 将可选对象透明度转换为预乘黑色Alpha字节
+// 入参: alpha 对象透明度
+// 返回: uint8 Alpha字节
+func fillAlphaByte(alpha *int) uint8 {
+	if alpha == nil {
+		return 255
+	}
+	return uint8(clampColor(*alpha))
+}
+
+// Name 返回页面编译器标识
+// 返回: string 编译器标识
+func (OFDCompiler) Name() string { return "ofd" }
+
+// CompilePage 使用公共OFD语义和配置的字形、几何能力编译页面
+// 入参: ctx 取消上下文, r 渲染器, page 页面
+// 返回: *RasterPage 绘制页面, error 编译或取消错误
+func (OFDCompiler) CompilePage(ctx context.Context, r *Renderer, page *PageContent) (*RasterPage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
+	defer r.bindPageResources(page)()
+	box, err := r.GetPageBoxContext(ctx, page)
+	if err != nil {
+		return nil, err
+	}
+	c, err := newSemanticCompiler(r)
+	if err != nil {
+		return nil, err
+	}
+	c.page = &RasterPage{Width: box.W, Height: box.H, DPI: r.dpi}
+	if _, _, err := c.page.PixelSize(); err != nil {
+		return nil, err
+	}
+	if box.X != 0 || box.Y != 0 {
+		shift := TranslationMatrix(-box.X, -box.Y)
+		c.patternPage = &shift
+	}
+	if !r.transparentBackground {
+		if err := c.fill(geometryRectangle(Box{W: box.W, H: box.H}), Paint{Kind: PaintSolid, Color: color.RGBA{255, 255, 255, 255}}, false, nil, IdentityMatrix(), IdentityMatrix()); err != nil {
+			return nil, err
+		}
+	}
+	if err := r.WalkPageContext(ctx, page, c); err != nil {
+		return nil, err
+	}
+	if r.OnPageText != nil {
+		r.OnPageText(page, &c.text)
+	}
+	return c.page, nil
+}
+
+// PageText 提取与页面绘制相同定位的原文，不读取图片像素
+// 入参: ctx 取消上下文, r 渲染器, page 页面
+// 返回: *PageText 页面文字, error 定位或取消错误
+func (OFDCompiler) PageText(ctx context.Context, r *Renderer, page *PageContent) (*PageText, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
+	defer r.bindPageResources(page)()
+	if _, err := r.GetPageBoxContext(ctx, page); err != nil {
+		return nil, err
+	}
+	c, err := newSemanticCompiler(r)
+	if err != nil {
+		return nil, err
+	}
+	c.textOnly = true
+	if err := r.WalkPageContext(ctx, page, c); err != nil {
+		return nil, err
+	}
+	return &c.text, nil
+}
+
+// MeasureObject 复用文字和图形编译规则收集范围，不分配页面像素
+// 入参: ctx 取消上下文, r 渲染器, object 对象, options 度量上下文
+// 返回: ObjectMeasurement 对象范围与轮廓, error 度量或取消错误
+func (OFDCompiler) MeasureObject(ctx context.Context, r *Renderer, object GraphicObject, options MeasureOptions) (ObjectMeasurement, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return ObjectMeasurement{}, err
+	}
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
+	if len(r.pageResources) > 0 {
+		defer r.bindParsedResources(r.pageResources)()
+	}
+	c, err := newSemanticCompiler(r)
+	if err != nil {
+		return ObjectMeasurement{}, err
+	}
+	boundary, ctm := editorGeometry(object)
+	if _, err := creationBox(boundary); err != nil {
+		return ObjectMeasurement{}, err
+	}
+	if ctm != "" {
+		if _, err := creationNumbers(ctm, 6); err != nil {
+			return ObjectMeasurement{}, err
+		}
+	}
+	c.measure = true
+	c.contours = options.Contours
+	err = r.WalkObjectContext(ctx, &object, RenderState{Defaults: options.Defaults, Parent: options.Parent, BoundaryInCTM: options.BoundaryInCTM, Clip: options.Clip}, c)
+	return c.measurement, err
 }
 
 // DrawObject 解释叶子对象，不调用任何具体页面编译器
@@ -239,7 +346,7 @@ func (c *semanticCompiler) addBounds(path GeometryPath, evenOdd bool) error {
 	}
 	c.measurement.Bounds = unionTextBox(c.measurement.Bounds, box)
 	if c.contours {
-		svg, err := GeometryPath(basegeom.Close(basegeom.Path(path))).SVG()
+		svg, err := geometryClose(path).SVG()
 		if err != nil {
 			return err
 		}
@@ -255,7 +362,7 @@ func (c *semanticCompiler) fill(path GeometryPath, paint Paint, evenOdd bool, cl
 	if len(path) == 0 || paint.Kind == PaintNone || paint.Kind == PaintSolid && paint.Color.A == 0 {
 		return nil
 	}
-	path = GeometryPath(basegeom.Close(basegeom.Path(path)))
+	path = geometryClose(path)
 	if !c.measure && paint.Kind != PaintPattern {
 		return c.command(path, paint, evenOdd, clip, shadingMatrix, nil)
 	}
@@ -409,7 +516,7 @@ func (c *semanticCompiler) objectStyle(object PathObject, defaults *DrawParam, l
 		style.options.MiterLimit = object.MiterLimit
 		style.options.MiterLimitSet = object.MiterLimitSet
 	}
-	if object.DashPattern != "" || object.dashPatternSet {
+	if object.DashPattern != "" || object.DashPatternSet {
 		style.options.Dashes = parseFloats(object.DashPattern)
 	}
 	if object.DashOffset != nil {
@@ -471,7 +578,7 @@ func (c *semanticCompiler) pathObject(object PathObject, state RenderState) erro
 		styleObj.Alpha = nil
 	}
 	style := c.objectStyle(styleObj, state.Defaults, linear)
-	shading, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
+	shading, _ := renderObjectMatrix(object.Boundary, IdentityMatrix(), state)
 	var fillPaint Paint
 	if shouldFill {
 		fillPaint, err = c.renderer.ResolvePaint(style.fill)
@@ -570,7 +677,7 @@ func (c *semanticCompiler) textObject(object TextObject, state RenderState) erro
 		styleObj.Alpha = nil
 	}
 	style := c.objectStyle(styleObj, state.Defaults, linear)
-	shading, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
+	shading, _ := renderObjectMatrix(object.Boundary, IdentityMatrix(), state)
 	fill := Paint{Kind: PaintSolid, Color: color.RGBA{A: fillAlphaByte(styleObj.Alpha)}}
 	if style.fill != nil {
 		fill, err = c.renderer.ResolvePaint(style.fill)
@@ -759,7 +866,7 @@ func (c *semanticCompiler) shadingClip(path GeometryPath, paint Paint, matrix Ma
 		if box.W <= 0 {
 			return nil, nil
 		}
-		clip, err := c.geometry.Transform(GeometryPath(basegeom.Rectangle(box)), axis)
+		clip, err := c.geometry.Transform(geometryRectangle(box), axis)
 		if err != nil {
 			return nil, err
 		}
@@ -789,27 +896,6 @@ func (c *semanticCompiler) shadingClip(path GeometryPath, paint Paint, matrix Ma
 	return c.geometry.Transform(local, view)
 }
 
-// paintVisible 判断画刷是否产生可见输出
-// 入参: paint 画刷
-// 返回: bool 是否可见
-func paintVisible(paint Paint) bool {
-	return paint.Kind != PaintNone && (paint.Kind != PaintSolid || paint.Color.A != 0)
-}
-
-// matrixIsSimilarity 判断二维线性矩阵是否为非退化相似变换
-// 入参: m 变换矩阵
-// 返回: bool 是否为等比正交变换
-func matrixIsSimilarity(m Matrix) bool {
-	s1 := m.a*m.a + m.b*m.b
-	s2 := m.c*m.c + m.d*m.d
-	if s1 <= 0 || s2 <= 0 {
-		return false
-	}
-	dot := m.a*m.c + m.b*m.d
-	ref := max(s1, s2, 1e-12)
-	return math.Abs(s1-s2) <= 1e-6*ref && math.Abs(dot) <= 1e-6*ref
-}
-
 // localStrokeWidth 按页面设备最小线宽约束折算对象局部描边线宽
 // 入参: width 对象局部线宽, linear 线性变换矩阵
 // 返回: float64 修正后的局部线宽
@@ -828,64 +914,4 @@ func (r *Renderer) localStrokeWidth(width float64, linear Matrix) float64 {
 		}
 	}
 	return width
-}
-
-// semanticGradient 保留渐变周期、延伸与椭圆坐标
-// 入参: paint 渐变画刷, matrix 渐变父矩阵
-// 返回: *RasterGradient 光栅渐变, Matrix 局部到页面矩阵
-func semanticGradient(paint Paint, matrix Matrix) (*RasterGradient, Matrix) {
-	s := paint.Gradient
-	extend, _ := strconv.Atoi(s.Extend)
-	period := 1.0
-	length := math.Hypot(s.End.X-s.Start.X, s.End.Y-s.Start.Y)
-	if s.MapUnit > 0 && length > 0 {
-		period = s.MapUnit / length
-	}
-	g := &RasterGradient{Start: RasterPoint{s.Start.X, s.Start.Y}, End: RasterPoint{s.End.X, s.End.Y}, R0: s.StartRadius, R1: s.EndRadius, Stops: s.Stops, Spread: &RasterSpread{Extend: extend, MapType: s.MapType, Period: period}}
-	g.Sample = s.Sample
-	if paint.Kind == PaintRadial {
-		g.Kind = RasterRadial
-		if s.Eccentricity > 0 && s.Eccentricity < 1 {
-			angle := s.Angle * math.Pi / 180
-			view := TranslationMatrix(s.Start.X, s.Start.Y).Multiply(Matrix{a: math.Cos(angle), b: math.Sin(angle), c: -math.Sin(angle), d: math.Cos(angle)}).Multiply(Matrix{a: 1, d: math.Sqrt(1 - s.Eccentricity*s.Eccentricity)}).Multiply(TranslationMatrix(-s.Start.X, -s.Start.Y))
-			inverse, _ := view.Invert()
-			g.End.X, g.End.Y = inverse.Transform(g.End.X, g.End.Y)
-			matrix = matrix.Multiply(view)
-		}
-	}
-	return g, matrix
-}
-
-// reflectShdPosition 获取镜像周期内的位置
-// 入参: position 渐变位置
-// 返回: float64 周期内的位置
-func reflectShdPosition(position float64) float64 {
-	index := math.Floor(position)
-	position -= index
-	if math.Mod(index, 2) != 0 {
-		return 1 - position
-	}
-	return position
-}
-
-// geometryCircle 构建标准圆弧，不提前折线化
-// 入参: center 圆心, radius 半径
-// 返回: GeometryPath 圆路径
-func geometryCircle(center RasterPoint, radius float64) GeometryPath {
-	return GeometryPath{
-		{Verb: GeometryMove, End: Point{X: center.X + radius, Y: center.Y}},
-		{Verb: GeometryArc, RadiusX: radius, RadiusY: radius, Sweep: true, End: Point{X: center.X - radius, Y: center.Y}},
-		{Verb: GeometryArc, RadiusX: radius, RadiusY: radius, Sweep: true, End: Point{X: center.X + radius, Y: center.Y}},
-		{Verb: GeometryClose},
-	}
-}
-
-// fillAlphaByte 将可选对象透明度转换为预乘黑色Alpha字节
-// 入参: alpha 对象透明度
-// 返回: uint8 Alpha字节
-func fillAlphaByte(alpha *int) uint8 {
-	if alpha == nil {
-		return 255
-	}
-	return uint8(clampColor(*alpha))
 }

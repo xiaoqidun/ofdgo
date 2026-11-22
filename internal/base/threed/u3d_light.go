@@ -45,6 +45,77 @@ type u3dRenderStyle struct {
 	opacity, exponent                    float64
 }
 
+// u3dFragmentColor 对点、线、面的插值颜色应用透明度测试和相机空间雾效
+// 入参: color 待更新的未预乘颜色, position 相机位置, shader 着色器, pass 绘制轮次
+// 返回: bool 是否绘制, error 非有限颜色错误
+func u3dFragmentColor(color *[4]float64, position u3dVector, shader *U3DShader, pass *U3DViewPass) (bool, error) {
+	for _, value := range color {
+		if !finite(value) {
+			return false, fmt.Errorf("invalid U3D fragment color")
+		}
+	}
+	color[3] = min(1, max(0, color[3]))
+	if shader.Attributes&2 != 0 && !u3dAlphaTest(shader.AlphaFunction, color[3], float64(shader.AlphaReference)) {
+		return false, nil
+	}
+	if pass.Attributes&1 != 0 {
+		distance := math.Hypot(math.Hypot(position[0], position[1]), position[2])
+		var factor float64
+		if pass.FogMode == 0 {
+			span := float64(pass.FogFar) - float64(pass.FogNear)
+			if !finite(span) || span <= 0 {
+				return false, fmt.Errorf("invalid U3D fog range")
+			}
+			factor = (float64(pass.FogFar) - distance) / span
+		} else {
+			if !finite(float64(pass.FogFar)) || pass.FogFar <= 0 {
+				return false, fmt.Errorf("invalid U3D fog range")
+			}
+			amount := distance * math.Log(100) / float64(pass.FogFar)
+			if pass.FogMode == 2 {
+				amount *= amount
+			}
+			factor = math.Exp(-amount)
+		}
+		if !finite(factor) {
+			return false, fmt.Errorf("invalid U3D fog factor")
+		}
+		factor = min(1, max(0, factor))
+		for c := range 3 {
+			color[c] = color[c]*factor + float64(pass.FogColor[c])*(1-factor)
+		}
+	}
+	for c := range 3 {
+		color[c] = min(1, max(0, color[c]))
+	}
+	return true, nil
+}
+
+// u3dAlphaTest 按ECMA-363枚举比较透明度，不套用图形接口的枚举顺序
+// 入参: function 比较函数, value 透明度, reference 参考值
+// 返回: bool 是否通过
+func u3dAlphaTest(function uint32, value, reference float64) bool {
+	switch function {
+	case 0x610:
+		return false
+	case 0x611:
+		return value < reference
+	case 0x612:
+		return value > reference
+	case 0x613:
+		return value == reference
+	case 0x614:
+		return value != reference
+	case 0x615:
+		return value <= reference
+	case 0x616:
+		return value >= reference
+	case 0x617:
+		return true
+	}
+	return false
+}
+
 // collectLights 收集本轮根节点下启用的光源实例
 // 返回: error 参数、预算或取消错误
 func (r *Renderer) collectLights() error {
@@ -317,63 +388,4 @@ func (r *Renderer) shade(position, normal u3dVector, style u3dRenderStyle, diffu
 		}
 	}
 	return color, nil
-}
-
-// u3dFragmentColor 对点、线、面的插值颜色应用透明度测试和相机空间雾效
-// 入参: color 待更新的未预乘颜色, position 相机位置, shader 着色器, pass 绘制轮次
-// 返回: bool 是否绘制, error 非有限颜色错误
-func u3dFragmentColor(color *[4]float64, position u3dVector, shader *U3DShader, pass *U3DViewPass) (bool, error) {
-	for _, value := range color {
-		if !finite(value) {
-			return false, fmt.Errorf("invalid U3D fragment color")
-		}
-	}
-	color[3] = min(1, max(0, color[3]))
-	if shader.Attributes&2 != 0 && !u3dAlphaTest(shader.AlphaFunction, color[3], float64(shader.AlphaReference)) {
-		return false, nil
-	}
-	if pass.Attributes&1 != 0 {
-		distance := math.Hypot(math.Hypot(position[0], position[1]), position[2])
-		factor := (float64(pass.FogFar) - distance) / (float64(pass.FogFar) - float64(pass.FogNear))
-		if pass.FogMode != 0 {
-			amount := distance * math.Log(100) / float64(pass.FogFar)
-			if pass.FogMode == 2 {
-				amount *= amount
-			}
-			factor = math.Exp(-amount)
-		}
-		factor = min(1, max(0, factor))
-		for c := range 3 {
-			color[c] = color[c]*factor + float64(pass.FogColor[c])*(1-factor)
-		}
-	}
-	for c := range 3 {
-		color[c] = min(1, max(0, color[c]))
-	}
-	return true, nil
-}
-
-// u3dAlphaTest 按ECMA-363枚举比较透明度，不套用图形接口的枚举顺序
-// 入参: function 比较函数, value 透明度, reference 参考值
-// 返回: bool 是否通过
-func u3dAlphaTest(function uint32, value, reference float64) bool {
-	switch function {
-	case 0x610:
-		return false
-	case 0x611:
-		return value < reference
-	case 0x612:
-		return value > reference
-	case 0x613:
-		return value == reference
-	case 0x614:
-		return value != reference
-	case 0x615:
-		return value <= reference
-	case 0x616:
-		return value >= reference
-	case 0x617:
-		return true
-	}
-	return false
 }

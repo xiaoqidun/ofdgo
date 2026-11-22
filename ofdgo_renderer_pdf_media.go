@@ -48,6 +48,37 @@ type pdfMovieAction struct {
 	Operation int
 }
 
+// pdfVideoContentType 转换明确声明的视频格式，未知格式留待检查文件头
+// 入参: media 视频资源
+// 返回: string 媒体类型，无法确定时为空
+func pdfVideoContentType(media MultiMedia) string {
+	format := strings.ToLower(strings.TrimSpace(media.Format))
+	if format == "" {
+		format = strings.TrimPrefix(strings.ToLower(path.Ext(media.MediaFile)), ".")
+	}
+	switch format {
+	case "mp4", "m4v":
+		return "video/mp4"
+	case "mpeg", "mpg":
+		return "video/mpeg"
+	case "mov", "qt":
+		return "video/quicktime"
+	case "webm":
+		return "video/webm"
+	case "ogv", "ogg":
+		return "video/ogg"
+	case "avi":
+		return "video/x-msvideo"
+	case "wmv":
+		return "video/x-ms-wmv"
+	case "3gp":
+		return "video/3gpp"
+	case "3g2":
+		return "video/3gpp2"
+	}
+	return ""
+}
+
 // values 将资源控制关联到全部播放区域，重新播放前停止同一资源的其他实例
 // 返回: []pdfgo.NavigationAction 有序呈现动作
 func (a *pdfMovieAction) values() []pdfgo.NavigationAction {
@@ -275,35 +306,4 @@ func (n *pdfNavigation) writeVideo(ctx context.Context, pages []pdfgo.Reference,
 		}
 	}
 	return ctx.Err()
-}
-
-// pdfVideoContentType 转换明确声明的视频格式，未知格式留待检查文件头
-// 入参: media 视频资源
-// 返回: string 媒体类型，无法确定时为空
-func pdfVideoContentType(media MultiMedia) string {
-	format := strings.ToLower(strings.TrimSpace(media.Format))
-	if format == "" {
-		format = strings.TrimPrefix(strings.ToLower(path.Ext(media.MediaFile)), ".")
-	}
-	switch format {
-	case "mp4", "m4v":
-		return "video/mp4"
-	case "mpeg", "mpg":
-		return "video/mpeg"
-	case "mov", "qt":
-		return "video/quicktime"
-	case "webm":
-		return "video/webm"
-	case "ogv", "ogg":
-		return "video/ogg"
-	case "avi":
-		return "video/x-msvideo"
-	case "wmv":
-		return "video/x-ms-wmv"
-	case "3gp":
-		return "video/3gpp"
-	case "3g2":
-		return "video/3gpp2"
-	}
-	return ""
 }

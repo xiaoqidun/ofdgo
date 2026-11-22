@@ -33,6 +33,153 @@ type DocumentImportOptions struct {
 	OnProgress     func(stage string, completed, total int) error
 }
 
+// editorDocumentImport 保存文档依赖及原始引用位置
+type editorDocumentImport struct {
+	ctx      context.Context
+	source   *Reader
+	files    map[string]*versionEditFile
+	borrowed map[string]bool
+	kinds    map[string]int
+	queue    []string
+	progress editorProgress
+}
+
+// documentImportVersion 合并OFD格式版本
+// 入参: target 目标版本, source 来源版本
+// 返回: string 合并版本, error 版本错误
+func documentImportVersion(target, source string) (string, error) {
+	if source == "" || source == target {
+		return target, nil
+	}
+	if target == "" {
+		return source, nil
+	}
+	if (source == "1.0" || source == "1.1") && (target == "1.0" || target == "1.1") {
+		return "1.1", nil
+	}
+	return "", fmt.Errorf("cannot merge OFD versions %q and %q", target, source)
+}
+
+// documentImportOccupied 保留目标全部文档及版本的已声明路径
+// 入参: ctx 取消上下文, reader 目标阅读器, data 根索引原文, root 根索引节点
+// 返回: map[string][]byte 占用路径, error 扫描错误
+func documentImportOccupied(ctx context.Context, reader *Reader, data []byte, root *editorXML) (map[string][]byte, error) {
+	migration := &editorDocumentImport{ctx: ctx, source: reader, files: make(map[string]*versionEditFile),
+		kinds: make(map[string]int), progress: editorProgress(nil).withContext(ctx)}
+	file := &versionEditFile{reader: reader, name: "OFD.xml", data: data}
+	for _, body := range root.children {
+		if body.matchesOFD("DocBody") {
+			if err := migration.collect(file, root, body, ""); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := migration.load(true); err != nil {
+		return nil, err
+	}
+	occupied := make(map[string][]byte, len(migration.kinds))
+	for name := range migration.kinds {
+		occupied[name] = nil
+	}
+	return occupied, nil
+}
+
+// documentImportTopDirs 收集目标包已占用的顶层目录与根级条目名称（小写规范化）
+// 入参: reader 目标阅读器, occupied 目标文档已声明路径
+// 返回: map[string]bool 已占用的顶层名称集合
+func documentImportTopDirs(reader *Reader, occupied map[string][]byte) map[string]bool {
+	used := make(map[string]bool)
+	record := func(raw string) {
+		clean := cleanPackagePath(raw)
+		if clean == "" || clean == "." || clean == "OFD.xml" {
+			return
+		}
+		top, _, _ := strings.Cut(clean, "/")
+		if top != "" {
+			used[strings.ToLower(top)] = true
+		}
+	}
+	for name := range occupied {
+		record(name)
+	}
+	for name := range reader.fileNames {
+		record(name)
+	}
+	for name := range reader.files {
+		record(name)
+	}
+	return used
+}
+
+// documentImportSourceTopDirs 提取待导入文档集合使用的独立顶层目录列表及是否存在根级文档入口
+// 入参: ofdData 来源OFD.xml原文, root 来源OFD根节点, indexes 待导入文档索引, migration 已收集的依赖迁移状态
+// 返回: []string 有序去重的顶层目录名, bool 是否存在包根目录文档
+func documentImportSourceTopDirs(ofdData []byte, root *editorXML, indexes []int, migration *editorDocumentImport) ([]string, bool) {
+	var tops []string
+	seen := make(map[string]bool)
+	hasRootDoc := false
+	addPath := func(loc string) {
+		clean := cleanPackagePath(loc)
+		if !validPackagePath(clean) {
+			return
+		}
+		if top, _, ok := strings.Cut(clean, "/"); ok {
+			if !seen[top] {
+				seen[top] = true
+				tops = append(tops, top)
+			}
+		} else {
+			hasRootDoc = true
+		}
+	}
+	for _, index := range indexes {
+		body := root.childAt("DocBody", index)
+		if body == nil {
+			continue
+		}
+		if docRoot := body.child("DocRoot"); docRoot != nil {
+			addPath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, docRoot)))
+		}
+		if sig := body.child("Signatures"); sig != nil {
+			addPath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, sig)))
+		}
+		if info := body.child("DocInfo"); info != nil {
+			if cover := info.child("Cover"); cover != nil {
+				addPath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, cover)))
+			}
+		}
+		if versions := body.child("Versions"); versions != nil {
+			for _, ver := range versions.children {
+				if !ver.matchesOFD("Version") {
+					continue
+				}
+				verLoc := resolveResourcePath("OFD.xml", "", ver.attr("BaseLoc"))
+				addPath(verLoc)
+				if vf := migration.files[verLoc]; vf != nil {
+					for _, link := range vf.links {
+						if link.attribute == "" && link.node != nil && link.node.matchesOFD("DocRoot") {
+							addPath(link.target)
+						}
+					}
+				}
+			}
+		}
+	}
+	return tops, hasRootDoc
+}
+
+// nextDocumentImportTopDir 按Doc_N命名序列分配尚未被占用的顶层目录名
+// 入参: used 已占用的顶层名称集合（小写键）
+// 返回: string 新的独立顶层目录名
+func nextDocumentImportTopDir(used map[string]bool) string {
+	for n := 0; ; n++ {
+		candidate := "Doc_" + strconv.Itoa(n)
+		if !used[strings.ToLower(candidate)] {
+			return candidate
+		}
+	}
+}
+
 // ImportDocuments 导入整文档及历史版本并选中首项
 // 入参: source 来源阅读器, indexes 从0开始的文档索引，nil表示全部，空切片不导入, at 从0开始的插入位置，可等于文档数
 // 返回: []int 新文档索引, error 导入错误
@@ -246,17 +393,6 @@ func (e *Editor) ImportDocumentsContext(ctx context.Context, source *Reader, ind
 	return result, nil
 }
 
-// editorDocumentImport 保存文档依赖及原始引用位置
-type editorDocumentImport struct {
-	ctx      context.Context
-	source   *Reader
-	files    map[string]*versionEditFile
-	borrowed map[string]bool
-	kinds    map[string]int
-	queue    []string
-	progress editorProgress
-}
-
 // reference 记录已解析的包内引用并调度结构文件
 // 入参: file 来源文件, node 引用节点, attribute 属性名, base 资源目录, value 引用值, kind 引用类别
 // 返回: error 路径错误
@@ -376,140 +512,4 @@ func (m *editorDocumentImport) load(structuresOnly bool) error {
 		}
 	}
 	return m.progress.report("resources", len(m.files), len(m.files))
-}
-
-// documentImportVersion 合并OFD格式版本
-// 入参: target 目标版本, source 来源版本
-// 返回: string 合并版本, error 版本错误
-func documentImportVersion(target, source string) (string, error) {
-	if source == "" || source == target {
-		return target, nil
-	}
-	if target == "" {
-		return source, nil
-	}
-	if (source == "1.0" || source == "1.1") && (target == "1.0" || target == "1.1") {
-		return "1.1", nil
-	}
-	return "", fmt.Errorf("cannot merge OFD versions %q and %q", target, source)
-}
-
-// documentImportOccupied 保留目标全部文档及版本的已声明路径
-// 入参: ctx 取消上下文, reader 目标阅读器, data 根索引原文, root 根索引节点
-// 返回: map[string][]byte 占用路径, error 扫描错误
-func documentImportOccupied(ctx context.Context, reader *Reader, data []byte, root *editorXML) (map[string][]byte, error) {
-	migration := &editorDocumentImport{ctx: ctx, source: reader, files: make(map[string]*versionEditFile),
-		kinds: make(map[string]int), progress: editorProgress(nil).withContext(ctx)}
-	file := &versionEditFile{reader: reader, name: "OFD.xml", data: data}
-	for _, body := range root.children {
-		if body.matchesOFD("DocBody") {
-			if err := migration.collect(file, root, body, ""); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if err := migration.load(true); err != nil {
-		return nil, err
-	}
-	occupied := make(map[string][]byte, len(migration.kinds))
-	for name := range migration.kinds {
-		occupied[name] = nil
-	}
-	return occupied, nil
-}
-
-// documentImportTopDirs 收集目标包已占用的顶层目录与根级条目名称（小写规范化）
-// 入参: reader 目标阅读器, occupied 目标文档已声明路径
-// 返回: map[string]bool 已占用的顶层名称集合
-func documentImportTopDirs(reader *Reader, occupied map[string][]byte) map[string]bool {
-	used := make(map[string]bool)
-	record := func(raw string) {
-		clean := cleanPackagePath(raw)
-		if clean == "" || clean == "." || clean == "OFD.xml" {
-			return
-		}
-		top, _, _ := strings.Cut(clean, "/")
-		if top != "" {
-			used[strings.ToLower(top)] = true
-		}
-	}
-	for name := range occupied {
-		record(name)
-	}
-	for name := range reader.fileNames {
-		record(name)
-	}
-	for name := range reader.files {
-		record(name)
-	}
-	return used
-}
-
-// documentImportSourceTopDirs 提取待导入文档集合使用的独立顶层目录列表及是否存在根级文档入口
-// 入参: ofdData 来源OFD.xml原文, root 来源OFD根节点, indexes 待导入文档索引, migration 已收集的依赖迁移状态
-// 返回: []string 有序去重的顶层目录名, bool 是否存在包根目录文档
-func documentImportSourceTopDirs(ofdData []byte, root *editorXML, indexes []int, migration *editorDocumentImport) ([]string, bool) {
-	var tops []string
-	seen := make(map[string]bool)
-	hasRootDoc := false
-	addPath := func(loc string) {
-		clean := cleanPackagePath(loc)
-		if !validPackagePath(clean) {
-			return
-		}
-		if top, _, ok := strings.Cut(clean, "/"); ok {
-			if !seen[top] {
-				seen[top] = true
-				tops = append(tops, top)
-			}
-		} else {
-			hasRootDoc = true
-		}
-	}
-	for _, index := range indexes {
-		body := root.childAt("DocBody", index)
-		if body == nil {
-			continue
-		}
-		if docRoot := body.child("DocRoot"); docRoot != nil {
-			addPath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, docRoot)))
-		}
-		if sig := body.child("Signatures"); sig != nil {
-			addPath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, sig)))
-		}
-		if info := body.child("DocInfo"); info != nil {
-			if cover := info.child("Cover"); cover != nil {
-				addPath(resolveResourcePath("OFD.xml", "", editorImportText(ofdData, cover)))
-			}
-		}
-		if versions := body.child("Versions"); versions != nil {
-			for _, ver := range versions.children {
-				if !ver.matchesOFD("Version") {
-					continue
-				}
-				verLoc := resolveResourcePath("OFD.xml", "", ver.attr("BaseLoc"))
-				addPath(verLoc)
-				if vf := migration.files[verLoc]; vf != nil {
-					for _, link := range vf.links {
-						if link.attribute == "" && link.node != nil && link.node.matchesOFD("DocRoot") {
-							addPath(link.target)
-						}
-					}
-				}
-			}
-		}
-	}
-	return tops, hasRootDoc
-}
-
-// nextDocumentImportTopDir 按Doc_N命名序列分配尚未被占用的顶层目录名
-// 入参: used 已占用的顶层名称集合（小写键）
-// 返回: string 新的独立顶层目录名
-func nextDocumentImportTopDir(used map[string]bool) string {
-	for n := 0; ; n++ {
-		candidate := "Doc_" + strconv.Itoa(n)
-		if !used[strings.ToLower(candidate)] {
-			return candidate
-		}
-	}
 }

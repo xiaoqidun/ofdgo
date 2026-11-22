@@ -249,7 +249,9 @@ export function createPageView(context) {
 		},
 
 		scrollPageWindowBy(view, delta) {
-			if (view) pageView.syncPageWindow(view, pageView.pageWindowTop(view) + delta);
+			if (!view) return;
+			pageView.syncPageWindow(view, pageView.pageWindowTop(view) + delta);
+			if (view === context.state.pageWindow && view.total > SCROLL_SEGMENT_SIZE) pageView.schedulePageSync();
 		},
 
 		scrollViewerBy(delta) {
@@ -365,6 +367,9 @@ export function createPageView(context) {
 			shell.className = "page-shell";
 			shell.dataset.pageIndex = String(page.index);
 			shell.dataset.spreadCol = String(page.index % 2);
+			const pageCount = context.state.doc?.pageCount || 0;
+			if (context.state.pageLayout > 1 && page.index % 2 === 0 && page.index + 1 < pageCount) shell.dataset.spreadPair = "1";
+			else delete shell.dataset.spreadPair;
 			const surface = document.createElement("div");
 			surface.className = "page-surface";
 			const placeholder = document.createElement("div");
@@ -394,16 +399,23 @@ export function createPageView(context) {
 
 		resetPageFlow(keepCache = false) {
 			context.state.pageNavigation = null;
+			context.state.selectedPages.clear();
+			context.state.documentSelection = null;
+			context.state.visiblePages.clear();
+			context.state.thumbnailWindow = null;
+			context.state.pageListCurrent = null;
+			context.state.pageListPair = -1;
+			context.el.pageList.removeAttribute("data-page-selection");
+			context.el.pageList.replaceChildren();
+			context.el.pageList.style.height = "";
+			context.el.pageList.classList.remove("virtual-pages", "grouped-pages");
+			pageView.resetPageLoading();
 			context.state.detachedPages.clear();
 			if (!keepCache) {
 				context.state.pageCache.clear();
 				context.state.thumbCache.clear();
 				pageView.releasePageResources();
 			}
-			context.state.selectedPages.clear();
-			context.state.documentSelection = null;
-			context.state.visiblePages.clear();
-			pageView.resetPageLoading();
 		},
 
 		cancelPageTask(task) {
@@ -530,7 +542,7 @@ export function createPageView(context) {
 				if (svg) {
 					const fragment = document.createDocumentFragment();
 					for (const child of [...surface.childNodes]) {
-						if (child.classList?.contains("search-highlight")) child.remove();
+						if (child.classList?.contains("search-highlight") || child.classList?.contains("region-highlight")) child.remove();
 						else fragment.append(child);
 					}
 					const detached = context.state.detachedPages;
@@ -617,6 +629,8 @@ export function createPageView(context) {
 					}
 					const previousResolve = current.resolve;
 					const previousReject = current.reject;
+					current.resolve = () => {};
+					current.reject = () => {};
 					current.canceled = true;
 					current.controller?.abort();
 					if (current.requestID) {
@@ -713,13 +727,24 @@ export function createPageView(context) {
 							[...state.svgFonts.keys()], [...state.svgImages.keys()], task.preview, priority];
 						const page = await context.callRenderPage(args, task);
 						if (task.canceled || context.activeTab !== tab || state.pageInFlight.get(task.key) !== task || task.openSeq !== state.openSeq) {
+							if (page?.svgUrl) nativeHost?.call("release", { svgUrl: page.svgUrl }).catch(() => {});
 							task.resolve(null);
 							continue;
 						}
 						if (page.svgUrl) {
-							const response = await fetch(page.svgUrl, { signal: task.controller.signal });
-							if (!response.ok) throw new Error("读取页面矢量失败");
-							page.svg = await response.text();
+							try {
+								const response = await fetch(page.svgUrl, { signal: task.controller.signal });
+								if (task.canceled || context.activeTab !== tab || state.pageInFlight.get(task.key) !== task || task.openSeq !== state.openSeq) {
+									response.body?.cancel?.().catch(() => {});
+									task.resolve(null);
+									continue;
+								}
+								if (!response.ok) throw new Error("读取页面矢量失败");
+								page.svg = await response.text();
+							} catch (err) {
+								if (task.canceled || err?.name === "AbortError") nativeHost?.call("release", { svgUrl: page.svgUrl }).catch(() => {});
+								throw err;
+							}
 						} else if (typeof page.svg !== "string") {
 							page.svg = "";
 						}
@@ -732,55 +757,60 @@ export function createPageView(context) {
 							task.resolve(null);
 							continue;
 						}
-						await pageView.loadSVGFonts(page.fonts || [], task.openSeq);
+						await pageView.loadSVGFonts(page.fonts || [], task.openSeq, tab, state);
 						for (const font of page.fonts || []) delete font.data;
-						if (!task.canceled && task.openSeq === state.openSeq && state.pageInFlight.get(task.key) === task) {
-							const images = page.images || [];
-							for (const image of images) {
-								if (!state.svgImages.has(image.name)) {
-									if (image.url) {
-										state.svgImages.set(image.name, { url: image.url, size: image.size || 0, native: true });
-									} else if (image.bytes) {
-										const blob = new Blob([image.bytes], { type: image.mime });
-										state.svgImages.set(image.name, { url: URL.createObjectURL(blob), size: blob.size, native: false });
-									}
-								}
+						if (task.canceled || context.activeTab !== tab || task.openSeq !== state.openSeq || state.pageInFlight.get(task.key) !== task) {
+							task.resolve(null);
+							continue;
+						}
+						const images = page.images || [];
+						for (const image of images) {
+							if (image.url) {
+								const existing = state.svgImages.get(image.name);
+								if (existing && !existing.native) URL.revokeObjectURL(existing.url);
+								state.svgImages.set(image.name, { url: image.url, size: image.size || 0, native: true });
+							} else if (image.bytes && !state.svgImages.has(image.name)) {
+								const blob = new Blob([image.bytes], { type: image.mime });
+								state.svgImages.set(image.name, { url: URL.createObjectURL(blob), size: blob.size, native: false });
 							}
-							page.imageNames = images.map((image) => image.name);
-							delete page.images;
-							if (task.refresh && state.editing) {
-								await Promise.all(page.imageNames.map(name => {
-									const entry = state.svgImages.get(name);
-									if (!entry) return Promise.resolve();
-									const image = new Image();
-									image.src = entry.url;
-									return image.decode().catch(() => {});
-								}));
-							}
-							if (task.canceled || task.openSeq !== state.openSeq || state.pageInFlight.get(task.key) !== task) {
-								task.resolve(null);
-								continue;
-							}
-							const rawTextLen = typeof page.text === "string" ? page.text.length : 0;
-							const rawAnnLen = typeof page.annotations === "string" ? page.annotations.length : 0;
-							if (typeof page.text === "string") page.text = page.text ? JSON.parse(page.text) : { runs: [] };
-							else if (!page.text) page.text = { runs: [] };
-							if (typeof page.annotations === "string") page.annotations = page.annotations ? JSON.parse(page.annotations) : [];
-							else if (!page.annotations) page.annotations = [];
-							page.cacheBytes = (page.svg.length + rawTextLen + rawAnnLen) * 2
-								+ (rawTextLen ? 0 : (page.text.runs?.length || 0) * 128)
-								+ (rawAnnLen ? 0 : page.annotations.length * 128);
-							if (task.preview) {
-								page.previewOnly = true;
-								state.thumbCache.delete(task.index);
-								state.thumbCache.set(task.index, page);
-							} else {
-								page.previewOnly = false;
-								state.thumbCache.delete(task.index);
-								state.detachedPages.delete(task.index);
-								state.pageCache.delete(task.index);
-								state.pageCache.set(task.index, page);
-							}
+						}
+						page.imageNames = images.map((image) => image.name);
+						delete page.images;
+						if (task.refresh && state.editing) {
+							await Promise.all(page.imageNames.map(name => {
+								const entry = state.svgImages.get(name);
+								if (!entry) return Promise.resolve();
+								const image = new Image();
+								image.src = entry.url;
+								return image.decode().catch(() => {});
+							}));
+						}
+						if (task.canceled || context.activeTab !== tab || task.openSeq !== state.openSeq || state.pageInFlight.get(task.key) !== task) {
+							task.resolve(null);
+							continue;
+						}
+						const rawTextLen = typeof page.text === "string" ? page.text.length : 0;
+						const rawAnnLen = typeof page.annotations === "string" ? page.annotations.length : 0;
+						if (typeof page.text === "string") page.text = page.text ? JSON.parse(page.text) : { runs: [] };
+						else if (!page.text) page.text = { runs: [] };
+						if (typeof page.annotations === "string") page.annotations = page.annotations ? JSON.parse(page.annotations) : [];
+						else if (!page.annotations) page.annotations = [];
+						page.cacheBytes = (page.svg.length + rawTextLen + rawAnnLen) * 2
+							+ (rawTextLen ? 0 : (page.text.runs?.length || 0) * 128)
+							+ (rawAnnLen ? 0 : page.annotations.length * 128);
+						if (typeof page.hasOpenAction === "boolean") {
+							context.setPageOpenAction?.(task.index, page.hasOpenAction, !task.preview);
+						}
+						if (task.preview) {
+							page.previewOnly = true;
+							state.thumbCache.delete(task.index);
+							state.thumbCache.set(task.index, page);
+						} else {
+							page.previewOnly = false;
+							state.thumbCache.delete(task.index);
+							state.detachedPages.delete(task.index);
+							state.pageCache.delete(task.index);
+							state.pageCache.set(task.index, page);
 						}
 						task.resolve(page);
 					} catch (err) {
@@ -794,7 +824,7 @@ export function createPageView(context) {
 			} finally {
 				if (--state.pageRenderWorkers === 0) {
 					state.pageRenderRunning = false;
-					if (context.activeTab === tab && !state.pageInFlight.size) pageView.releasePageResources();
+					if (!state.pageInFlight.size) pageView.releasePageResources(state);
 					if (context.activeTab === tab && state.pageRenderQueue.length) pageView.schedulePageRender();
 				}
 			}
@@ -818,33 +848,43 @@ export function createPageView(context) {
 			for (const task of state.pageInFlight.values()) {
 				if (task.preview) protectedThumbs.add(task.index);
 			}
-			const references = new Map(), fontReferences = new Map();
-			let pageBytes = 0, thumbBytes = 0;
-			const countRefs = (page) => {
-				for (const name of page.imageNames || []) references.set(name, (references.get(name) || 0) + 1);
+			const references = new Map(), pageImageRefs = new Map(), fontReferences = new Map();
+			let pageBytes = 0, thumbBytes = 0, thumbExclusiveImageBytes = 0;
+			const countRefs = (page, isPage) => {
+				for (const name of page.imageNames || []) {
+					references.set(name, (references.get(name) || 0) + 1);
+					if (isPage) pageImageRefs.set(name, (pageImageRefs.get(name) || 0) + 1);
+				}
 				for (const font of page.fonts || []) fontReferences.set(font.name, (fontReferences.get(font.name) || 0) + 1);
 			};
 			for (const page of state.pageCache.values()) {
 				pageBytes += page.cacheBytes || 0;
-				countRefs(page);
+				countRefs(page, true);
 			}
 			for (const page of state.thumbCache.values()) {
 				thumbBytes += page.cacheBytes || 0;
-				countRefs(page);
+				countRefs(page, false);
 			}
 			let sharedBytes = 0;
-			for (const image of state.svgImages.values()) sharedBytes += image.size || 0;
+			for (const [name, image] of state.svgImages) {
+				const size = image.size || 0;
+				sharedBytes += size;
+				if (!pageImageRefs.has(name) && references.has(name)) thumbExclusiveImageBytes += size;
+			}
 			for (const face of state.svgFonts.values()) sharedBytes += svgFontBytes.get(face) || 0;
-			const releaseUnused = (page) => {
+			const releaseUnused = (page, fromThumb = false) => {
 				for (const name of page.imageNames || []) {
 					const count = (references.get(name) || 0) - 1;
 					references.set(name, count);
-					if (count <= 0 && !state.pageInFlight.size) {
+					if (count <= 0) {
 						const image = state.svgImages.get(name);
 						if (image) {
-							sharedBytes -= image.size || 0;
-							if (!image.native) URL.revokeObjectURL(image.url);
-							state.svgImages.delete(name);
+							if (fromThumb && !pageImageRefs.has(name)) thumbExclusiveImageBytes = Math.max(0, thumbExclusiveImageBytes - (image.size || 0));
+							if (!state.pageInFlight.size) {
+								sharedBytes -= image.size || 0;
+								if (!image.native) URL.revokeObjectURL(image.url);
+								state.svgImages.delete(name);
+							}
 						}
 					}
 				}
@@ -864,11 +904,11 @@ export function createPageView(context) {
 			const budget = nativeHost?.cacheBytes || PAGE_CACHE_BYTES;
 			const thumbBudget = Math.max(THUMB_CACHE_BYTES, Math.min(48 << 20, Math.floor(budget / 4)));
 			for (const [index, page] of state.thumbCache) {
-				if (state.thumbCache.size <= THUMB_CACHE_LIMIT && thumbBytes <= thumbBudget) break;
+				if (state.thumbCache.size <= THUMB_CACHE_LIMIT && thumbBytes + thumbExclusiveImageBytes <= thumbBudget) break;
 				if (protectedThumbs.has(index)) continue;
 				state.thumbCache.delete(index);
 				thumbBytes -= page.cacheBytes || 0;
-				releaseUnused(page);
+				releaseUnused(page, true);
 			}
 			const pageLimit = Math.round(PAGE_CACHE_LIMIT * Math.max(1, budget / PAGE_CACHE_BYTES));
 			for (const [index, page] of state.pageCache) {
@@ -883,12 +923,13 @@ export function createPageView(context) {
 			pageView.trimWorkspaceCaches();
 		},
 
-		async loadSVGFonts(fonts, openSeq) {
-			const state = context.state, loadSeq = state.pageLoadSeq;
-			const current = () => state === context.state && openSeq === state.openSeq && loadSeq === state.pageLoadSeq;
+		async loadSVGFonts(fonts, openSeq, tab = context.activeTab, state = tab?.state || context.state) {
+			const loadSeq = state.pageLoadSeq;
+			const current = () => tab === context.activeTab && state === context.state && openSeq === state.openSeq && loadSeq === state.pageLoadSeq;
+			if (!current()) return;
 			for (let offset = 0; offset < fonts.length && current(); offset += 4) {
 				const results = await Promise.allSettled(fonts.slice(offset, offset + 4).map(async font => {
-					if (state.svgFonts.has(font.name)) return;
+					if (!current() || state.svgFonts.has(font.name)) return;
 					const key = `${openSeq}:${loadSeq}:${font.name}`;
 					while (current() && !state.svgFonts.has(font.name) && !state.svgFontLoads.has(key) && state.svgFontLoads.size >= 4) {
 						await Promise.race([...state.svgFontLoads.values()].map(loading => loading.catch(() => {})));
@@ -896,37 +937,45 @@ export function createPageView(context) {
 					if (!current() || state.svgFonts.has(font.name)) return;
 					let loading = state.svgFontLoads.get(key);
 					if (!loading) {
-						loading = pageView.loadSVGFont(font, openSeq, loadSeq);
+						loading = pageView.loadSVGFont(font, openSeq, loadSeq, tab, state);
 						state.svgFontLoads.set(key, loading);
 					}
 					try { await loading; }
 					finally { if (state.svgFontLoads.get(key) === loading) state.svgFontLoads.delete(key); }
 				}));
+				if (!current()) return;
 				const failed = results.find(result => result.status === "rejected");
 				if (failed) throw failed.reason;
 			}
 		},
 
-		async loadSVGFont(font, openSeq, loadSeq = context.state.pageLoadSeq) {
+		async loadSVGFont(font, openSeq, loadSeq = context.state.pageLoadSeq, tab = context.activeTab, state = tab?.state || context.state) {
+			const current = () => tab === context.activeTab && state === context.state && openSeq === state.openSeq && loadSeq === state.pageLoadSeq;
+			if (!current()) return;
 			let face;
 			let byteSize = font.size || 0;
 			if (font.url) {
 				face = new FontFace(font.name, `url("${font.url}")`, { weight: String(font.weight), style: font.style });
 			} else {
 				const data = font.data ? { bytes: font.data } : await context.callWASM("ofdgoSVGFontData", font.name);
-				if (openSeq !== context.state.openSeq || loadSeq !== context.state.pageLoadSeq) {
+				if (!current()) {
 					return;
 				}
-				byteSize = data.bytes?.byteLength || 0;
-				face = new FontFace(font.name, data.bytes, { weight: String(font.weight), style: font.style });
+				if (data?.url) {
+					byteSize = data.size || 0;
+					face = new FontFace(font.name, `url("${data.url}")`, { weight: String(font.weight), style: font.style });
+				} else {
+					byteSize = data?.bytes?.byteLength || 0;
+					face = new FontFace(font.name, data?.bytes, { weight: String(font.weight), style: font.style });
+				}
 			}
 			await face.load();
-			if (openSeq !== context.state.openSeq || loadSeq !== context.state.pageLoadSeq) {
+			if (!current()) {
 				return;
 			}
 			document.fonts.add(face);
 			svgFontBytes.set(face, byteSize);
-			context.state.svgFonts.set(font.name, face);
+			state.svgFonts.set(font.name, face);
 		},
 
 		comparePageRenderTask(a, b) {
@@ -1068,25 +1117,38 @@ export function createPageView(context) {
 			}
 		},
 
+		hydratePageTextLayer(index, shell = pageView.pageShell(index)) {
+			const state = context.state;
+			if (!state.doc || state.editing || !shell || shell.dataset.textPending !== "1") return false;
+			const page = state.pageCache.get(index);
+			if (!page) return false;
+			const surface = shell.querySelector(".page-surface");
+			if (!surface || surface.querySelector(":scope > .text-layer")) {
+				delete shell.dataset.textPending;
+				return true;
+			}
+			const svg = surface.querySelector(":scope > .ofd-svg");
+			const layer = pageView.createTextLayer(page.text);
+			if (svg?.nextSibling) surface.insertBefore(layer, svg.nextSibling);
+			else surface.append(layer);
+			delete shell.dataset.textPending;
+			context.renderSearchHighlights(index);
+			return true;
+		},
+
+		hydrateTargetTextLayer(event) {
+			if (!context.state.doc || context.state.editing) return;
+			const shell = event.target?.closest?.(".page-shell");
+			if (shell?.dataset.textPending === "1") pageView.hydratePageTextLayer(Number(shell.dataset.pageIndex), shell);
+		},
+
 		hydratePendingTextLayers() {
 			const state = context.state;
 			if (!state.doc || state.viewerFastScroll || state.editing) return;
-			for (const index of state.visiblePages) {
-				const shell = pageView.pageShell(index);
-				if (!shell || shell.dataset.textPending !== "1") continue;
-				const page = state.pageCache.get(index);
-				if (!page) continue;
-				const surface = shell.querySelector(".page-surface");
-				if (!surface || surface.querySelector(":scope > .text-layer")) {
-					delete shell.dataset.textPending;
-					continue;
-				}
-				const svg = surface.querySelector(":scope > .ofd-svg");
-				const layer = pageView.createTextLayer(page.text);
-				if (svg?.nextSibling) surface.insertBefore(layer, svg.nextSibling);
-				else surface.append(layer);
-				delete shell.dataset.textPending;
-				context.renderSearchHighlights(index);
+			const nodes = state.pageWindow?.nodes;
+			if (!nodes) return;
+			for (const [index, shell] of nodes) {
+				if (shell.dataset.textPending === "1") pageView.hydratePageTextLayer(index, shell);
 			}
 		},
 
@@ -1172,14 +1234,22 @@ export function createPageView(context) {
 							viewer.scrollLeft = Math.max(0, Math.min(maxLeft, targetLeft));
 						}
 					}
-					if (!context.state.pageNavigation) {
-						context.state.pageNavigation = { openSeq: context.state.openSeq, index, top: view.logicalTop, left: viewer.scrollLeft };
+					const nav = context.state.pageNavigation;
+					if (!nav) {
+						context.state.pageNavigation = { openSeq: context.state.openSeq, index, top: view.logicalTop, left: viewer.scrollLeft, internal: true };
+					} else if (nav.internal && nav.openSeq === context.state.openSeq && nav.index === index) {
+						nav.top = view.logicalTop;
+						nav.left = viewer.scrollLeft;
 					}
 					return;
 				}
 				viewer.scrollLeft = maxLeft / 2;
-				if (!context.state.pageNavigation) {
-					context.state.pageNavigation = { openSeq: context.state.openSeq, index, top: view.logicalTop, left: viewer.scrollLeft };
+				const nav = context.state.pageNavigation;
+				if (!nav) {
+					context.state.pageNavigation = { openSeq: context.state.openSeq, index, top: view.logicalTop, left: viewer.scrollLeft, internal: true };
+				} else if (nav.internal && nav.openSeq === context.state.openSeq && nav.index === index) {
+					nav.top = view.logicalTop;
+					nav.left = viewer.scrollLeft;
 				}
 				return;
 			}
@@ -1379,7 +1449,7 @@ export function createPageView(context) {
 			if (context.state.pageLayout === 1 || row.start === row.end) {
 				return pageView.pageShell(row.start);
 			}
-			const hostLeft = Math.max(0, (viewer.scrollWidth - view.hostWidth) / 2);
+			const hostLeft = Math.max(pageView.pageSpace(), (viewer.scrollWidth - view.hostWidth) / 2);
 			const current = context.state.pageIndex;
 			const visibleAreaOf = (index) => {
 				const pLeft = hostLeft + (view.lefts?.[index] || 0) - scrollLeft;
@@ -1638,6 +1708,9 @@ export function createPageView(context) {
 			shell.style.width = `${viewWidth * scale}px`;
 			shell.style.height = `${viewHeight * scale}px`;
 			shell.dataset.spreadCol = String(page.index % 2);
+			const pageCount = context.state.doc?.pageCount || 0;
+			if (context.state.pageLayout > 1 && page.index % 2 === 0 && page.index + 1 < pageCount) shell.dataset.spreadPair = "1";
+			else delete shell.dataset.spreadPair;
 			const surface = shell.querySelector(".page-surface");
 			if (surface) {
 				surface.style.width = `${width}px`;
@@ -1669,8 +1742,7 @@ export function createPageView(context) {
 			if (context.state.pageSelection.size) {
 				if (!context.state.editing) context.state.pageSelection.clear();
 				else {
-					const ids = new Set(context.state.doc.pages.map(page => page.id));
-					for (const id of context.state.pageSelection) if (!ids.has(id)) context.state.pageSelection.delete(id);
+					for (const id of context.state.pageSelection) if (context.pageIndexByID(context.state.doc.pages, id) < 0) context.state.pageSelection.delete(id);
 				}
 			}
 			context.state.thumbnailWindow = pageView.createPageWindow(context.el.pageList, context.el.navigationContent, 180, pageView.createThumbnail, pageView.releaseThumbnail, pageView.observeThumbnail);
@@ -1756,9 +1828,10 @@ export function createPageView(context) {
 					let rowPaperHeight = 0;
 					for (let index = start; index <= end; index++) {
 						const size = pageView.pageViewSize(pageView.pageInfo(index));
-						const pageScale = size.width > 0 ? innerWidth / size.width : 1;
+						const valid = size && size.width > 0 && size.height > 0 && Number.isFinite(size.width) && Number.isFinite(size.height);
+						const pageScale = valid ? innerWidth / size.width : 1;
 						view.scales[index] = pageScale;
-						rowPaperHeight = Math.max(rowPaperHeight, Math.max(1, size.height) * pageScale);
+						rowPaperHeight = Math.max(rowPaperHeight, valid ? Math.max(1, size.height) * pageScale : innerWidth / 0.707);
 					}
 					const height = rowPaperHeight + 66;
 					rowOffsets[rowIdx] = top;
@@ -1890,12 +1963,34 @@ export function createPageView(context) {
 		},
 
 		layoutThumbnail(button, page) {
-			if (!page || page.width <= 0 || page.height <= 0) {
+			if (!page) {
+				return;
+			}
+			const view = context.state.thumbnailWindow;
+			const fallbackHeight = view?.heights?.[page.index] || 180;
+			button.style.height = `${fallbackHeight}px`;
+			const valid = page.width > 0 && page.height > 0 && Number.isFinite(page.width) && Number.isFinite(page.height);
+			if (!valid) {
+				if (view?.scales) {
+					const innerWidth = Math.max(1, (view.itemWidth || 90) - 20);
+					button.style.width = `calc(50% - ${view.gap / 2}px)`;
+					button.style.setProperty("--thumb-paper-width", `${innerWidth}px`);
+					button.style.setProperty("--thumb-paper-height", `${Math.max(1, fallbackHeight - 66)}px`);
+				} else {
+					button.style.removeProperty("width");
+					button.style.removeProperty("left");
+					button.style.removeProperty("right");
+					button.style.removeProperty("transform");
+					button.style.removeProperty("--thumb-paper-width");
+					button.style.removeProperty("--thumb-paper-height");
+				}
+				button.style.setProperty("--thumb-ratio", "0.707 / 1");
+				button.style.setProperty("--thumb-width", "100%");
+				button.style.setProperty("--thumb-height", "100%");
+				button.style.setProperty("--thumb-rotation", `${context.state.rotation}deg`);
 				return;
 			}
 			const size = pageView.pageViewSize(page);
-			const view = context.state.thumbnailWindow;
-			button.style.height = `${view.heights[page.index]}px`;
 			if (view.scales) {
 				button.style.width = `calc(50% - ${view.gap / 2}px)`;
 				button.style.setProperty("--thumb-paper-width", `${size.width * view.scales[page.index]}px`);
@@ -2006,10 +2101,9 @@ export function createPageView(context) {
 				await pageView.queuePagePresentation(index, page, openSeq);
 				if (!current()) return;
 				pageView.trimPageCache();
-			} catch {
-				if (current()) {
-					pageView.markThumbnailError(index);
-				}
+			} catch (err) {
+				if (err?.name === "AbortError" || !current()) return;
+				pageView.markThumbnailError(index);
 			}
 		},
 
@@ -2411,6 +2505,7 @@ export function createPageView(context) {
 
 		releasePageResources(state = context.documentTab().state) {
 			if (state.pageInFlight.size) return;
+			const foreground = state === context.activeTab?.state;
 			const images = new Set(), fonts = new Set();
 			for (const pool of [state.pageCache, state.thumbCache]) {
 				if (!pool) continue;
@@ -2427,7 +2522,7 @@ export function createPageView(context) {
 			}
 			for (const [name, font] of state.svgFonts) {
 				if (!fonts.has(name)) {
-					document.fonts.delete(font);
+					if (foreground) document.fonts.delete(font);
 					state.svgFonts.delete(name);
 				}
 			}
@@ -2453,9 +2548,9 @@ export function createPageView(context) {
 
 		parseSVG(svgText, prefix = "", images = context.state.svgImages) {
 			let markup = svgText.includes("ofdgo-image-")
-				? svgText.replace(/xlink:href="(ofdgo-image-[a-f0-9]{64})"/g, (match, name) => {
+				? svgText.replace(/(\b(?:xlink:)?href)="(ofdgo-image-[a-f0-9]{64})"/g, (match, attr, name) => {
 					const entry = images.get(name);
-					return entry ? `xlink:href="${entry.url}"` : match;
+					return entry ? `${attr}="${entry.url}"` : "";
 				})
 				: svgText;
 			const hasLocalID = !!prefix && (markup.includes('id="') || markup.includes("id='"));
@@ -2464,19 +2559,15 @@ export function createPageView(context) {
 				const scopeMatch = /^([pt])\d+-(\d+)$/.exec(prefix);
 				if (scopeMatch) {
 					const kind = scopeMatch[1], pageIdx = scopeMatch[2];
-					const pagePrefix = `p${pageIdx}-`;
-					const unprefixed = new RegExp(`\\bid=["'](?!${pagePrefix})`);
-					if (!unprefixed.test(markup)) {
-						if (kind === "p") {
-							needsPrefixWalk = false;
-						} else {
+					const ownPrefix = `${kind}${pageIdx}-`;
+					if (!(new RegExp(`\\sid=["'](?!${ownPrefix})`)).test(markup)) {
+						needsPrefixWalk = false;
+					} else if (kind === "t") {
+						const pagePrefix = `p${pageIdx}-`;
+						if (!(new RegExp(`\\sid=["'](?!${pagePrefix})`)).test(markup)) {
 							const thumbPrefix = `${prefix}-`;
-							markup = markup
-								.replaceAll(`id="${pagePrefix}`, `id="${thumbPrefix}`)
-								.replaceAll(`id='${pagePrefix}`, `id='${thumbPrefix}`)
-								.replaceAll(`url(#${pagePrefix}`, `url(#${thumbPrefix}`)
-								.replaceAll(`href="#${pagePrefix}`, `href="#${thumbPrefix}`)
-								.replaceAll(`href='#${pagePrefix}`, `href='#${thumbPrefix}`);
+							const attrPattern = new RegExp(`(\\sid=["']|\\s(?:xlink:)?href=["']#|url\\(["']?#)${pagePrefix}`, "g");
+							markup = markup.replace(/<[^>]+>/g, tag => tag.replace(attrPattern, `$1${thumbPrefix}`));
 							needsPrefixWalk = false;
 						}
 					}
@@ -2507,9 +2598,9 @@ export function createPageView(context) {
 				return;
 			}
 			const replaceRef = (value) => {
-				let next = value.replace(/url\(#([^)]+)\)/g, (match, id) => {
+				let next = value.replace(/url\((['"]?)#([^)'"]+)\1\)/g, (match, quote, id) => {
 					const mapped = idMap.get(id);
-					return mapped ? `url(#${mapped})` : match;
+					return mapped ? `url(${quote}#${mapped}${quote})` : match;
 				});
 				if (next.startsWith("#")) {
 					const mapped = idMap.get(next.slice(1));

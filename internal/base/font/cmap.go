@@ -23,10 +23,23 @@ import (
 	"unicode/utf8"
 )
 
-// NormalizeCmap 转换扩展字符子表，保留各编码记录及原字形编号
+// cmapSegment cmap表段结构
+// 字段: start 开始字符, end 结束字符
+type cmapSegment struct {
+	start, end uint16
+}
+
+// cmapGroup 格式12连续字符映射区间组
+type cmapGroup struct {
+	startChar uint32
+	endChar   uint32
+	startGID  uint32
+}
+
+// normalizeCmap 转换扩展字符子表，保留各编码记录及原字形编号
 // 入参: data 字符映射表
 // 返回: []byte 等价字符映射表, error 子表错误
-func NormalizeCmap(data []byte) ([]byte, error) {
+func normalizeCmap(data []byte) ([]byte, error) {
 	if len(data) < 4 {
 		return data, nil
 	}
@@ -154,6 +167,109 @@ func ParseCmapMappings(data []byte) map[rune]uint16 {
 	return result
 }
 
+// ReverseCmap 从OpenType cmap表构建字形编号到Unicode码点的反查表
+// 入参: data cmap表数据
+// 返回: map[uint16]rune 字形编号到Unicode字符的映射
+func ReverseCmap(data []byte) map[uint16]rune {
+	result := make(map[uint16]rune)
+	if len(data) < 4 {
+		return result
+	}
+	numTables := int(binary.BigEndian.Uint16(data[2:4]))
+	if numTables > (len(data)-4)/8 {
+		return result
+	}
+	for i := range numTables {
+		rec := data[4+i*8:]
+		platform := binary.BigEndian.Uint16(rec[0:2])
+		encoding := binary.BigEndian.Uint16(rec[2:4])
+		offset := uint64(binary.BigEndian.Uint32(rec[4:8]))
+		if !(platform == 0 || platform == 3 && (encoding == 1 || encoding == 10)) {
+			continue
+		}
+		if offset+4 > uint64(len(data)) {
+			continue
+		}
+		sub := data[int(offset):]
+		switch binary.BigEndian.Uint16(sub[0:2]) {
+		case 4:
+			if len(sub) < 14 {
+				continue
+			}
+			segCount := int(binary.BigEndian.Uint16(sub[6:8])) / 2
+			endOff := 14
+			startOff := endOff + segCount*2 + 2
+			deltaOff := startOff + segCount*2
+			rangeOff := deltaOff + segCount*2
+			if rangeOff+segCount*2 > len(sub) {
+				continue
+			}
+			for s := range segCount {
+				endCode := uint32(binary.BigEndian.Uint16(sub[endOff+s*2:]))
+				startCode := uint32(binary.BigEndian.Uint16(sub[startOff+s*2:]))
+				if startCode == 0xFFFF && endCode == 0xFFFF {
+					break
+				}
+				if endCode < startCode {
+					continue
+				}
+				idDelta := int32(int16(binary.BigEndian.Uint16(sub[deltaOff+s*2:])))
+				idRangeOffset := uint64(binary.BigEndian.Uint16(sub[rangeOff+s*2:]))
+				for code := startCode; code <= endCode; code++ {
+					var gid uint16
+					if idRangeOffset == 0 {
+						gid = uint16((int32(code) + idDelta) & 0xFFFF)
+					} else {
+						pos := uint64(rangeOff) + uint64(s)*2 + idRangeOffset + uint64(code-startCode)*2
+						if pos+2 > uint64(len(sub)) {
+							continue
+						}
+						raw := binary.BigEndian.Uint16(sub[int(pos):])
+						if raw != 0 {
+							gid = uint16((int32(raw) + idDelta) & 0xFFFF)
+						}
+					}
+					if gid != 0 && utf8.ValidRune(rune(code)) {
+						if _, exists := result[gid]; !exists {
+							result[gid] = rune(code)
+						}
+					}
+				}
+			}
+		case 12:
+			if len(sub) < 16 {
+				continue
+			}
+			numGroups := uint64(binary.BigEndian.Uint32(sub[12:16]))
+			if numGroups > uint64(len(sub)-16)/12 {
+				continue
+			}
+			for g := uint64(0); g < numGroups; g++ {
+				group := sub[16+int(g)*12:]
+				startChar := binary.BigEndian.Uint32(group[0:4])
+				endChar := binary.BigEndian.Uint32(group[4:8])
+				startGID := binary.BigEndian.Uint32(group[8:12])
+				if endChar < startChar || startChar > utf8.MaxRune {
+					continue
+				}
+				limit := min(endChar, uint32(utf8.MaxRune))
+				if limit-startChar > 65535 {
+					limit = startChar + 65535
+				}
+				for code := startChar; code <= limit; code++ {
+					gid := uint64(startGID) + uint64(code-startChar)
+					if gid > 0 && gid <= 0xFFFF && utf8.ValidRune(rune(code)) {
+						if _, exists := result[uint16(gid)]; !exists {
+							result[uint16(gid)] = rune(code)
+						}
+					}
+				}
+			}
+		}
+	}
+	return result
+}
+
 // AddPackedGlyphMapping 添加字形ID私有映射
 // 入参: mapping 字符映射, numGlyphs 字形数量
 func AddPackedGlyphMapping(mapping map[rune]uint16, numGlyphs uint16) {
@@ -174,19 +290,6 @@ func BuildCmapTable(numGlyphs uint16, mapping map[rune]uint16) []byte {
 		return encodeCmapFormat12(mapping, codes, 0)
 	}
 	return buildCmapFormat4Sorted(numGlyphs, mapping, codes)
-}
-
-// cmapSegment cmap表段结构
-// 字段: start 开始字符, end 结束字符
-type cmapSegment struct {
-	start, end uint16
-}
-
-// cmapGroup 格式12连续字符映射区间组
-type cmapGroup struct {
-	startChar uint32
-	endChar   uint32
-	startGID  uint32
 }
 
 // parseCmapExtended 读取混合字符、扩展数组及常量分组，限制到有效Unicode范围

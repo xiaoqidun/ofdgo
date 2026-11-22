@@ -24,6 +24,16 @@ import (
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
+// 画刷类型，区分纯色、渐变和图案填充
+const (
+	PaintNone PaintKind = iota
+	PaintSolid
+	PaintLinear
+	PaintRadial
+	PaintPattern
+	PaintMesh
+)
+
 // PatternPaint 底纹画刷
 type PatternPaint struct {
 	*Pattern
@@ -39,16 +49,6 @@ type ColorStop struct {
 
 // PaintKind 区分无画刷、纯色、轴向渐变、径向渐变、图案和网格渐变
 type PaintKind uint8
-
-// 画刷类型，区分纯色、渐变和图案填充
-const (
-	PaintNone PaintKind = iota
-	PaintSolid
-	PaintLinear
-	PaintRadial
-	PaintPattern
-	PaintMesh
-)
 
 // Paint 保存后端无关的颜色、渐变和图案，不修改源节点
 type Paint struct {
@@ -71,6 +71,198 @@ type Shading struct {
 	Sample                       func(float64) color.RGBA
 }
 
+// profileGradient 保存独立色标和只读配置，延伸及重复由几何采样器处理
+type profileGradient struct {
+	positions []float64
+	colors    []MeshVertex
+}
+
+// parseColorComponent 解析颜色分量
+// 入参: s 颜色分量
+// 返回: int 颜色分量值, error 错误信息
+func parseColorComponent(s string) (int, error) {
+	if strings.HasPrefix(s, "#") {
+		v, err := strconv.ParseInt(s[1:], 16, 0)
+		return int(v), err
+	}
+	return strconv.Atoi(s)
+}
+
+// clampColor 限制颜色分量范围
+// 入参: v 颜色分量
+// 返回: int 颜色分量
+func clampColor(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return v
+}
+
+// mergeAlpha 合并透明度
+// 入参: colorAlpha 颜色透明度, objectAlpha 对象透明度
+// 返回: *int 合并后的透明度
+func mergeAlpha(colorAlpha, objectAlpha *int) *int {
+	if colorAlpha == nil && objectAlpha == nil {
+		return nil
+	}
+	for _, value := range []*int{colorAlpha, objectAlpha} {
+		if value != nil && (*value < 0 || *value > 255) {
+			alpha := *value
+			return &alpha
+		}
+	}
+	alpha := 255
+	if colorAlpha != nil {
+		alpha = *colorAlpha
+	}
+	if objectAlpha != nil {
+		alpha = alpha * *objectAlpha / 255
+	}
+	return &alpha
+}
+
+// withFillAlpha 合并填充色透明度
+// 入参: fillColor 填充颜色节点, alpha 对象透明度
+// 返回: *FillColor 合并后的填充颜色节点
+func withFillAlpha(fillColor *FillColor, alpha *int) *FillColor {
+	if fillColor == nil || alpha == nil {
+		return fillColor
+	}
+	merged := *fillColor
+	merged.Alpha = mergeAlpha(fillColor.Alpha, alpha)
+	return &merged
+}
+
+// withStrokeAlpha 合并勾边色透明度
+// 入参: strokeColor 勾边颜色节点, alpha 对象透明度
+// 返回: *StrokeColor 合并后的勾边颜色节点
+func withStrokeAlpha(strokeColor *StrokeColor, alpha *int) *StrokeColor {
+	if strokeColor == nil || alpha == nil {
+		return strokeColor
+	}
+	merged := *strokeColor
+	merged.Alpha = mergeAlpha(strokeColor.Alpha, alpha)
+	return &merged
+}
+
+// colorWithAlpha 合并颜色透明度
+// 入参: c 颜色对象, alpha 对象透明度
+// 返回: color.Color 合并后的颜色对象
+func colorWithAlpha(c color.Color, alpha *int) color.Color {
+	if c == nil || alpha == nil {
+		return c
+	}
+	a := clampColor(*alpha)
+	rgba := colorToRGBA(c)
+	return color.RGBA{
+		R: uint8(int(rgba.R) * a / 255),
+		G: uint8(int(rgba.G) * a / 255),
+		B: uint8(int(rgba.B) * a / 255),
+		A: uint8(int(rgba.A) * a / 255),
+	}
+}
+
+// parsePatternPaint 解析底纹画刷
+// 入参: fill 填充颜色节点
+// 返回: *PatternPaint 底纹画刷
+func parsePatternPaint(fill *FillColor) *PatternPaint {
+	if fill.Pattern == nil {
+		return nil
+	}
+	return &PatternPaint{Pattern: fill.Pattern, Color: FillColor{Value: fill.Value, Index: fill.Index, ColorSpace: fill.ColorSpace}, Alpha: fill.Alpha}
+}
+
+// cmykGradientStops 按印刷颜色非线性误差自适应细分色标，保持矢量渐变平滑过渡
+// 入参: left 左端分量, right 右端分量, start 左端色标, end 右端色标
+// 返回: []ColorStop 不含端点的显示色标
+func cmykGradientStops(left, right [4]float64, start, end ColorStop) []ColorStop {
+	a0, a1 := float64(start.Color.A)/255, float64(end.Color.A)/255
+	var result []ColorStop
+	var subdivide func(t0, t1 float64, c0, c1 color.RGBA, depth int)
+	subdivide = func(t0, t1 float64, c0, c1 color.RGBA, depth int) {
+		if depth >= 4 {
+			return
+		}
+		tm := (t0 + t1) / 2
+		var values [4]float64
+		for i := range values {
+			values[i] = left[i]*(1-tm) + right[i]*tm
+		}
+		r, g, b := meshRGB("CMYK", values)
+		actual := profileColor([3]float64{r, g, b}, a0*(1-tm)+a1*tm)
+		expected := color.RGBA{
+			R: uint8((uint16(c0.R) + uint16(c1.R) + 1) / 2),
+			G: uint8((uint16(c0.G) + uint16(c1.G) + 1) / 2),
+			B: uint8((uint16(c0.B) + uint16(c1.B) + 1) / 2),
+			A: uint8((uint16(c0.A) + uint16(c1.A) + 1) / 2),
+		}
+		if colorChannelDiff(actual, expected) <= 1 {
+			return
+		}
+		subdivide(t0, tm, c0, actual, depth+1)
+		result = append(result, ColorStop{Offset: start.Offset*(1-tm) + end.Offset*tm, Color: actual})
+		subdivide(tm, t1, actual, c1, depth+1)
+	}
+	subdivide(0, 1, start.Color, end.Color, 0)
+	return result
+}
+
+// colorChannelDiff 返回两预乘颜色各通道最大绝对差值
+// 入参: a 第一颜色, b 第二颜色
+// 返回: int 最大通道差值
+func colorChannelDiff(a, b color.RGBA) int {
+	diff := func(x, y uint8) int {
+		if x > y {
+			return int(x - y)
+		}
+		return int(y - x)
+	}
+	return max(diff(a.R, b.R), diff(a.G, b.G), diff(a.B, b.B), diff(a.A, b.A))
+}
+
+// gradientPositions 按显式锚点补全渐变分段位置，保留原顺序
+// 入参: segments 渐变分段
+// 返回: []float64 分段位置
+func gradientPositions(segments []ShdSegment) []float64 {
+	positions := make([]float64, len(segments))
+	position, step := 0.0, 0.0
+	for i, segment := range segments {
+		if !segment.positionMissing {
+			position = segment.Position
+		} else if i == len(segments)-1 {
+			position = 1
+		}
+		if i == 0 || !segment.positionMissing {
+			next := i + 1
+			for next < len(segments)-1 && segments[next].positionMissing {
+				next++
+			}
+			end := 1.0
+			if next < len(segments) && !segments[next].positionMissing {
+				end = segments[next].Position
+			}
+			step = (end - position) / float64(next-i)
+		}
+		positions[i] = position
+		position += step
+	}
+	return positions
+}
+
+// colorToRGBA 转换颜色对象
+// 入参: c 颜色对象
+// 返回: color.RGBA RGBA颜色
+func colorToRGBA(c color.Color) color.RGBA {
+	if rgba, ok := c.(color.RGBA); ok {
+		return rgba
+	}
+	r, g, b, a := c.RGBA()
+	return color.RGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8)}
+}
+
 // ResolveColor 按文档颜色空间和调色板解析颜色，返回预乘透明度的RGBA
 // 入参: value 颜色分量, index 调色板索引, space 颜色空间标识, alpha 透明度
 // 返回: color.RGBA 标准颜色, error 颜色定义或配置错误
@@ -82,7 +274,7 @@ func (r *Renderer) ResolveColor(value string, index *int, space string, alpha *i
 	if alpha != nil && (*alpha < 0 || *alpha > 255) {
 		return color.RGBA{}, fmt.Errorf("color alpha must be between 0 and 255")
 	}
-	profile, err := r.Reader.colorProfile(r.colorDefinition(space))
+	profile, err := r.reader.colorProfile(r.colorDefinition(space))
 	if err != nil {
 		return color.RGBA{}, err
 	}
@@ -181,12 +373,6 @@ func (r *Renderer) ResolvePaint(fill *FillColor) (Paint, error) {
 	return paint, nil
 }
 
-// profileGradient 保存独立色标和只读配置，延伸及重复由几何采样器处理
-type profileGradient struct {
-	positions []float64
-	colors    []MeshVertex
-}
-
 // At 在相同源空间内插值，不同空间先转换为sRGB，保留重复位置的右侧色标
 // 入参: t 单位区间位置
 // 返回: color.RGBA 预乘采样颜色
@@ -237,10 +423,10 @@ func (r *Renderer) parseColorWithAlpha(value string, index *int, space string, a
 // 返回: string 颜色模型, [4]float64 单位分量, error 颜色定义错误
 func (r *Renderer) colorComponents(value string, index *int, space string) (string, [4]float64, error) {
 	cs := r.colorDefinition(space)
-	defaultSpace := r.Reader != nil && r.Reader.doc != nil && r.Reader.doc.CommonData.DefaultCS != 0
+	defaultSpace := r.reader != nil && r.reader.doc != nil && r.reader.doc.CommonData.DefaultCS != 0
 	if cs == nil && (defaultSpace || space != "" && (index != nil || len(strings.Fields(value)) != 3)) {
 		if space == "" {
-			space = formatUnitID(uint64(r.Reader.doc.CommonData.DefaultCS))
+			space = formatUnitID(r.reader.doc.CommonData.DefaultCS)
 		}
 		return "", [4]float64{}, fmt.Errorf("color space %q not found", space)
 	}
@@ -286,94 +472,6 @@ func (r *Renderer) colorComponents(value string, index *int, space string) (stri
 	return kind, components, nil
 }
 
-// parseColorComponent 解析颜色分量
-// 入参: s 颜色分量
-// 返回: int 颜色分量值, error 错误信息
-func parseColorComponent(s string) (int, error) {
-	if strings.HasPrefix(s, "#") {
-		v, err := strconv.ParseInt(s[1:], 16, 0)
-		return int(v), err
-	}
-	return strconv.Atoi(s)
-}
-
-// clampColor 限制颜色分量范围
-// 入参: v 颜色分量
-// 返回: int 颜色分量
-func clampColor(v int) int {
-	if v < 0 {
-		return 0
-	}
-	if v > 255 {
-		return 255
-	}
-	return v
-}
-
-// mergeAlpha 合并透明度
-// 入参: colorAlpha 颜色透明度, objectAlpha 对象透明度
-// 返回: *int 合并后的透明度
-func mergeAlpha(colorAlpha, objectAlpha *int) *int {
-	if colorAlpha == nil && objectAlpha == nil {
-		return nil
-	}
-	for _, value := range []*int{colorAlpha, objectAlpha} {
-		if value != nil && (*value < 0 || *value > 255) {
-			alpha := *value
-			return &alpha
-		}
-	}
-	alpha := 255
-	if colorAlpha != nil {
-		alpha = *colorAlpha
-	}
-	if objectAlpha != nil {
-		alpha = alpha * *objectAlpha / 255
-	}
-	return &alpha
-}
-
-// withFillAlpha 合并填充色透明度
-// 入参: fillColor 填充颜色节点, alpha 对象透明度
-// 返回: *FillColor 合并后的填充颜色节点
-func withFillAlpha(fillColor *FillColor, alpha *int) *FillColor {
-	if fillColor == nil || alpha == nil {
-		return fillColor
-	}
-	merged := *fillColor
-	merged.Alpha = mergeAlpha(fillColor.Alpha, alpha)
-	return &merged
-}
-
-// withStrokeAlpha 合并勾边色透明度
-// 入参: strokeColor 勾边颜色节点, alpha 对象透明度
-// 返回: *StrokeColor 合并后的勾边颜色节点
-func withStrokeAlpha(strokeColor *StrokeColor, alpha *int) *StrokeColor {
-	if strokeColor == nil || alpha == nil {
-		return strokeColor
-	}
-	merged := *strokeColor
-	merged.Alpha = mergeAlpha(strokeColor.Alpha, alpha)
-	return &merged
-}
-
-// colorWithAlpha 合并颜色透明度
-// 入参: c 颜色对象, alpha 对象透明度
-// 返回: color.Color 合并后的颜色对象
-func colorWithAlpha(c color.Color, alpha *int) color.Color {
-	if c == nil || alpha == nil {
-		return c
-	}
-	a := clampColor(*alpha)
-	rgba := colorToRGBA(c)
-	return color.RGBA{
-		R: uint8(int(rgba.R) * a / 255),
-		G: uint8(int(rgba.G) * a / 255),
-		B: uint8(int(rgba.B) * a / 255),
-		A: uint8(int(rgba.A) * a / 255),
-	}
-}
-
 // parseFillColor 解析填充颜色
 // 入参: fillColor 填充颜色节点
 // 返回: color.Color 颜色对象
@@ -401,16 +499,6 @@ func (r *Renderer) parseFillColor(fillColor *FillColor) color.Color {
 // 返回: color.Color 颜色对象
 func (r *Renderer) parseStrokeColor(strokeColor *StrokeColor) color.Color {
 	return r.parseFillColor((*FillColor)(strokeColor))
-}
-
-// parsePatternPaint 解析底纹画刷
-// 入参: fill 填充颜色节点
-// 返回: *PatternPaint 底纹画刷
-func parsePatternPaint(fill *FillColor) *PatternPaint {
-	if fill.Pattern == nil {
-		return nil
-	}
-	return &PatternPaint{Pattern: fill.Pattern, Color: FillColor{Value: fill.Value, Index: fill.Index, ColorSpace: fill.ColorSpace}, Alpha: fill.Alpha}
 }
 
 // parseShdColor 解析渐变颜色
@@ -460,94 +548,6 @@ func (r *Renderer) renderGradientStops(segments []ShdSegment, alpha *int) []Colo
 	return result
 }
 
-// cmykGradientStops 按印刷颜色非线性误差自适应细分色标，保持矢量渐变平滑过渡
-// 入参: left 左端分量, right 右端分量, start 左端色标, end 右端色标
-// 返回: []ColorStop 不含端点的显示色标
-func cmykGradientStops(left, right [4]float64, start, end ColorStop) []ColorStop {
-	a0, a1 := float64(start.Color.A)/255, float64(end.Color.A)/255
-	var result []ColorStop
-	var subdivide func(t0, t1 float64, c0, c1 color.RGBA, depth int)
-	subdivide = func(t0, t1 float64, c0, c1 color.RGBA, depth int) {
-		if depth >= 4 {
-			return
-		}
-		tm := (t0 + t1) / 2
-		var values [4]float64
-		for i := range values {
-			values[i] = left[i]*(1-tm) + right[i]*tm
-		}
-		r, g, b := meshRGB("CMYK", values)
-		actual := profileColor([3]float64{r, g, b}, a0*(1-tm)+a1*tm)
-		expected := color.RGBA{
-			R: uint8((uint16(c0.R) + uint16(c1.R) + 1) / 2),
-			G: uint8((uint16(c0.G) + uint16(c1.G) + 1) / 2),
-			B: uint8((uint16(c0.B) + uint16(c1.B) + 1) / 2),
-			A: uint8((uint16(c0.A) + uint16(c1.A) + 1) / 2),
-		}
-		if colorChannelDiff(actual, expected) <= 1 {
-			return
-		}
-		subdivide(t0, tm, c0, actual, depth+1)
-		result = append(result, ColorStop{Offset: start.Offset*(1-tm) + end.Offset*tm, Color: actual})
-		subdivide(tm, t1, actual, c1, depth+1)
-	}
-	subdivide(0, 1, start.Color, end.Color, 0)
-	return result
-}
-
-// colorChannelDiff 返回两预乘颜色各通道最大绝对差值
-// 入参: a 第一颜色, b 第二颜色
-// 返回: int 最大通道差值
-func colorChannelDiff(a, b color.RGBA) int {
-	diff := func(x, y uint8) int {
-		if x > y {
-			return int(x - y)
-		}
-		return int(y - x)
-	}
-	return max(diff(a.R, b.R), diff(a.G, b.G), diff(a.B, b.B), diff(a.A, b.A))
-}
-
-// gradientPositions 按显式锚点补全渐变分段位置，保留原顺序
-// 入参: segments 渐变分段
-// 返回: []float64 分段位置
-func gradientPositions(segments []ShdSegment) []float64 {
-	positions := make([]float64, len(segments))
-	position, step := 0.0, 0.0
-	for i, segment := range segments {
-		if !segment.positionMissing {
-			position = segment.Position
-		} else if i == len(segments)-1 {
-			position = 1
-		}
-		if i == 0 || !segment.positionMissing {
-			next := i + 1
-			for next < len(segments)-1 && segments[next].positionMissing {
-				next++
-			}
-			end := 1.0
-			if next < len(segments) && !segments[next].positionMissing {
-				end = segments[next].Position
-			}
-			step = (end - position) / float64(next-i)
-		}
-		positions[i] = position
-		position += step
-	}
-	return positions
-}
-
-// colorToRGBA 转换颜色对象
-// 入参: c 颜色对象
-// 返回: color.RGBA RGBA颜色
-func colorToRGBA(c color.Color) color.RGBA {
-	if rgba, ok := c.(color.RGBA); ok {
-		return rgba
-	}
-	r, g, b, a := c.RGBA()
-	return color.RGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8)}
-}
-
 // profileGradient 准备ICC渐变的源分量采样，不用转换后的端点近似非线性色彩变换
 // 入参: segments 原色标, alpha 外层透明度
 // 返回: func(float64) color.RGBA 单位区间采样器，无ICC时为nil, error 配置错误
@@ -568,7 +568,7 @@ func (r *Renderer) profileGradient(segments []ShdSegment, alpha *int) (func(floa
 		if err != nil {
 			return nil, err
 		}
-		profile, err := r.Reader.colorProfile(r.colorDefinition(segment.Color.ColorSpace))
+		profile, err := r.reader.colorProfile(r.colorDefinition(segment.Color.ColorSpace))
 		if err != nil {
 			return nil, err
 		}

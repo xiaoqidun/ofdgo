@@ -35,26 +35,6 @@ type pdfPointBounds struct {
 	found                  bool
 }
 
-// add 按原顺序累计一个控制点的最小和最大坐标
-// 入参: point 坐标点
-func (b *pdfPointBounds) add(point pdfgo.Point) {
-	if !b.found {
-		b.minX, b.minY, b.maxX, b.maxY = point.X, point.Y, point.X, point.Y
-		b.found = true
-	}
-	b.minX, b.minY = math.Min(b.minX, point.X), math.Min(b.minY, point.Y)
-	b.maxX, b.maxY = math.Max(b.maxX, point.X), math.Max(b.maxY, point.Y)
-}
-
-// box 取得原精度边界，空集合仍返回零值
-// 返回: Box 坐标范围
-func (b *pdfPointBounds) box() Box {
-	if !b.found {
-		return Box{}
-	}
-	return Box{X: b.minX, Y: b.minY, W: math.Max(b.maxX-b.minX, 1e-6), H: math.Max(b.maxY-b.minY, 1e-6)}
-}
-
 // pdfClipPath 保存导入器只读的裁剪几何，不缓存对象位移或文字裁剪
 type pdfClipPath struct {
 	box  Box
@@ -67,186 +47,14 @@ type pdfClipPath struct {
 // 返回: GeometryPath 独立几何路径, error 指令、坐标或取消错误
 func pdfGeometryPath(ctx context.Context, source pdfgo.Path, matrix pdfgo.Matrix) (GeometryPath, error) {
 	path, err := codecpdf.GeometryPath(ctx, source, matrix)
-	return GeometryPath(path), err
-}
-
-// compileCoverage 直接编译无文字裁剪的填充覆盖，其他语义交给配置的页面编译器
-// 入参: node 图元, stroke 是否描边
-// 返回: *RasterPage 覆盖场景, Box 页面区域, error 编译错误
-func (p *pdfImporter) compileCoverage(node pdfCompositeNode, stroke bool) (*RasterPage, Box, error) {
-	if node.path != nil && pdfPaintedPathEmpty(node.path.Path) {
-		return nil, Box{}, p.emptyPaintedPath()
-	}
-	fallback := func() (*RasterPage, Box, error) {
-		return p.compileGroup(func(local *pdfImporter) error { return node.coverage(local, stroke) })
-	}
-	if stroke || node.path == nil && node.image == nil {
-		return fallback()
-	}
-	deferredClip := false
-	switch p.editor.Backends().Compiler.(type) {
-	case CanvasBackend, *CanvasBackend:
-	case OFDCompiler, *OFDCompiler:
-		deferredClip = true
-	default:
-		return fallback()
-	}
-	style, _, _ := node.style()
-	for _, clip := range style.Clips {
-		if len(clip.Text) != 0 {
-			return fallback()
-		}
-	}
-	geometry, err := p.renderer.Geometry()
-	if err != nil {
-		return nil, Box{}, err
-	}
-	switch geometry.(type) {
-	case CanvasBackend, *CanvasBackend:
-	default:
-		return fallback()
-	}
-	var path GeometryPath
-	evenOdd := false
-	if node.path != nil {
-		path, err = pdfGeometryPath(p.ctx, node.path.Path, p.matrix)
-		evenOdd = node.path.Path.EvenOdd
-	} else {
-		path, err = geometry.Transform(GeometryPath(basegeom.Rectangle(Box{W: 1, H: 1})), MatrixFromValues([6]float64(p.matrix.Mul(node.image.Matrix))))
-	}
-	if err != nil {
-		return nil, Box{}, err
-	}
-	if len(path) == 0 {
-		return nil, Box{}, p.emptyPaintedPath()
-	}
-	path = GeometryPath(basegeom.Close(basegeom.Path(path)))
-	clip, err := p.coverageClip(style.Clips, geometry)
-	if err != nil || len(clip) == 0 {
-		return nil, Box{}, err
-	}
-	compiler := semanticCompiler{geometry: geometry, page: &RasterPage{Width: p.pageWidth, Height: p.pageHeight, DPI: p.rasterDPI}}
-	var bounds pdfPointBounds
-	for _, segment := range path {
-		if segment.Verb != GeometryClose {
-			bounds.add(pdfgo.Point{X: segment.End.X, Y: segment.End.Y})
-		}
-		if segment.Verb == GeometryCubic {
-			bounds.add(pdfgo.Point{X: segment.Control1.X, Y: segment.Control1.Y})
-			bounds.add(pdfgo.Point{X: segment.Control2.X, Y: segment.Control2.Y})
-		}
-	}
-	boundary := GeometryPath(basegeom.Rectangle(bounds.box()))
-	clip, err = clipGeometry(geometry, clip, &boundary)
-	if err != nil {
-		return nil, Box{}, err
-	}
-	if deferredClip {
-		if err := compiler.command(path, Paint{Color: color.RGBA{255, 255, 255, 255}}, evenOdd, &clip, IdentityMatrix, nil); err != nil {
-			return nil, Box{}, err
-		}
-		return p.groupSceneBounds(compiler.page)
-	}
-	box, err := geometry.Bounds(path)
-	if err != nil {
-		return nil, Box{}, err
-	}
-	rect, rectangle := basegeom.RectangleBounds(basegeom.Path(clip))
-	if !rectangle || box.X < rect.X || box.Y < rect.Y || box.X+box.W > rect.X+rect.W || box.Y+box.H > rect.Y+rect.H {
-		if evenOdd {
-			path, err = geometry.Normalize(path, true)
-			if err != nil {
-				return nil, Box{}, err
-			}
-			evenOdd = false
-		}
-		var clipped GeometryPath
-		var linear bool
-		var clipErr error
-		if rectangle {
-			clipped, linear, clipErr = clipLinearFillGeometry(path, clip)
-		}
-		if clipErr != nil {
-			return nil, Box{}, clipErr
-		}
-		if linear {
-			path = clipped
-		} else {
-			path, err = clipGeometry(geometry, path, &clip)
-			if err != nil {
-				return nil, Box{}, err
-			}
-		}
-	}
-	if err := compiler.command(path, Paint{Color: color.RGBA{255, 255, 255, 255}}, evenOdd, nil, IdentityMatrix, nil); err != nil {
-		return nil, Box{}, err
-	}
-	return p.groupSceneBounds(compiler.page)
-}
-
-// coverageClip 按完整路径、变换和页面范围复用只读裁剪，不缓存失败结果
-// 入参: paths 无文字裁剪的路径集合, geometry 几何后端
-// 返回: GeometryPath 共享只读轮廓, error 几何或取消错误
-func (p *pdfImporter) coverageClip(paths []pdfgo.Path, geometry GeometryBackend) (GeometryPath, error) {
-	if err := p.ctx.Err(); err != nil {
-		return nil, err
-	}
-	clip := GeometryPath(basegeom.Rectangle(Box{W: p.pageWidth, H: p.pageHeight}))
-	if len(paths) == 0 {
-		return clip, nil
-	}
-	hash := sha256.New()
-	var size [16]byte
-	binary.LittleEndian.PutUint64(size[:8], math.Float64bits(p.pageWidth))
-	binary.LittleEndian.PutUint64(size[8:], math.Float64bits(p.pageHeight))
-	hash.Write(size[:])
-	for _, path := range paths {
-		key, err := codecpdf.ClipPathKey(p.ctx, path, p.matrix)
-		if err != nil {
-			return nil, err
-		}
-		hash.Write(key[:])
-	}
-	var key [32]byte
-	hash.Sum(key[:0])
-	cache := p.compositingCache().clipCache()
-	if cached, ok := cache.get(key); ok {
-		return cached, nil
-	}
-	for _, source := range paths {
-		part, err := pdfGeometryPath(p.ctx, source, p.matrix)
-		if err != nil {
-			return nil, err
-		}
-		part = GeometryPath(basegeom.Close(basegeom.Path(part)))
-		if _, rectangle := basegeom.RectangleBounds(basegeom.Path(part)); source.EvenOdd && !rectangle {
-			part, err = geometry.Normalize(part, true)
-			if err != nil {
-				return nil, err
-			}
-		}
-		clip, err = clipGeometry(geometry, part, &clip)
-		if err != nil {
-			return nil, err
-		}
-		if len(clip) == 0 {
-			break
-		}
-	}
-	if err := p.ctx.Err(); err != nil {
-		return nil, err
-	}
-	if len(clip) <= (cache.limit-128)/112 {
-		cache.put(key, clip, 128+len(clip)*112)
-	}
-	return clip, nil
+	return fromBaseGeomPath(path), err
 }
 
 // pdfGlyphPath 将OFD字形几何交给PDF路径适配器转换
 // 入参: outline 字形轮廓, matrix 字形到页面的变换
 // 返回: pdfgo.Path 页面路径, error 非字体轮廓指令
 func pdfGlyphPath(outline GeometryPath, matrix pdfgo.Matrix) (pdfgo.Path, error) {
-	return codecpdf.GlyphPath(basegeom.Path(outline), matrix)
+	return codecpdf.GlyphPath(toBaseGeomPath(outline), matrix)
 }
 
 // pdfNumbers 按OFD数值格式序列化坐标
@@ -297,6 +105,281 @@ func pdfBounds(points []pdfgo.Point) Box {
 	return bounds.box()
 }
 
+// pdfPaintedPathEmpty 判断无坐标路径，不排除具有坐标的退化描边
+// 入参: path PDF路径
+// 返回: bool 是否没有坐标
+func pdfPaintedPathEmpty(path pdfgo.Path) bool {
+	for _, segment := range path.Segments {
+		if segment.Operator != "C" || len(segment.Points) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// pdfPageClip 将导入裁剪区还原到页面坐标，仅提取包含大量重复路径数据的裁剪
+// 入参: object 导入对象
+// 返回: *Clips 页面坐标裁剪，不满足提取条件时为空
+func pdfPageClip(object GraphicObject) *Clips {
+	if object.Type != "TextObject" && object.Type != "PathObject" && object.Type != "ImageObject" {
+		return nil
+	}
+	clips := *editorObjectClips(&object)
+	if clips == nil || clips.usesObjectMatrix() || len(clips.Clip) == 0 {
+		return nil
+	}
+	boundary, _ := editorGeometry(object)
+	box, err := ParseBox(boundary)
+	if err != nil {
+		return nil
+	}
+	translation := ""
+	if box.X != 0 || box.Y != 0 {
+		translation = pdfNumbers(1, 0, 0, 1, -box.X, -box.Y)
+	}
+	bytes := 0
+	result := &Clips{Clip: make([]Clip, len(clips.Clip))}
+	for index, clip := range clips.Clip {
+		if len(clip.Area) != 1 || clip.Area[0].CTM != translation {
+			return nil
+		}
+		area := clip.Area[0]
+		area.CTM = ""
+		result.Clip[index].Area = []ClipArea{area}
+		for _, path := range area.Path {
+			bytes += len(path.AbbreviatedData)
+		}
+	}
+	if bytes < 2048 {
+		return nil
+	}
+	return result
+}
+
+// pdfMatchesPageClip 比较页面坐标裁剪，不将相同外接矩形视为相同路径
+// 入参: object 导入对象, pageClip 已还原的裁剪区
+// 返回: bool 是否可共享裁剪区
+func pdfMatchesPageClip(object GraphicObject, pageClip *Clips) bool {
+	if object.Type != "TextObject" && object.Type != "PathObject" && object.Type != "ImageObject" {
+		return false
+	}
+	clips := *editorObjectClips(&object)
+	if clips == nil || clips.usesObjectMatrix() || len(clips.Clip) != len(pageClip.Clip) {
+		return false
+	}
+	boundary, _ := editorGeometry(object)
+	box, err := ParseBox(boundary)
+	if err != nil {
+		return false
+	}
+	translation := ""
+	if box.X != 0 || box.Y != 0 {
+		translation = pdfNumbers(1, 0, 0, 1, -box.X, -box.Y)
+	}
+	for index, clip := range clips.Clip {
+		if len(clip.Area) != 1 || clip.Area[0].CTM != translation {
+			return false
+		}
+		area, expected := clip.Area[0], pageClip.Clip[index].Area[0]
+		if area.DrawParam != expected.DrawParam || !reflect.DeepEqual(area.Path, expected.Path) || !reflect.DeepEqual(area.Text, expected.Text) {
+			return false
+		}
+	}
+	return true
+}
+
+// add 按原顺序累计一个控制点的最小和最大坐标
+// 入参: point 坐标点
+func (b *pdfPointBounds) add(point pdfgo.Point) {
+	if !b.found {
+		b.minX, b.minY, b.maxX, b.maxY = point.X, point.Y, point.X, point.Y
+		b.found = true
+	}
+	b.minX, b.minY = math.Min(b.minX, point.X), math.Min(b.minY, point.Y)
+	b.maxX, b.maxY = math.Max(b.maxX, point.X), math.Max(b.maxY, point.Y)
+}
+
+// box 取得原精度边界，空集合仍返回零值
+// 返回: Box 坐标范围
+func (b *pdfPointBounds) box() Box {
+	if !b.found {
+		return Box{}
+	}
+	return Box{X: b.minX, Y: b.minY, W: math.Max(b.maxX-b.minX, 1e-6), H: math.Max(b.maxY-b.minY, 1e-6)}
+}
+
+// compileCoverage 直接编译无文字裁剪的填充覆盖，其他语义交给配置的页面编译器
+// 入参: node 图元, stroke 是否描边
+// 返回: *RasterPage 覆盖场景, Box 页面区域, error 编译错误
+func (p *pdfImporter) compileCoverage(node pdfCompositeNode, stroke bool) (*RasterPage, Box, error) {
+	if node.path != nil && pdfPaintedPathEmpty(node.path.Path) {
+		return nil, Box{}, p.emptyPaintedPath()
+	}
+	fallback := func() (*RasterPage, Box, error) {
+		return p.compileGroup(func(local *pdfImporter) error { return node.coverage(local, stroke) })
+	}
+	if stroke || node.path == nil && node.image == nil {
+		return fallback()
+	}
+	deferredClip := false
+	switch p.editor.Backends().Compiler.(type) {
+	case CanvasBackend, *CanvasBackend:
+	case OFDCompiler, *OFDCompiler:
+		deferredClip = true
+	default:
+		return fallback()
+	}
+	style, _, _ := node.style()
+	for _, clip := range style.Clips {
+		if len(clip.Text) != 0 {
+			return fallback()
+		}
+	}
+	geometry, err := p.renderer.Geometry()
+	if err != nil {
+		return nil, Box{}, err
+	}
+	switch geometry.(type) {
+	case CanvasBackend, *CanvasBackend:
+	default:
+		return fallback()
+	}
+	var path GeometryPath
+	evenOdd := false
+	if node.path != nil {
+		path, err = pdfGeometryPath(p.ctx, node.path.Path, p.matrix)
+		evenOdd = node.path.Path.EvenOdd
+	} else {
+		path, err = geometry.Transform(geometryRectangle(Box{W: 1, H: 1}), MatrixFromValues([6]float64(p.matrix.Mul(node.image.Matrix))))
+	}
+	if err != nil {
+		return nil, Box{}, err
+	}
+	if len(path) == 0 {
+		return nil, Box{}, p.emptyPaintedPath()
+	}
+	path = geometryClose(path)
+	clip, err := p.coverageClip(style.Clips, geometry)
+	if err != nil || len(clip) == 0 {
+		return nil, Box{}, err
+	}
+	compiler := semanticCompiler{geometry: geometry, page: &RasterPage{Width: p.pageWidth, Height: p.pageHeight, DPI: p.rasterDPI}}
+	var bounds pdfPointBounds
+	for _, segment := range path {
+		if segment.Verb != GeometryClose {
+			bounds.add(pdfgo.Point{X: segment.End.X, Y: segment.End.Y})
+		}
+		if segment.Verb == GeometryCubic {
+			bounds.add(pdfgo.Point{X: segment.Control1.X, Y: segment.Control1.Y})
+			bounds.add(pdfgo.Point{X: segment.Control2.X, Y: segment.Control2.Y})
+		}
+	}
+	boundary := geometryRectangle(bounds.box())
+	clip, err = clipGeometry(geometry, clip, &boundary)
+	if err != nil {
+		return nil, Box{}, err
+	}
+	if deferredClip {
+		if err := compiler.command(path, Paint{Color: color.RGBA{255, 255, 255, 255}}, evenOdd, &clip, IdentityMatrix(), nil); err != nil {
+			return nil, Box{}, err
+		}
+		return p.groupSceneBounds(compiler.page)
+	}
+	box, err := geometry.Bounds(path)
+	if err != nil {
+		return nil, Box{}, err
+	}
+	rect, rectangle := geometryRectangleBounds(clip)
+	if !rectangle || box.X < rect.X || box.Y < rect.Y || box.X+box.W > rect.X+rect.W || box.Y+box.H > rect.Y+rect.H {
+		if evenOdd {
+			path, err = geometry.Normalize(path, true)
+			if err != nil {
+				return nil, Box{}, err
+			}
+			evenOdd = false
+		}
+		var clipped GeometryPath
+		var linear bool
+		var clipErr error
+		if rectangle {
+			clipped, linear, clipErr = clipLinearFillGeometry(path, clip)
+		}
+		if clipErr != nil {
+			return nil, Box{}, clipErr
+		}
+		if linear {
+			path = clipped
+		} else {
+			path, err = clipGeometry(geometry, path, &clip)
+			if err != nil {
+				return nil, Box{}, err
+			}
+		}
+	}
+	if err := compiler.command(path, Paint{Color: color.RGBA{255, 255, 255, 255}}, evenOdd, nil, IdentityMatrix(), nil); err != nil {
+		return nil, Box{}, err
+	}
+	return p.groupSceneBounds(compiler.page)
+}
+
+// coverageClip 按完整路径、变换和页面范围复用只读裁剪，不缓存失败结果
+// 入参: paths 无文字裁剪的路径集合, geometry 几何后端
+// 返回: GeometryPath 共享只读轮廓, error 几何或取消错误
+func (p *pdfImporter) coverageClip(paths []pdfgo.Path, geometry GeometryBackend) (GeometryPath, error) {
+	if err := p.ctx.Err(); err != nil {
+		return nil, err
+	}
+	clip := geometryRectangle(Box{W: p.pageWidth, H: p.pageHeight})
+	if len(paths) == 0 {
+		return clip, nil
+	}
+	hash := sha256.New()
+	var size [16]byte
+	binary.LittleEndian.PutUint64(size[:8], math.Float64bits(p.pageWidth))
+	binary.LittleEndian.PutUint64(size[8:], math.Float64bits(p.pageHeight))
+	hash.Write(size[:])
+	for _, path := range paths {
+		key, err := codecpdf.ClipPathKey(p.ctx, path, p.matrix)
+		if err != nil {
+			return nil, err
+		}
+		hash.Write(key[:])
+	}
+	var key [32]byte
+	hash.Sum(key[:0])
+	cache := p.compositingCache().clipCache()
+	if cached, ok := cache.get(key); ok {
+		return cached, nil
+	}
+	for _, source := range paths {
+		part, err := pdfGeometryPath(p.ctx, source, p.matrix)
+		if err != nil {
+			return nil, err
+		}
+		part = geometryClose(part)
+		if _, rectangle := geometryRectangleBounds(part); source.EvenOdd && !rectangle {
+			part, err = geometry.Normalize(part, true)
+			if err != nil {
+				return nil, err
+			}
+		}
+		clip, err = clipGeometry(geometry, part, &clip)
+		if err != nil {
+			return nil, err
+		}
+		if len(clip) == 0 {
+			break
+		}
+	}
+	if err := p.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(clip) <= (cache.limit-128)/112 {
+		cache.put(key, clip, 128+len(clip)*112)
+	}
+	return clip, nil
+}
+
 // path 保留每次路径绘制操作，重叠描边不合并为单次绘制
 // 入参: mark PDF路径绘制信息
 // 返回: error 错误信息
@@ -339,10 +422,11 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 		}
 		return p.gradientPath(mark)
 	}
-	box, err := codecpdf.PathBounds(p.ctx, mark.Path, p.matrix)
+	rawBox, err := codecpdf.PathBounds(p.ctx, mark.Path, p.matrix)
 	if err != nil {
 		return err
 	}
+	box := Box(rawBox)
 	scale := math.Hypot(p.matrix[0], p.matrix[1])
 	drawing, origin, ctm := *p, box, ""
 	marginScale := scale
@@ -400,7 +484,7 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 	if err != nil {
 		return err
 	}
-	data, err := codecpdf.PathData(p.ctx, mark.Path, drawing.matrix, origin)
+	data, err := codecpdf.PathData(p.ctx, mark.Path, drawing.matrix, basegeom.Box(origin))
 	if err != nil {
 		return err
 	}
@@ -417,18 +501,6 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 	p.appendSequenceObject(GraphicObject{Type: "PathObject", PathObject: object}, mark.Sequence)
 	p.report.PathObjects++
 	return nil
-}
-
-// pdfPaintedPathEmpty 判断无坐标路径，不排除具有坐标的退化描边
-// 入参: path PDF路径
-// 返回: bool 是否没有坐标
-func pdfPaintedPathEmpty(path pdfgo.Path) bool {
-	for _, segment := range path.Segments {
-		if segment.Operator != "C" || len(segment.Points) != 0 {
-			return false
-		}
-	}
-	return true
 }
 
 // emptyPaintedPath 按诊断策略忽略不绘制内容的空路径，严格模式仍拒绝
@@ -458,11 +530,12 @@ func (p *pdfImporter) clipPath(path pdfgo.Path) (pdfClipPath, error) {
 	if cached, ok := p.clipPaths.get(key); ok {
 		return cached, nil
 	}
-	box, err := codecpdf.PathBounds(p.ctx, path, p.matrix)
+	rawBox, err := codecpdf.PathBounds(p.ctx, path, p.matrix)
 	if err != nil {
 		return pdfClipPath{}, err
 	}
-	data, err := codecpdf.PathData(p.ctx, path, p.matrix, box)
+	box := Box(rawBox)
+	data, err := codecpdf.PathData(p.ctx, path, p.matrix, rawBox)
 	if err != nil {
 		return pdfClipPath{}, err
 	}
@@ -541,77 +614,6 @@ func (p *pdfImporter) sharedClipObjects(objects []GraphicObject) ([]GraphicObjec
 	return output, nil
 }
 
-// pdfPageClip 将导入裁剪区还原到页面坐标，仅提取包含大量重复路径数据的裁剪
-// 入参: object 导入对象
-// 返回: *Clips 页面坐标裁剪，不满足提取条件时为空
-func pdfPageClip(object GraphicObject) *Clips {
-	if object.Type != "TextObject" && object.Type != "PathObject" && object.Type != "ImageObject" {
-		return nil
-	}
-	clips := *editorObjectClips(&object)
-	if clips == nil || clips.usesObjectMatrix() || len(clips.Clip) == 0 {
-		return nil
-	}
-	boundary, _ := editorGeometry(object)
-	box, err := ParseBox(boundary)
-	if err != nil {
-		return nil
-	}
-	translation := ""
-	if box.X != 0 || box.Y != 0 {
-		translation = pdfNumbers(1, 0, 0, 1, -box.X, -box.Y)
-	}
-	bytes := 0
-	result := &Clips{Clip: make([]Clip, len(clips.Clip))}
-	for index, clip := range clips.Clip {
-		if len(clip.Area) != 1 || clip.Area[0].CTM != translation {
-			return nil
-		}
-		area := clip.Area[0]
-		area.CTM = ""
-		result.Clip[index].Area = []ClipArea{area}
-		for _, path := range area.Path {
-			bytes += len(path.AbbreviatedData)
-		}
-	}
-	if bytes < 2048 {
-		return nil
-	}
-	return result
-}
-
-// pdfMatchesPageClip 比较页面坐标裁剪，不将相同外接矩形视为相同路径
-// 入参: object 导入对象, pageClip 已还原的裁剪区
-// 返回: bool 是否可共享裁剪区
-func pdfMatchesPageClip(object GraphicObject, pageClip *Clips) bool {
-	if object.Type != "TextObject" && object.Type != "PathObject" && object.Type != "ImageObject" {
-		return false
-	}
-	clips := *editorObjectClips(&object)
-	if clips == nil || clips.usesObjectMatrix() || len(clips.Clip) != len(pageClip.Clip) {
-		return false
-	}
-	boundary, _ := editorGeometry(object)
-	box, err := ParseBox(boundary)
-	if err != nil {
-		return false
-	}
-	translation := ""
-	if box.X != 0 || box.Y != 0 {
-		translation = pdfNumbers(1, 0, 0, 1, -box.X, -box.Y)
-	}
-	for index, clip := range clips.Clip {
-		if len(clip.Area) != 1 || clip.Area[0].CTM != translation {
-			return false
-		}
-		area, expected := clip.Area[0], pageClip.Clip[index].Area[0]
-		if area.DrawParam != expected.DrawParam || !reflect.DeepEqual(area.Path, expected.Path) || !reflect.DeepEqual(area.Text, expected.Text) {
-			return false
-		}
-	}
-	return true
-}
-
 // clips 省略覆盖对象边界的矩形裁剪，复用其余几何并保留位移及路径交集
 // 入参: paths 裁剪路径, origin 对象边界
 // 返回: *Clips OFD裁剪区域，无裁剪时为空, error 未解析的裁剪字形
@@ -626,7 +628,7 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 		if err := p.ctx.Err(); err != nil {
 			return nil, err
 		}
-		if codecpdf.ClipContainsBoundary(path, p.matrix, origin) {
+		if codecpdf.ClipContainsBoundary(path, p.matrix, basegeom.Box(origin)) {
 			continue
 		}
 		if clips == nil {

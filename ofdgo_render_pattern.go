@@ -39,12 +39,6 @@ type stampContentState struct {
 	cache     renderCache[stampContentKey, []RasterCommand]
 }
 
-// resetFonts 使包含文字的签章编译结果随字体配置失效
-func (s *stampContentState) resetFonts() {
-	s.cache.clear()
-	s.cache = *resourceCache[stampContentKey, []RasterCommand](s.resources, 16<<20)
-}
-
 // stampContentStateKey 隔离渲染器私有的共享签章数据
 type stampContentStateKey struct{}
 
@@ -53,6 +47,86 @@ type patternCellKey struct {
 	pattern *Pattern
 	alpha   int
 	matrix  [6]float64
+}
+
+// patternCellTranslatable 检查无需按页面位置重新解释的叶子单元
+// 入参: pattern 底纹画刷
+// 返回: bool 是否可仅平移编译结果
+func patternCellTranslatable(pattern *PatternPaint) bool {
+	for object := range pattern.CellContent.objects() {
+		var fill, stroke *FillColor
+		switch object.Type {
+		case "PathObject":
+			if object.PathObject.DrawParam != "" {
+				return false
+			}
+			fill, stroke = object.PathObject.FillColor, (*FillColor)(object.PathObject.StrokeColor)
+		case "TextObject":
+			if object.TextObject.DrawParam != "" {
+				return false
+			}
+			fill, stroke = object.TextObject.FillColor, (*FillColor)(object.TextObject.StrokeColor)
+		case "ImageObject":
+			if object.ImageObject.Border != nil {
+				stroke = (*FillColor)(object.ImageObject.Border.BorderColor)
+			}
+		default:
+			return false
+		}
+		if fill != nil && fill.Pattern != nil || stroke != nil && stroke.Pattern != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// translatePatternCommands 平移单元实例，共享只读路径和画刷，独立处理页面裁剪
+// 入参: commands 原点单元, x 横向平移, y 纵向平移
+// 返回: []RasterCommand 放置后的指令
+func translatePatternCommands(commands []RasterCommand, x, y float64) []RasterCommand {
+	if x == 0 && y == 0 {
+		return commands
+	}
+	result := slices.Clone(commands)
+	for i := range result {
+		command := &result[i]
+		if command.Group == RasterGroupNone {
+			command.Transform[4] += x
+			command.Transform[5] += y
+		}
+		if command.Clip != nil {
+			command.Clip = slices.Clone(command.Clip)
+			matrix := RasterMatrix{1, 0, 0, 1, x, y}
+			for j := range command.Clip {
+				segment := &command.Clip[j]
+				segment.End = matrix.Apply(segment.End)
+				segment.Control1 = matrix.Apply(segment.Control1)
+				segment.Control2 = matrix.Apply(segment.Control2)
+			}
+		}
+	}
+	return result
+}
+
+// geometryFromRaster 将只含贝塞尔曲线的光栅路径还原为库路径
+// 入参: path 光栅路径
+// 返回: GeometryPath 库路径
+func geometryFromRaster(path []RasterSegment) GeometryPath {
+	result := make(GeometryPath, 0, len(path))
+	for _, s := range path {
+		verb := GeometryVerb(s.Verb)
+		if s.Verb == RasterClose {
+			verb = GeometryClose
+		}
+		result = append(result, GeometrySegment{Verb: verb, End: Point{X: s.End.X, Y: s.End.Y}, Control1: Point{X: s.Control1.X, Y: s.Control1.Y}, Control2: Point{X: s.Control2.X, Y: s.Control2.Y}})
+	}
+	return result
+}
+
+// resetFonts 使包含文字的签章编译结果随字体配置失效
+func (s *stampContentState) resetFonts() {
+	s.cache.clear()
+	s.cache = *resourceCache[stampContentKey, []RasterCommand](s.resources, 16<<20)
 }
 
 // sharedStamp 复用相同签章的解码、嵌套文档编译及局部裁剪，不缓存放置位置
@@ -74,11 +148,11 @@ func (c *semanticCompiler) sharedStamp(stamp Stamp, compile func(*semanticCompil
 	config := r.backends
 	if state == nil || !sameBackend(state.config.Fonts, config.Fonts) || !sameBackend(state.config.Geometry, config.Geometry) ||
 		!sameBackend(state.config.Compiler, config.Compiler) || !sameBackend(state.config.Raster, config.Raster) {
-		state = &stampContentState{config: config, resources: r.Reader.resources}
+		state = &stampContentState{config: config, resources: r.reader.resources}
 		state.resetFonts()
 		r.backendStates[stampContentStateKey{}] = state
 	}
-	key := stampContentKey{data: sha256.Sum256(stamp.Data), kind: stamp.Type, width: stamp.Box.W, height: stamp.Box.H, dpi: c.page.DPI, clipped: stamp.Clip != nil, annotations: r.RenderAnnotations}
+	key := stampContentKey{data: sha256.Sum256(stamp.Data), kind: stamp.Type, width: stamp.Box.W, height: stamp.Box.H, dpi: c.page.DPI, clipped: stamp.Clip != nil, annotations: r.renderAnnotations}
 	if stamp.Clip != nil {
 		key.clip = *stamp.Clip
 	}
@@ -174,78 +248,4 @@ func (c *semanticCompiler) appendClippedCommands(commands []RasterCommand, clip 
 		c.page.Commands = append(c.page.Commands, command)
 	}
 	return nil
-}
-
-// patternCellTranslatable 检查无需按页面位置重新解释的叶子单元
-// 入参: pattern 底纹画刷
-// 返回: bool 是否可仅平移编译结果
-func patternCellTranslatable(pattern *PatternPaint) bool {
-	for object := range pattern.CellContent.objects() {
-		var fill, stroke *FillColor
-		switch object.Type {
-		case "PathObject":
-			if object.PathObject.DrawParam != "" {
-				return false
-			}
-			fill, stroke = object.PathObject.FillColor, (*FillColor)(object.PathObject.StrokeColor)
-		case "TextObject":
-			if object.TextObject.DrawParam != "" {
-				return false
-			}
-			fill, stroke = object.TextObject.FillColor, (*FillColor)(object.TextObject.StrokeColor)
-		case "ImageObject":
-			if object.ImageObject.Border != nil {
-				stroke = (*FillColor)(object.ImageObject.Border.BorderColor)
-			}
-		default:
-			return false
-		}
-		if fill != nil && fill.Pattern != nil || stroke != nil && stroke.Pattern != nil {
-			return false
-		}
-	}
-	return true
-}
-
-// translatePatternCommands 平移单元实例，共享只读路径和画刷，独立处理页面裁剪
-// 入参: commands 原点单元, x 横向平移, y 纵向平移
-// 返回: []RasterCommand 放置后的指令
-func translatePatternCommands(commands []RasterCommand, x, y float64) []RasterCommand {
-	if x == 0 && y == 0 {
-		return commands
-	}
-	result := slices.Clone(commands)
-	for i := range result {
-		command := &result[i]
-		if command.Group == RasterGroupNone {
-			command.Transform[4] += x
-			command.Transform[5] += y
-		}
-		if command.Clip != nil {
-			command.Clip = slices.Clone(command.Clip)
-			matrix := RasterMatrix{1, 0, 0, 1, x, y}
-			for j := range command.Clip {
-				segment := &command.Clip[j]
-				segment.End = matrix.Apply(segment.End)
-				segment.Control1 = matrix.Apply(segment.Control1)
-				segment.Control2 = matrix.Apply(segment.Control2)
-			}
-		}
-	}
-	return result
-}
-
-// geometryFromRaster 将只含贝塞尔曲线的光栅路径还原为库路径
-// 入参: path 光栅路径
-// 返回: GeometryPath 库路径
-func geometryFromRaster(path []RasterSegment) GeometryPath {
-	result := make(GeometryPath, 0, len(path))
-	for _, s := range path {
-		verb := GeometryVerb(s.Verb)
-		if s.Verb == RasterClose {
-			verb = GeometryClose
-		}
-		result = append(result, GeometrySegment{Verb: verb, End: Point{X: s.End.X, Y: s.End.Y}, Control1: Point{X: s.Control1.X, Y: s.Control1.Y}, Control2: Point{X: s.Control2.X, Y: s.Control2.Y}})
-	}
-	return result
 }

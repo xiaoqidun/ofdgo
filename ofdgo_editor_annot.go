@@ -48,6 +48,65 @@ type ImageStampOptions struct {
 	Remark     string
 }
 
+// NewImageStampAnnotation 构造标准图片图章注解，统一计算外观Boundary、居中旋转CTM及透明度
+// 入参: options 图片图章参数
+// 返回: Annotation 可直接提交的图章注解, error 参数校验错误
+func NewImageStampAnnotation(options ImageStampOptions) (Annotation, error) {
+	if strings.TrimSpace(options.ResourceID) == "" {
+		return Annotation{}, fmt.Errorf("stamp requires an image resource ID")
+	}
+	if err := validateCreationBox(options.Box); err != nil {
+		return Annotation{}, err
+	}
+	if !finite(options.Angle) {
+		return Annotation{}, fmt.Errorf("stamp angle must be finite")
+	}
+	var alpha *int
+	if options.Alpha != nil {
+		if *options.Alpha < 0 || *options.Alpha > 255 {
+			return Annotation{}, fmt.Errorf("alpha must be between 0 and 255")
+		}
+		value := *options.Alpha
+		alpha = &value
+	}
+	ctm := Matrix{a: options.Box.W, d: options.Box.H}
+	if options.Angle != 0 {
+		rad := options.Angle * math.Pi / 180
+		cos, sin := math.Cos(rad), math.Sin(rad)
+		rot := Matrix{a: cos, b: sin, c: -sin, d: cos}
+		ctm = TranslationMatrix(options.Box.W/2, options.Box.H/2).Multiply(rot).Multiply(TranslationMatrix(-options.Box.W/2, -options.Box.H/2)).Multiply(ctm)
+	}
+	object := GraphicObject{
+		Type: "ImageObject",
+		ImageObject: ImageObject{
+			ResourceID: options.ResourceID,
+			Boundary:   editorBoxString(Box{W: options.Box.W, H: options.Box.H}),
+			CTM:        ctm.String(),
+			Alpha:      alpha,
+		},
+	}
+	return Annotation{
+		Type:    "Stamp",
+		Creator: options.Creator,
+		Remark:  options.Remark,
+		Appearance: Appearance{
+			Boundary: editorBoxString(options.Box),
+			Objects:  []GraphicObject{object},
+		},
+	}, nil
+}
+
+// editorAnnotationDate 更新注解修改日期，采用标准xs:date格式
+// 入参: data 注解XML片段
+// 返回: []byte 新片段, error 错误信息
+func editorAnnotationDate(data []byte) ([]byte, error) {
+	root, err := parseEditorXML(data)
+	if err != nil {
+		return nil, err
+	}
+	return editorXMLAttribute(data, root, "LastModDate", time.Now().Format("2006-01-02"))
+}
+
 // AddAnnotations 批量向指定页面新增标准注解并单次提交，支持多页共用单个注解或按页一一对应
 // 同一页面可重复出现，返回的新注解标识与pages一一对应，一次批量操作计入一条撤销记录
 // 入参: pages 目标页面索引列表, annotations 单个或与页码等长的注解列表
@@ -386,7 +445,7 @@ func (e *Editor) TransformAnnotations(page int, ids []string, matrix Matrix) err
 			if err != nil {
 				return err
 			}
-			if matrix == IdentityMatrix {
+			if matrix == IdentityMatrix() {
 				continue
 			}
 			box, err := ParseBox(annotation.Appearance.Boundary)
@@ -462,7 +521,7 @@ func (e *Editor) ReplaceAnnotationText(page int, id, old, value string, style Te
 						if resource != "" && visiting[resource] {
 							return fmt.Errorf("cyclic composite resource %q", resource)
 						}
-						children, err := edit.compositeMembers(nodes[i], renderer.Reader, renderer, visiting)
+						children, err := edit.compositeMembers(nodes[i], renderer.reader, renderer, visiting)
 						if err != nil {
 							return err
 						}
@@ -482,65 +541,6 @@ func (e *Editor) ReplaceAnnotationText(page int, id, old, value string, style Te
 		return 0, err
 	}
 	return count, nil
-}
-
-// NewImageStampAnnotation 构造标准图片图章注解，统一计算外观Boundary、居中旋转CTM及透明度
-// 入参: options 图片图章参数
-// 返回: Annotation 可直接提交的图章注解, error 参数校验错误
-func NewImageStampAnnotation(options ImageStampOptions) (Annotation, error) {
-	if strings.TrimSpace(options.ResourceID) == "" {
-		return Annotation{}, fmt.Errorf("stamp requires an image resource ID")
-	}
-	if err := validateCreationBox(options.Box); err != nil {
-		return Annotation{}, err
-	}
-	if !finite(options.Angle) {
-		return Annotation{}, fmt.Errorf("stamp angle must be finite")
-	}
-	var alpha *int
-	if options.Alpha != nil {
-		if *options.Alpha < 0 || *options.Alpha > 255 {
-			return Annotation{}, fmt.Errorf("alpha must be between 0 and 255")
-		}
-		value := *options.Alpha
-		alpha = &value
-	}
-	ctm := Matrix{a: options.Box.W, d: options.Box.H}
-	if options.Angle != 0 {
-		rad := options.Angle * math.Pi / 180
-		cos, sin := math.Cos(rad), math.Sin(rad)
-		rot := Matrix{a: cos, b: sin, c: -sin, d: cos}
-		ctm = TranslationMatrix(options.Box.W/2, options.Box.H/2).Multiply(rot).Multiply(TranslationMatrix(-options.Box.W/2, -options.Box.H/2)).Multiply(ctm)
-	}
-	object := GraphicObject{
-		Type: "ImageObject",
-		ImageObject: ImageObject{
-			ResourceID: options.ResourceID,
-			Boundary:   editorBoxString(Box{W: options.Box.W, H: options.Box.H}),
-			CTM:        ctm.String(),
-			Alpha:      alpha,
-		},
-	}
-	return Annotation{
-		Type:    "Stamp",
-		Creator: options.Creator,
-		Remark:  options.Remark,
-		Appearance: Appearance{
-			Boundary: editorBoxString(options.Box),
-			Objects:  []GraphicObject{object},
-		},
-	}, nil
-}
-
-// editorAnnotationDate 更新注解修改日期，采用标准xs:date格式
-// 入参: data 注解XML片段
-// 返回: []byte 新片段, error 错误信息
-func editorAnnotationDate(data []byte) ([]byte, error) {
-	root, err := parseEditorXML(data)
-	if err != nil {
-		return nil, err
-	}
-	return editorXMLAttribute(data, root, "LastModDate", time.Now().Format("2006-01-02"))
 }
 
 // editAnnotations 原子修改页面注解原文，按需分离共用文件并保留输入包与历史快照

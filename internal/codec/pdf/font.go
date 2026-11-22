@@ -62,7 +62,7 @@ func FontProgram(source *pdfgo.Font, type1 *basefont.Type1Program) ([]byte, Font
 			type1 = &parsed
 		}
 		var err error
-		program, err = type1.ToCFF(FontIdentity(source))
+		program, err = type1.ToCFF(fontIdentity(source))
 		if err != nil {
 			return nil, repair, err
 		}
@@ -149,7 +149,7 @@ func FontProgram(source *pdfgo.Font, type1 *basefont.Type1Program) ([]byte, Font
 			changed = true
 		}
 	}
-	if len(tables["cmap"]) == 0 || source.Subtype == "Type0" && invalidCmap || (source.Subtype == "Type0" || source.Subtype == "TrueType") && CmapNeedsRebuild(tables["cmap"]) {
+	if len(tables["cmap"]) == 0 || source.Subtype == "Type0" && invalidCmap || (source.Subtype == "Type0" || source.Subtype == "TrueType") && cmapNeedsRebuild(tables["cmap"]) {
 		mapping, err := source.GlyphMap()
 		if err != nil {
 			return nil, repair, err
@@ -164,7 +164,7 @@ func FontProgram(source *pdfgo.Font, type1 *basefont.Type1Program) ([]byte, Font
 		changed = true
 	}
 	if len(basefont.NamesFromTable(tables["name"])) == 0 {
-		fontName := FontIdentity(source)
+		fontName := fontIdentity(source)
 		name := utf16.Encode([]rune(fontName))
 		if len(name) > 32767 {
 			return nil, repair, fmt.Errorf("PDF font name exceeds name table capacity")
@@ -208,10 +208,10 @@ func FontProgram(source *pdfgo.Font, type1 *basefont.Type1Program) ([]byte, Font
 	return result, repair, err
 }
 
-// FontIdentity 返回字体名称或由原始程序生成的稳定封装标识
+// fontIdentity 返回字体名称或由原始程序生成的稳定封装标识
 // 入参: source PDF字体
 // 返回: string 字体标识
-func FontIdentity(source *pdfgo.Font) string {
+func fontIdentity(source *pdfgo.Font) string {
 	if source.Name != "" {
 		return source.Name
 	}
@@ -219,10 +219,10 @@ func FontIdentity(source *pdfgo.Font) string {
 	return fmt.Sprintf("PDF-%x", checksum[:28])
 }
 
-// CmapNeedsRebuild 检查字体封装字符表是否存在结构错误或交叠区段
+// cmapNeedsRebuild 检查字体封装字符表是否存在结构错误或交叠区段
 // 入参: data cmap表数据
 // 返回: bool 是否需要按PDF显式字形编号重建
-func CmapNeedsRebuild(data []byte) bool {
+func cmapNeedsRebuild(data []byte) bool {
 	if len(data) < 4 || binary.BigEndian.Uint16(data) != 0 {
 		return true
 	}

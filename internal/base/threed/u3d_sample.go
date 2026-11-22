@@ -93,7 +93,14 @@ func (track U3DMotionTrack) Sample(ctx context.Context, time float64, loop bool)
 	}
 	fraction := float64(0)
 	if b.Time != a.Time {
-		fraction = (time - float64(a.Time)) / (float64(b.Time) - float64(a.Time))
+		span := float64(b.Time) - float64(a.Time)
+		if !finite(span) || span == 0 {
+			return U3DKeyFrame{}, fmt.Errorf("invalid U3D key frame time")
+		}
+		fraction = (time - float64(a.Time)) / span
+		if !finite(fraction) {
+			return U3DKeyFrame{}, fmt.Errorf("invalid U3D key frame time")
+		}
 	}
 	result := U3DKeyFrame{Time: float32(time)}
 	for i := range result.Displacement {
@@ -114,6 +121,9 @@ func (track U3DMotionTrack) Sample(ctx context.Context, time float64, loop bool)
 	if dot < .9995 {
 		angle := math.Acos(min(1, dot))
 		divisor := math.Sin(angle)
+		if !finite(divisor) || divisor == 0 {
+			return U3DKeyFrame{}, fmt.Errorf("invalid U3D key frame rotation")
+		}
 		left, right = math.Sin(left*angle)/divisor, math.Sin(right*angle)/divisor
 	}
 	var rotation [4]float64
@@ -123,6 +133,9 @@ func (track U3DMotionTrack) Sample(ctx context.Context, time float64, loop bool)
 		length += rotation[i] * rotation[i]
 	}
 	length = math.Sqrt(length)
+	if !finite(length) || length == 0 {
+		return U3DKeyFrame{}, fmt.Errorf("invalid U3D key frame rotation")
+	}
 	for i := range result.Rotation {
 		result.Rotation[i] = float32(rotation[i] / length)
 	}

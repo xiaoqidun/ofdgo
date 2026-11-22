@@ -125,6 +125,88 @@ type InvoiceDimension struct {
 	Value     string `json:"value"`
 }
 
+// invoiceSourceConflicts 报告同票种、代码和号码的跨来源字段差异，不合并独立记录
+// 入参: report 当前文档及版本的发票报告
+func invoiceSourceConflicts(report *InvoiceReport) {
+	seen := make(map[[3]string]map[string]string)
+	for _, invoice := range report.Invoices {
+		if invoice.Number == "" {
+			continue
+		}
+		key := [3]string{invoice.Kind, invoice.Code, invoice.Number}
+		previous := seen[key]
+		if previous == nil {
+			previous = make(map[string]string)
+			seen[key] = previous
+		}
+		fields := []struct{ name, value string }{
+			{"date", invoice.Date}, {"currency", invoice.Currency}, {"status", invoice.Status},
+			{"amount", invoice.Amount}, {"taxAmount", invoice.TaxAmount}, {"totalAmount", invoice.TotalAmount},
+			{"buyer.name", invoice.Buyer.Name}, {"buyer.taxId", invoice.Buyer.TaxID},
+			{"seller.name", invoice.Seller.Name}, {"seller.taxId", invoice.Seller.TaxID},
+		}
+		for _, field := range fields {
+			if field.value == "" {
+				continue
+			}
+			value := strings.TrimSpace(field.value)
+			if old, ok := previous[field.name]; ok && old != value {
+				if (field.name == "amount" || field.name == "taxAmount" || field.name == "totalAmount") && invoiceDecimalEqual(old, value) {
+					continue
+				}
+				source := InvoiceSource{}
+				if len(invoice.Sources) > 0 {
+					source = invoice.Sources[0]
+				}
+				report.Issues = append(report.Issues, InvoiceIssue{Code: "source-conflict", Message: "invoice field differs between sources", Source: source, Field: field.name})
+			} else {
+				previous[field.name] = value
+			}
+		}
+	}
+}
+
+// invoiceExtensionData 提取扩展Data直接子树，复用XML片段编码并保留继承的命名空间
+// 入参: ctx 取消上下文, data 扩展或文档XML, location 包内位置, consume 候选处理函数
+// 返回: error XML、限额或取消错误
+func invoiceExtensionData(ctx context.Context, data []byte, location string, consume func(InvoiceSource, []byte, error) error) error {
+	if _, err := parseStructure(ctx, data, CustomTag{}); err != nil {
+		return err
+	}
+	root, err := parseEditorXMLContext(ctx, data)
+	if err != nil {
+		return err
+	}
+	if root.name.Local == "Document" {
+		root = root.child("Extensions")
+	}
+	if root == nil || root.name.Local != "Extensions" || classifyOFDNamespace(root.name.Space) == ofdXMLUnknown {
+		return fmt.Errorf("invalid invoice extension container")
+	}
+	i := 0
+	for _, extension := range root.children {
+		if extension.name.Local != "Extension" || !ofdXMLChild(root.name, extension.name) {
+			continue
+		}
+		j := 0
+		for _, entry := range extension.children {
+			if entry.name.Local != "Data" || !ofdXMLChild(extension.name, entry.name) {
+				continue
+			}
+			for k, node := range entry.children {
+				source := InvoiceSource{Kind: "extension", ID: strconv.Itoa(i), FileLoc: location, NodePath: fmt.Sprintf("/Extensions/Extension[%d]/Data[%d]/*[%d]", i+1, j+1, k+1)}
+				payload, err := editorXMLStandaloneContext(ctx, data[node.start:node.end], node)
+				if err := consume(source, payload, err); err != nil {
+					return err
+				}
+			}
+			j++
+		}
+		i++
+	}
+	return nil
+}
+
 // Invoices 提取当前文档及版本中的结构化发票，不执行票面识别、验签或网络请求
 // 返回: InvoiceReport 发票及诊断, error 文档读取错误
 func (r *Reader) Invoices() (InvoiceReport, error) {
@@ -291,47 +373,6 @@ func (r *Reader) InvoicesContext(ctx context.Context) (InvoiceReport, error) {
 	return report, nil
 }
 
-// invoiceSourceConflicts 报告同票种、代码和号码的跨来源字段差异，不合并独立记录
-// 入参: report 当前文档及版本的发票报告
-func invoiceSourceConflicts(report *InvoiceReport) {
-	seen := make(map[[3]string]map[string]string)
-	for _, invoice := range report.Invoices {
-		if invoice.Number == "" {
-			continue
-		}
-		key := [3]string{invoice.Kind, invoice.Code, invoice.Number}
-		previous := seen[key]
-		if previous == nil {
-			previous = make(map[string]string)
-			seen[key] = previous
-		}
-		fields := []struct{ name, value string }{
-			{"date", invoice.Date}, {"currency", invoice.Currency}, {"status", invoice.Status},
-			{"amount", invoice.Amount}, {"taxAmount", invoice.TaxAmount}, {"totalAmount", invoice.TotalAmount},
-			{"buyer.name", invoice.Buyer.Name}, {"buyer.taxId", invoice.Buyer.TaxID},
-			{"seller.name", invoice.Seller.Name}, {"seller.taxId", invoice.Seller.TaxID},
-		}
-		for _, field := range fields {
-			if field.value == "" {
-				continue
-			}
-			value := strings.TrimSpace(field.value)
-			if old, ok := previous[field.name]; ok && old != value {
-				if (field.name == "amount" || field.name == "taxAmount" || field.name == "totalAmount") && invoiceDecimalEqual(old, value) {
-					continue
-				}
-				source := InvoiceSource{}
-				if len(invoice.Sources) > 0 {
-					source = invoice.Sources[0]
-				}
-				report.Issues = append(report.Issues, InvoiceIssue{Code: "source-conflict", Message: "invoice field differs between sources", Source: source, Field: field.name})
-			} else {
-				previous[field.name] = value
-			}
-		}
-	}
-}
-
 // invoiceData 有界读取包内候选载荷，解压及读取期间响应取消
 // 入参: ctx 取消上下文, location 规范化包内路径
 // 返回: []byte XML数据, error 路径、限额、读取或取消错误
@@ -352,45 +393,4 @@ func (r *Reader) invoiceData(ctx context.Context, location string) ([]byte, erro
 		return data, fmt.Errorf("invoice XML size limit exceeded")
 	}
 	return data, ctx.Err()
-}
-
-// invoiceExtensionData 提取扩展Data直接子树，复用XML片段编码并保留继承的命名空间
-// 入参: ctx 取消上下文, data 扩展或文档XML, location 包内位置, consume 候选处理函数
-// 返回: error XML、限额或取消错误
-func invoiceExtensionData(ctx context.Context, data []byte, location string, consume func(InvoiceSource, []byte, error) error) error {
-	if _, err := parseStructure(ctx, data, CustomTag{}); err != nil {
-		return err
-	}
-	root, err := parseEditorXMLContext(ctx, data)
-	if err != nil {
-		return err
-	}
-	if root.name.Local == "Document" {
-		root = root.child("Extensions")
-	}
-	if root == nil || root.name.Local != "Extensions" || classifyOFDNamespace(root.name.Space) == ofdXMLUnknown {
-		return fmt.Errorf("invalid invoice extension container")
-	}
-	i := 0
-	for _, extension := range root.children {
-		if extension.name.Local != "Extension" || !ofdXMLChild(root.name, extension.name) {
-			continue
-		}
-		j := 0
-		for _, entry := range extension.children {
-			if entry.name.Local != "Data" || !ofdXMLChild(extension.name, entry.name) {
-				continue
-			}
-			for k, node := range entry.children {
-				source := InvoiceSource{Kind: "extension", ID: strconv.Itoa(i), FileLoc: location, NodePath: fmt.Sprintf("/Extensions/Extension[%d]/Data[%d]/*[%d]", i+1, j+1, k+1)}
-				payload, err := editorXMLStandaloneContext(ctx, data[node.start:node.end], node)
-				if err := consume(source, payload, err); err != nil {
-					return err
-				}
-			}
-			j++
-		}
-		i++
-	}
-	return nil
 }

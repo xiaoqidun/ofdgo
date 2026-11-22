@@ -19,13 +19,6 @@ import (
 	"math"
 )
 
-// Path 保存独立于绘图库的几何路径，不扁平化曲线或舍入坐标
-// 坐标以左上角为原点，单位为毫米，子路径从Move开始，Close回到当前子路径起点
-type Path []Segment
-
-// Verb 表示几何路径指令
-type Verb uint8
-
 // 几何路径指令，包括直线、曲线、椭圆弧和闭合
 const (
 	Move Verb = iota
@@ -35,6 +28,13 @@ const (
 	Arc
 	ClosePath
 )
+
+// Path 保存独立于绘图库的几何路径，不扁平化曲线或舍入坐标
+// 坐标以左上角为原点，单位为毫米，子路径从Move开始，Close回到当前子路径起点
+type Path []Segment
+
+// Verb 表示几何路径指令
+type Verb uint8
 
 // Segment 保存路径端点、贝塞尔控制点或端点式椭圆弧参数
 // 弧线Rotation单位为度，Sweep为true表示顺时针，Large表示大弧

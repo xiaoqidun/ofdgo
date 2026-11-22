@@ -35,35 +35,11 @@ type editorGeneratedReferences struct {
 	objects map[string]bool
 }
 
-// matches 判断条目仍为本次编码结果，空条目与暂存占位不混用
-// 入参: data 当前条目数据
-// 返回: bool 是否可以复用本次引用
-func (r editorGeneratedReferences) matches(data []byte) bool {
-	if r.staged != nil {
-		return data == nil
-	}
-	return bytes.Equal(data, r.data)
-}
-
-// stagedLeaf 判断暂存页面是否无需改写文件路径，资源标识仍由资源索引解析
-// 入参: data 当前条目数据
-// 返回: bool 是否为引用完整且不含文件路径的暂存页面
-func (r editorGeneratedReferences) stagedLeaf(data []byte) bool {
-	return r.staged != nil && data == nil && r.refs != nil && len(r.refs.files) == 0
-}
-
 // editorVectorUsage 保存自产矢量资源的引用快照，内容和路径变化时失效
 type editorVectorUsage struct {
 	name   string
 	digest [32]byte
 	refs   *editorResourceRefs
-}
-
-// matches 核对资源路径和完整内容摘要，不以切片地址判断内容
-// 入参: name 当前资源路径, data 当前资源内容
-// 返回: bool 是否仍可使用编码时的引用
-func (u *editorVectorUsage) matches(name string, data []byte) bool {
-	return u != nil && u.name == name && u.digest == sha256.Sum256(data)
 }
 
 // editorReferenceScan 按XML事件收集资源、字体用字和图元编号，未知内容保持完整扫描
@@ -84,6 +60,45 @@ type editorReferenceScan struct {
 	externalCustomTag bool
 	safe              bool
 	seen              bool
+}
+
+// editorReferenceTextSafe 判断XML编码是否保持引用文本的Unicode值
+// 入参: value 原始引用或字体用字
+// 返回: bool 是否无需字符替换
+func editorReferenceTextSafe(value string) bool {
+	if !utf8.ValidString(value) {
+		return false
+	}
+	for _, char := range value {
+		if char != '\t' && char != '\n' && char != '\r' && (char < 0x20 || char == 0xfffe || char == 0xffff) {
+			return false
+		}
+	}
+	return true
+}
+
+// matches 判断条目仍为本次编码结果，空条目与暂存占位不混用
+// 入参: data 当前条目数据
+// 返回: bool 是否可以复用本次引用
+func (r editorGeneratedReferences) matches(data []byte) bool {
+	if r.staged != nil {
+		return data == nil
+	}
+	return bytes.Equal(data, r.data)
+}
+
+// stagedLeaf 判断暂存页面是否无需改写文件路径，资源标识仍由资源索引解析
+// 入参: data 当前条目数据
+// 返回: bool 是否为引用完整且不含文件路径的暂存页面
+func (r editorGeneratedReferences) stagedLeaf(data []byte) bool {
+	return r.staged != nil && data == nil && r.refs != nil && len(r.refs.files) == 0
+}
+
+// matches 核对资源路径和完整内容摘要，不以切片地址判断内容
+// 入参: name 当前资源路径, data 当前资源内容
+// 返回: bool 是否仍可使用编码时的引用
+func (u *editorVectorUsage) matches(name string, data []byte) bool {
+	return u != nil && u.name == name && u.digest == sha256.Sum256(data)
 }
 
 // vectorUsage 保留完整且限额内的自产矢量引用，超限时保存流程重新扫描
@@ -453,19 +468,4 @@ func (x *ofdXML) referenceToken(token xml.Token) {
 		x.references = nil
 		x.checkContext()
 	}
-}
-
-// editorReferenceTextSafe 判断XML编码是否保持引用文本的Unicode值
-// 入参: value 原始引用或字体用字
-// 返回: bool 是否无需字符替换
-func editorReferenceTextSafe(value string) bool {
-	if !utf8.ValidString(value) {
-		return false
-	}
-	for _, char := range value {
-		if char != '\t' && char != '\n' && char != '\r' && (char < 0x20 || char == 0xfffe || char == 0xffff) {
-			return false
-		}
-	}
-	return true
 }

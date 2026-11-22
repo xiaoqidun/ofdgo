@@ -15,12 +15,17 @@
 package ofdgo
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"math"
+	"unicode"
 
 	"github.com/tdewolff/canvas"
 )
+
+// maxMergedTextSpanRunes 限制单个相邻合并文本选区的最大Unicode字符数
+const maxMergedTextSpanRunes = 12
 
 // boundsRenderer 收集绘制范围，不分配页面像素或合并独立图形轮廓
 type boundsRenderer struct {
@@ -50,19 +55,48 @@ func textPathBox(path *canvas.Path, pageH float64) Box {
 	return Box{X: bounds.X0, Y: pageH - bounds.Y1, W: bounds.X1 - bounds.X0, H: bounds.Y1 - bounds.Y0}
 }
 
-// mergeAdjacentTextSpan 尝试将同行连续相邻字符选区合并到前一个选区矩阵
-// 入参: prev 前一个文字选区, end 当前字符结束偏移, cur 当前字符选区矩阵
+// textSpanScript 返回字符所属选区合并脚本类别，空白字符返回零禁止合并
+// 入参: r 字符码点
+// 返回: uint8 脚本类别编号
+func textSpanScript(r rune) uint8 {
+	if unicode.IsSpace(r) {
+		return 0
+	}
+	if r <= 0x7F || unicode.Is(unicode.Latin, r) {
+		return 1
+	}
+	if unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r) || unicode.Is(unicode.Hangul, r) || r >= 0x3000 && r <= 0x303F || r >= 0xFF01 && r <= 0xFF60 || r >= 0xFFE0 && r <= 0xFFE6 {
+		return 2
+	}
+	return 3
+}
+
+// mergeAdjacentTextSpan 尝试将同行连续相邻且同脚本字符选区合并到前一个选区矩阵
+// 入参: runes 文本对象原文字符切片, prev 前一个文字选区, cur 当前已闭合文字选区
 // 返回: TextSpan 合并后的选区, bool 是否允许合并
-func mergeAdjacentTextSpan(prev TextSpan, end int, cur [6]float64) (TextSpan, bool) {
-	pa, pb, pc, pd, pe, pf := prev.Matrix[0], prev.Matrix[1], prev.Matrix[2], prev.Matrix[3], prev.Matrix[4], prev.Matrix[5]
-	ma, mb, mc, md, me, mf := cur[0], cur[1], cur[2], cur[3], cur[4], cur[5]
-	if math.Abs(pc-mc) > 0.05 || math.Abs(pd-md) > 0.05 {
+func mergeAdjacentTextSpan(runes []rune, prev, cur TextSpan) (TextSpan, bool) {
+	if prev.Start < 0 || prev.Start >= prev.End || prev.End != cur.Start || cur.Start >= cur.End || cur.End > len(runes) || cur.End-prev.Start > maxMergedTextSpanRunes {
 		return TextSpan{}, false
 	}
+	script := textSpanScript(runes[prev.Start])
+	if script == 0 {
+		return TextSpan{}, false
+	}
+	for _, ch := range runes[prev.Start+1 : cur.End] {
+		if textSpanScript(ch) != script {
+			return TextSpan{}, false
+		}
+	}
+	pa, pb, pc, pd, pe, pf := prev.Matrix[0], prev.Matrix[1], prev.Matrix[2], prev.Matrix[3], prev.Matrix[4], prev.Matrix[5]
+	ma, mb, mc, md, me, mf := cur.Matrix[0], cur.Matrix[1], cur.Matrix[2], cur.Matrix[3], cur.Matrix[4], cur.Matrix[5]
 	pLen := math.Hypot(pa, pb)
 	cLen := math.Hypot(ma, mb)
 	lineH := math.Hypot(pc, pd)
 	if pLen <= 1e-6 || cLen <= 1e-6 || lineH <= 1e-6 {
+		return TextSpan{}, false
+	}
+	tol := math.Min(0.05, 0.05*lineH)
+	if math.Abs(pc-mc) > tol || math.Abs(pd-md) > tol {
 		return TextSpan{}, false
 	}
 	ux, uy := pa/pLen, pb/pLen
@@ -72,24 +106,30 @@ func mergeAdjacentTextSpan(prev TextSpan, end int, cur [6]float64) (TextSpan, bo
 	}
 	dx, dy := me-(pe+pa), mf-(pf+pb)
 	perp := math.Abs(-dx*uy + dy*ux)
-	if perp > 0.05 {
+	if perp > tol {
 		return TextSpan{}, false
 	}
 	gap := dx*ux + dy*uy
-	if gap < -0.25*lineH || gap > 0.8*lineH {
+	if gap < -0.1*lineH || gap > 0.15*lineH {
 		return TextSpan{}, false
 	}
 	totalW := (me+ma-pe)*ux + (mf+mb-pf)*uy
 	if totalW <= pLen {
 		return TextSpan{}, false
 	}
-	return TextSpan{Start: prev.Start, End: end, Matrix: [6]float64{ux * totalW, uy * totalW, pc, pd, pe, pf}}, true
+	return TextSpan{Start: prev.Start, End: cur.End, Matrix: [6]float64{ux * totalW, uy * totalW, pc, pd, pe, pf}}, true
 }
 
 // MeasureObject 使用默认解释器度量对象，不分配页面像素
-// 入参: r 渲染器, object 图形对象, options 度量上下文
+// 入参: ctx 取消上下文, r 渲染器, object 图形对象, options 度量上下文
 // 返回: ObjectMeasurement 度量结果, error 错误信息
-func (CanvasBackend) MeasureObject(r *Renderer, object GraphicObject, options MeasureOptions) (ObjectMeasurement, error) {
+func (CanvasBackend) MeasureObject(ctx context.Context, r *Renderer, object GraphicObject, options MeasureOptions) (ObjectMeasurement, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return ObjectMeasurement{}, err
+	}
 	if object.Type != "TextObject" && object.Type != "PathObject" && object.Type != "ImageObject" && object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
 		return ObjectMeasurement{}, fmt.Errorf("unsupported object type %q", object.Type)
 	}
@@ -107,35 +147,35 @@ func (CanvasBackend) MeasureObject(r *Renderer, object GraphicObject, options Me
 		return ObjectMeasurement{}, err
 	}
 	bounds := &boundsRenderer{collect: options.Contours}
-	renderer := *r
-	if len(renderer.pageResources) > 0 {
-		defer renderer.bindParsedResources(renderer.pageResources)()
+	if len(r.pageResources) > 0 {
+		defer r.bindParsedResources(r.pageResources)()
 	}
-	renderer.renderError = nil
-	renderer.pageText = nil
-	renderer.textOnly = false
-	renderer.textContentOnly = false
+	prevCtx, prevErr, prevText, prevTextOnly, prevContentOnly := r.pageContext, r.renderError, r.pageText, r.textOnly, r.textContentOnly
+	r.pageContext, r.renderError, r.pageText, r.textOnly, r.textContentOnly = ctx, nil, nil, false, false
+	defer func() {
+		r.pageContext, r.renderError, r.pageText, r.textOnly, r.textContentOnly = prevCtx, prevErr, prevText, prevTextOnly, prevContentOnly
+	}()
 	defaults := options.Defaults
-	ctx := canvas.NewContext(bounds)
+	canvasCtx := canvas.NewContext(bounds)
 	switch object.Type {
 	case "TextObject":
 		if options.Contours {
-			renderer.renderText(ctx, object.TextObject, 0, defaults, options.Parent, options.BoundaryInCTM, clip)
+			r.renderText(canvasCtx, object.TextObject, 0, defaults, options.Parent, options.BoundaryInCTM, clip)
 			break
 		}
-		renderer.pageText = &PageText{}
-		renderer.textOnly = true
-		renderer.renderText(ctx, object.TextObject, 0, defaults, options.Parent, options.BoundaryInCTM, clip)
+		r.pageText = &PageText{}
+		r.textOnly = true
+		r.renderText(canvasCtx, object.TextObject, 0, defaults, options.Parent, options.BoundaryInCTM, clip)
 		var box Box
-		for _, run := range renderer.pageText.Runs {
+		for _, run := range r.pageText.Runs {
 			for _, glyph := range run.Boxes {
 				box = unionTextBox(box, glyph)
 			}
 		}
-		return ObjectMeasurement{Bounds: box}, renderer.renderError
+		return ObjectMeasurement{Bounds: box}, r.renderError
 	case "PathObject":
 		obj := object.PathObject
-		defaults = renderer.drawParamDefaults(obj.DrawParam, defaults)
+		defaults = r.drawParamDefaults(obj.DrawParam, defaults)
 		obj.DrawParam = ""
 		if defaults != nil {
 			style := *defaults
@@ -145,43 +185,43 @@ func (CanvasBackend) MeasureObject(r *Renderer, object GraphicObject, options Me
 		}
 		obj.FillColor = boundsColor(obj.FillColor)
 		obj.StrokeColor = (*StrokeColor)(boundsColor((*FillColor)(obj.StrokeColor)))
-		renderer.renderPath(ctx, obj, 0, defaults, options.Parent, options.BoundaryInCTM, clip)
+		r.renderPath(canvasCtx, obj, 0, defaults, options.Parent, options.BoundaryInCTM, clip)
 	case "ImageObject":
-		renderer.measureImage(ctx, object.ImageObject, 0, options.Parent, options.BoundaryInCTM, clip)
+		r.measureImage(canvasCtx, object.ImageObject, 0, options.Parent, options.BoundaryInCTM, clip)
 	case "CompositeObject", "CompositeGraphicUnit":
-		renderer.renderCompositeGraphicUnit(ctx, object.CompositeGraphicUnit, 0, defaults, options.Parent, options.BoundaryInCTM, clip)
+		r.renderCompositeGraphicUnit(canvasCtx, object.CompositeGraphicUnit, 0, defaults, options.Parent, options.BoundaryInCTM, clip)
 	}
-	return ObjectMeasurement{Bounds: bounds.box, Contours: bounds.contours}, renderer.renderError
+	return ObjectMeasurement{Bounds: bounds.box, Contours: bounds.contours}, r.renderError
 }
 
 // PageText 使用默认解释器提取原文与字形位置
-// 入参: r 渲染器, page 页面内容
+// 入参: ctx 取消上下文, r 渲染器, page 页面内容
 // 返回: *PageText 页面文字, error 错误信息
-func (CanvasBackend) PageText(r *Renderer, page *PageContent) (*PageText, error) {
-	ctx := r.pageContext
+func (CanvasBackend) PageText(ctx context.Context, r *Renderer, page *PageContent) (*PageText, error) {
 	if ctx == nil {
-		ctx = r.outputContext()
+		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	prevCtx, prevOnText, prevText, prevTextOnly, prevErr := r.pageContext, r.OnPageText, r.pageText, r.textOnly, r.renderError
+	extracted := &PageText{}
+	r.pageContext, r.OnPageText, r.pageText, r.textOnly, r.renderError = ctx, nil, extracted, true, nil
+	defer func() {
+		r.pageContext, r.OnPageText, r.pageText, r.textOnly, r.renderError = prevCtx, prevOnText, prevText, prevTextOnly, prevErr
+	}()
 	defer r.bindPageResources(page)()
-	box, err := r.GetPageBox(page)
+	box, err := r.GetPageBoxContext(ctx, page)
 	if err != nil {
 		return nil, err
 	}
-	renderer := *r
-	renderer.pageContext = ctx
-	renderer.OnPageText = nil
-	renderer.pageText = &PageText{}
-	renderer.textOnly = true
-	if err := renderer.renderCanvasPageToContext(canvas.NewContext(canvas.New(box.W, box.H)), page, false); err != nil {
+	if err := r.renderCanvasPageToContext(canvas.NewContext(canvas.New(box.W, box.H)), page, false); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return renderer.pageText, nil
+	return extracted, nil
 }
 
 // Size 返回不限定边界的度量画布尺寸
@@ -267,7 +307,7 @@ func (r *Renderer) measureImage(ctx *canvas.Context, obj ImageObject, pageH floa
 	}
 }
 
-// addSpan 收集字形选择区域，合并同原文区间及同行相邻连续字符选区
+// addSpan 收集字形选择区域并聚合同一原文区间的多字形范围
 // 入参: start 起始字符, end 结束字符, bounds 字形布局区域, m 字形变换, clip 裁剪路径, pageH 页面高度
 func (run *TextRun) addSpan(start, end int, bounds canvas.Rect, m canvas.Matrix, clip *canvas.Path, pageH float64) {
 	if m.Det() == 0 {
@@ -322,25 +362,34 @@ func (run *TextRun) addSpan(start, end int, bounds canvas.Rect, m canvas.Matrix,
 	}
 	m = canvas.Matrix{{1, 0, 0}, {0, -1, pageH}}.Mul(m).Translate(bounds.X0, bounds.Y1).Scale(bounds.W(), -bounds.H())
 	curMatrix := [6]float64{m[0][0], m[1][0], m[0][1], m[1][1], m[0][2], m[1][2]}
-	if n := len(run.Spans); n > 0 {
-		if run.Spans[n-1].Start == start && run.Spans[n-1].End == end {
-			span := run.Spans[n-1]
-			v := span.Matrix
-			previous := canvas.Matrix{{v[0], v[2], v[4]}, {v[1], v[3], v[5]}}
-			if inverse, ok := invertCanvasMatrix(previous); ok {
-				merged := canvas.Rect{X1: 1, Y1: 1}.Add(canvas.Rect{X1: 1, Y1: 1}.Transform(inverse.Mul(m)))
-				m = previous.Translate(merged.X0, merged.Y0).Scale(merged.W(), merged.H())
-				curMatrix = [6]float64{m[0][0], m[1][0], m[0][1], m[1][1], m[0][2], m[1][2]}
-			}
-			run.Spans[n-1] = TextSpan{Start: start, End: end, Matrix: curMatrix}
-			return
+	if n := len(run.Spans); n > 0 && run.Spans[n-1].Start == start && run.Spans[n-1].End == end {
+		span := run.Spans[n-1]
+		v := span.Matrix
+		previous := canvas.Matrix{{v[0], v[2], v[4]}, {v[1], v[3], v[5]}}
+		if inverse, ok := invertCanvasMatrix(previous); ok {
+			merged := canvas.Rect{X1: 1, Y1: 1}.Add(canvas.Rect{X1: 1, Y1: 1}.Transform(inverse.Mul(m)))
+			m = previous.Translate(merged.X0, merged.Y0).Scale(merged.W(), merged.H())
+			curMatrix = [6]float64{m[0][0], m[1][0], m[0][1], m[1][1], m[0][2], m[1][2]}
 		}
-		if run.Spans[n-1].End == start {
-			if merged, ok := mergeAdjacentTextSpan(run.Spans[n-1], end, curMatrix); ok {
-				run.Spans[n-1] = merged
-				return
-			}
-		}
+		run.Spans[n-1] = TextSpan{Start: start, End: end, Matrix: curMatrix}
+		return
 	}
 	run.Spans = append(run.Spans, TextSpan{Start: start, End: end, Matrix: curMatrix})
+}
+
+// mergeLastSpan 在完整原文区间闭合后尝试将末选区与前序相邻选区合并
+// 入参: runes 文本对象原文字符切片, start 已闭合区间起始字符, end 已闭合区间结束字符
+func (run *TextRun) mergeLastSpan(runes []rune, start, end int) {
+	n := len(run.Spans)
+	if n < 2 {
+		return
+	}
+	last := run.Spans[n-1]
+	if last.Start != start || last.End != end {
+		return
+	}
+	if merged, ok := mergeAdjacentTextSpan(runes, run.Spans[n-2], last); ok {
+		run.Spans[n-2] = merged
+		run.Spans = run.Spans[:n-1]
+	}
 }

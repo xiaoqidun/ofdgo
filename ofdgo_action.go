@@ -133,6 +133,68 @@ type RegionCommand struct {
 	EndPoint       string
 }
 
+// actionSource 动作来源
+type actionSource struct {
+	Box     Box
+	Actions []Action
+	Matrix  Matrix
+	Geo     GeometryPath
+	Path    string
+	Graphic bool
+}
+
+// decodeOFDActions 读取标准动作列表，不将外部同名节点作为交互动作
+// 入参: d XML解码器, start 列表起始节点, actions 动作接收列表
+// 返回: error 解析错误
+func decodeOFDActions(d *xml.Decoder, start xml.StartElement, actions *[]Action) error {
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local != "Action" {
+			return d.Skip()
+		}
+		var action Action
+		if err := d.DecodeElement(&action, &node); err != nil {
+			return err
+		}
+		*actions = append(*actions, action)
+		return nil
+	})
+}
+
+// gotoDest 获取文档内跳转目标
+// 入参: action 跳转动作, bookmarks 书签
+// 返回: *Dest 跳转目标
+func gotoDest(action *Goto, bookmarks map[string]Dest) *Dest {
+	if action.Dest != nil {
+		dest := action.Dest.effective()
+		return &dest
+	}
+	if action.Bookmark != nil {
+		if dest, ok := bookmarks[action.Bookmark.Name]; ok {
+			dest = dest.effective()
+			return &dest
+		}
+	}
+	return nil
+}
+
+// resolveActionURI 解析URI动作地址
+// 入参: action URI动作
+// 返回: string URI地址
+func resolveActionURI(action URI) string {
+	if action.Base == "" {
+		return action.URI
+	}
+	base, err := url.Parse(action.Base)
+	if err != nil {
+		return action.URI
+	}
+	target, err := url.Parse(action.URI)
+	if err != nil {
+		return action.URI
+	}
+	return base.ResolveReference(target).String()
+}
+
 // UnmarshalXML 读取事件、区域和动作内容，忽略外部同名节点
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解析错误
@@ -327,16 +389,6 @@ func (a *RegionArea) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 	})
 }
 
-// actionSource 动作来源
-type actionSource struct {
-	Box     Box
-	Actions []Action
-	Matrix  Matrix
-	Geo     GeometryPath
-	Path    string
-	Graphic bool
-}
-
 // pageOpenActionSources 获取页面及模板的打开动作，保留模板层次和引用顺序
 // 入参: page 页面内容
 // 返回: []actionSource 动作来源
@@ -345,7 +397,7 @@ func (r *Renderer) pageOpenActionSources(page *PageContent) []actionSource {
 	if len(page.Actions) > 0 {
 		sources = append(sources, actionSource{Actions: page.Actions})
 	}
-	if r.Reader.doc == nil {
+	if r.reader.doc == nil {
 		return sources
 	}
 	for order := range 3 {
@@ -368,7 +420,7 @@ func (r *Renderer) pageActionSources(page *PageContent) []actionSource {
 	defer r.bindPageResources(page)()
 	sources := make([]actionSource, 0)
 	for order := range 3 {
-		if r.Reader != nil && r.Reader.doc != nil {
+		if r.reader != nil && r.reader.doc != nil {
 			for _, ref := range page.Template {
 				if r.templateOrder(ref) != order {
 					continue
@@ -396,7 +448,7 @@ func (r *Renderer) appendLayerActionSources(sources []actionSource, layers []Lay
 			continue
 		}
 		for object := range (PatternContent{Objects: layer.Objects, TextObject: layer.TextObject, PathObject: layer.PathObject, ImageObject: layer.ImageObject, CompositeGraphicUnit: layer.CompositeGraphicUnit}).objects() {
-			sources = r.appendGraphicActionSources(sources, object, IdentityMatrix, false, nil)
+			sources = r.appendGraphicActionSources(sources, object, IdentityMatrix(), false, nil)
 		}
 	}
 	return sources
@@ -469,7 +521,7 @@ func (r *Renderer) appendGraphicActionSources(sources []actionSource, object Gra
 			source.Box.W, source.Box.H = box.W, box.H
 		}
 		if box.W > 0 && box.H > 0 && !basegeom.AxisAligned(basegeom.MatrixFromValues(placement.Values())) {
-			path := GeometryPath(basegeom.Rectangle(Box{W: box.W, H: box.H}))
+			path := geometryRectangle(Box{W: box.W, H: box.H})
 			for i := range path {
 				path[i].End.X, path[i].End.Y = placement.Transform(path[i].End.X, path[i].End.Y)
 			}
@@ -592,56 +644,4 @@ func (dest Dest) attributes() (ofdAttrs, error) {
 		return nil, fmt.Errorf("invalid destination type %q", dest.Type)
 	}
 	return attrs, nil
-}
-
-// decodeOFDActions 读取标准动作列表，不将外部同名节点作为交互动作
-// 入参: d XML解码器, start 列表起始节点, actions 动作接收列表
-// 返回: error 解析错误
-func decodeOFDActions(d *xml.Decoder, start xml.StartElement, actions *[]Action) error {
-	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
-		if node.Name.Local != "Action" {
-			return d.Skip()
-		}
-		var action Action
-		if err := d.DecodeElement(&action, &node); err != nil {
-			return err
-		}
-		*actions = append(*actions, action)
-		return nil
-	})
-}
-
-// gotoDest 获取文档内跳转目标
-// 入参: action 跳转动作, bookmarks 书签
-// 返回: *Dest 跳转目标
-func gotoDest(action *Goto, bookmarks map[string]Dest) *Dest {
-	if action.Dest != nil {
-		dest := action.Dest.effective()
-		return &dest
-	}
-	if action.Bookmark != nil {
-		if dest, ok := bookmarks[action.Bookmark.Name]; ok {
-			dest = dest.effective()
-			return &dest
-		}
-	}
-	return nil
-}
-
-// resolveActionURI 解析URI动作地址
-// 入参: action URI动作
-// 返回: string URI地址
-func resolveActionURI(action URI) string {
-	if action.Base == "" {
-		return action.URI
-	}
-	base, err := url.Parse(action.Base)
-	if err != nil {
-		return action.URI
-	}
-	target, err := url.Parse(action.URI)
-	if err != nil {
-		return action.URI
-	}
-	return base.ResolveReference(target).String()
 }

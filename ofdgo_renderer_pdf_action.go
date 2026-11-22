@@ -22,7 +22,6 @@ import (
 	"slices"
 
 	"github.com/tdewolff/canvas"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -31,113 +30,6 @@ import (
 type pdfActionArea struct {
 	Path    GeometryPath
 	Actions []pdfNavigationAction
-}
-
-// addActions 按命中区域组合同一对象的点击动作，不合并其他对象的事件
-// 入参: renderer 渲染器, page 页面索引, source 动作来源, bookmarks 书签, pageIndex 页面索引表, pages 页面数据
-// 返回: error 区域、目标或取消错误
-func (n *pdfNavigation) addActions(renderer *Renderer, page int, source actionSource, bookmarks map[string]Dest, pageIndex map[string]int, pages []RenderDocumentPage) error {
-	ctx := renderer.outputContext()
-	var areas []pdfActionArea
-	for _, action := range source.Actions {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if action.Event != "CLICK" {
-			continue
-		}
-		box, outline, err := renderer.actionLinkRegion(source, action)
-		if err != nil {
-			return err
-		}
-		if box.W <= 0 || box.H <= 0 {
-			continue
-		}
-		value, err := n.actionTarget(action, page, source, bookmarks, pageIndex, pages)
-		if err != nil {
-			return err
-		}
-		if value == nil {
-			continue
-		}
-		path := GeometryPath(basegeom.Rectangle(box))
-		if outline != "" {
-			parsed, err := canvas.ParseSVGPath(outline)
-			if err != nil {
-				return err
-			}
-			if parsed.Len() > codecpdf.LinkEdgeLimit {
-				return fmt.Errorf("PDF link region exceeds edge limit")
-			}
-			parsed, err = codecpdf.FlattenLink(ctx, parsed)
-			if err != nil {
-				return err
-			}
-			path = *geometryFromCanvasPath(parsed.Transform(canvas.Identity.Scale(1, -1)))
-		}
-		areas, err = partitionPDFActions(ctx, renderer, areas, path, *value)
-		if err != nil {
-			return err
-		}
-	}
-	for _, area := range areas {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		box, err := area.Path.Bounds()
-		if err != nil {
-			return err
-		}
-		if box.W <= 0 || box.H <= 0 {
-			continue
-		}
-		outline, err := area.Path.SVG()
-		if err != nil {
-			return err
-		}
-		region, err := codecpdf.ActionRegion(ctx, outline, pages[page].Box.H)
-		if err != nil {
-			return err
-		}
-		if region != nil && len(region.Quads) == 0 {
-			continue
-		}
-		n.Link[page] = append(n.Link[page], pdfLink{Rect: pdfSourceRect(box, pages[page].Box.H), Region: region, Actions: area.Actions})
-		n.nativeWrite = true
-	}
-	return nil
-}
-
-// addLifecycleActions 按事件归属收集打开动作，不受点击区域限制
-// 入参: ctx 取消上下文, source 动作来源, page 页面索引，负值表示文档, bookmarks 书签, pageIndex 页面索引表, pages 页面数据
-// 返回: error 目标或取消错误
-func (n *pdfNavigation) addLifecycleActions(ctx context.Context, source actionSource, page int, bookmarks map[string]Dest, pageIndex map[string]int, pages []RenderDocumentPage) error {
-	event := "PO"
-	if page < 0 {
-		event = "DO"
-	}
-	for _, action := range source.Actions {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if action.Event != event || source.Graphic {
-			continue
-		}
-		value, err := n.actionTarget(action, page, source, bookmarks, pageIndex, pages)
-		if err != nil {
-			return err
-		}
-		if value == nil {
-			continue
-		}
-		if action.Event == "DO" {
-			n.Open = append(n.Open, *value)
-		} else {
-			n.PageOpen[page] = append(n.PageOpen[page], *value)
-		}
-		n.nativeWrite = true
-	}
-	return nil
 }
 
 // partitionPDFActions 将新增动作区域与已有区域分离，使每个区域具有唯一动作序列
@@ -252,6 +144,113 @@ func pdfNavigationValues(actions []pdfNavigationAction, pages []pdfgo.Reference)
 		values = append(values, value)
 	}
 	return values
+}
+
+// addActions 按命中区域组合同一对象的点击动作，不合并其他对象的事件
+// 入参: renderer 渲染器, page 页面索引, source 动作来源, bookmarks 书签, pageIndex 页面索引表, pages 页面数据
+// 返回: error 区域、目标或取消错误
+func (n *pdfNavigation) addActions(renderer *Renderer, page int, source actionSource, bookmarks map[string]Dest, pageIndex map[string]int, pages []RenderDocumentPage) error {
+	ctx := renderer.outputContext()
+	var areas []pdfActionArea
+	for _, action := range source.Actions {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if action.Event != "CLICK" {
+			continue
+		}
+		box, outline, err := renderer.actionLinkRegion(source, action)
+		if err != nil {
+			return err
+		}
+		if box.W <= 0 || box.H <= 0 {
+			continue
+		}
+		value, err := n.actionTarget(action, page, source, bookmarks, pageIndex, pages)
+		if err != nil {
+			return err
+		}
+		if value == nil {
+			continue
+		}
+		path := geometryRectangle(box)
+		if outline != "" {
+			parsed, err := canvas.ParseSVGPath(outline)
+			if err != nil {
+				return err
+			}
+			if parsed.Len() > codecpdf.LinkEdgeLimit {
+				return fmt.Errorf("PDF link region exceeds edge limit")
+			}
+			parsed, err = codecpdf.FlattenLink(ctx, parsed)
+			if err != nil {
+				return err
+			}
+			path = *geometryFromCanvasPath(parsed.Transform(canvas.Identity.Scale(1, -1)))
+		}
+		areas, err = partitionPDFActions(ctx, renderer, areas, path, *value)
+		if err != nil {
+			return err
+		}
+	}
+	for _, area := range areas {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		box, err := area.Path.Bounds()
+		if err != nil {
+			return err
+		}
+		if box.W <= 0 || box.H <= 0 {
+			continue
+		}
+		outline, err := area.Path.SVG()
+		if err != nil {
+			return err
+		}
+		region, err := codecpdf.ActionRegion(ctx, outline, pages[page].Box.H)
+		if err != nil {
+			return err
+		}
+		if region != nil && len(region.Quads) == 0 {
+			continue
+		}
+		n.Link[page] = append(n.Link[page], pdfLink{Rect: pdfSourceRect(box, pages[page].Box.H), Region: region, Actions: area.Actions})
+		n.nativeWrite = true
+	}
+	return nil
+}
+
+// addLifecycleActions 按事件归属收集打开动作，不受点击区域限制
+// 入参: ctx 取消上下文, source 动作来源, page 页面索引，负值表示文档, bookmarks 书签, pageIndex 页面索引表, pages 页面数据
+// 返回: error 目标或取消错误
+func (n *pdfNavigation) addLifecycleActions(ctx context.Context, source actionSource, page int, bookmarks map[string]Dest, pageIndex map[string]int, pages []RenderDocumentPage) error {
+	event := "PO"
+	if page < 0 {
+		event = "DO"
+	}
+	for _, action := range source.Actions {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if action.Event != event || source.Graphic {
+			continue
+		}
+		value, err := n.actionTarget(action, page, source, bookmarks, pageIndex, pages)
+		if err != nil {
+			return err
+		}
+		if value == nil {
+			continue
+		}
+		if action.Event == "DO" {
+			n.Open = append(n.Open, *value)
+		} else {
+			n.PageOpen[page] = append(n.PageOpen[page], *value)
+		}
+		n.nativeWrite = true
+	}
+	return nil
 }
 
 // writeAttachments 在页面绘制后读取附件，保留文件字节，不自动添加个人信息和时间

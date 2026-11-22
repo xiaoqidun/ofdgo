@@ -15,7 +15,13 @@ self.addEventListener("fetch", (event) => {
 		return;
 	}
 	event.respondWith((async () => {
-		if (navigation) await currentBundle(await caches.open(META_CACHE));
+		if (navigation) {
+			try {
+				await currentBundle(await caches.open(META_CACHE));
+			} catch {
+				return fetch(event.request);
+			}
+		}
 		return navigator.locks.request(CACHE_PREFIX, { mode: event.resultingClientId ? "exclusive" : "shared" }, () => readResource(event, navigation));
 	})());
 });
@@ -129,7 +135,8 @@ async function updateBundle(meta) {
 		}
 		return { url, response };
 	}));
-	if (resources.some(({ response }) => response.headers.get("X-OFDGo-Checksum") !== BUNDLE_CHECKSUM)) {
+	const expected = typeof BUNDLE_CHECKSUM === "string" ? BUNDLE_CHECKSUM : "";
+	if (!expected || resources.some(({ response }) => response.headers.get("X-OFDGo-Checksum") !== expected)) {
 		throw new Error("资源校验失败");
 	}
 	const bundle = { name: CACHE_PREFIX + randomID(), assets: ASSETS };

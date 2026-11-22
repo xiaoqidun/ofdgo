@@ -310,6 +310,9 @@ func (r *Renderer) rasterTriangle(triangle [3]u3dVertex, shader U3DShader, pass 
 	for i, v := range triangle {
 		reciprocal[i] = 1
 		if r.camera.Perspective {
+			if !finite(v.point[2]) || v.point[2] <= 0 {
+				return fmt.Errorf("invalid U3D projected point")
+			}
 			reciprocal[i] = 1 / v.point[2]
 		}
 		x[i] = r.viewport[0] + r.viewport[2]/2 + r.camera.ShiftX + v.point[0]*r.camera.ScaleX*reciprocal[i]
@@ -370,6 +373,9 @@ func (r *Renderer) rasterTriangle(triangle [3]u3dVertex, shader U3DShader, pass 
 				continue
 			}
 			w1, w2 := edge[2]/area, edge[0]/area
+			if !finite(w1) || !finite(w2) {
+				return fmt.Errorf("invalid U3D barycentric coordinates")
+			}
 			depth := triangle[0].point[2] + w1*(triangle[1].point[2]-triangle[0].point[2]) + w2*(triangle[2].point[2]-triangle[0].point[2])
 			if r.camera.Perspective {
 				q := edge[1]/area*reciprocal[0] + w1*reciprocal[1] + w2*reciprocal[2]
@@ -379,6 +385,9 @@ func (r *Renderer) rasterTriangle(triangle [3]u3dVertex, shader U3DShader, pass 
 				w1 = w1 * reciprocal[1] / q
 				w2 = w2 * reciprocal[2] / q
 				depth = 1 / q
+			}
+			if !finite(w1) || !finite(w2) || !finite(depth) {
+				return fmt.Errorf("invalid U3D perspective depth")
 			}
 			pixel := row*width + column
 			if depth > r.frame[pixel].depth {

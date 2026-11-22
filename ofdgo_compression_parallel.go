@@ -49,6 +49,79 @@ type outputImageContext struct {
 	parent context.Context
 }
 
+// imageWorkingSet 按当前预算估算图像解码工作量
+// 入参: ctx 取消上下文, data 图像编码, limit 估算上限
+// 返回: int 工作量字节数
+func imageWorkingSet(ctx context.Context, data []byte, limit int) int {
+	if len(data) >= limit {
+		return limit
+	}
+	input := bytes.NewReader(data)
+	available := limit - len(data)
+	if baseimage.IsTIFF(data) {
+		layout, err := baseimage.ReadTIFFLayoutContext(ctx, input)
+		if err != nil {
+			return limit
+		}
+		return len(data) + tiffImageWorkingSet(layout, available)
+	}
+	config, _, err := baseimage.DecodeConfig(imageInput{ReadCloser: io.NopCloser(input), ctx: ctx})
+	if err != nil || config.Width <= 0 || config.Height <= 0 {
+		return limit
+	}
+	if config.Width > available/16/config.Height {
+		return limit
+	}
+	return len(data) + config.Width*config.Height*16
+}
+
+// tiffImageWorkingSet 分别估算显示缓冲及主图、蒙版的完整瓦片存储，超预算时返回上限
+// 入参: layout 已校验的主图布局, limit 可用字节数
+// 返回: int 不超过limit的估算值
+func tiffImageWorkingSet(layout baseimage.TIFFLayout, limit int) int {
+	size := layout.DisplaySize()
+	if size.X <= 0 || size.Y <= 0 || size.X > limit/16/size.Y {
+		return limit
+	}
+	cost := size.X * size.Y * 16
+	for source := &layout; source != nil; source = source.Transparency {
+		width, height := uint64(source.Width), uint64(source.Height)
+		if source.TileWidth != 0 {
+			x, y := uint64(source.TileWidth), uint64(source.TileHeight)
+			width, height = ((width-1)/x+1)*x, ((height-1)/y+1)*y
+		}
+		pixelSize := max(uint64(16), source.DecodedPixelBytes())
+		if !source.Planar {
+			pixelSize = max(pixelSize, uint64(source.Samples)*4)
+		}
+		if width > uint64(limit-cost)/pixelSize/height {
+			return limit
+		}
+		cost += int(width * height * pixelSize)
+	}
+	return cost
+}
+
+// optimizeOutputImage 在共享预算内优化独立图像
+// 入参: ctx 转换上下文, job 图像任务
+// 返回: []byte 候选编码, error 转换错误
+func optimizeOutputImage(ctx context.Context, job outputImageJob) ([]byte, error) {
+	if pool, _ := ctx.Value(conversionPoolKey{}).(*ConversionPool); pool != nil {
+		if job.workingSet == 0 {
+			limit := outputImageWorkingSetLimit
+			if available := pool.memoryLimit(); available > 0 {
+				limit = int(min(available, int64(int(^uint(0)>>1))))
+			}
+			job.workingSet = imageWorkingSet(ctx, job.data, limit)
+		}
+		if err := pool.acquire(ctx, true, int64(job.workingSet)); err != nil {
+			return nil, err
+		}
+		defer pool.release(true, int64(job.workingSet))
+	}
+	return optimizeImageResource(ctx, job.data, job.key.options, job.key.size)
+}
+
 // Err 检查调用方及本次任务的取消状态
 // 返回: error 取消错误
 func (c outputImageContext) Err() error {
@@ -186,59 +259,6 @@ func (e *Editor) prepareOutputImages(keys []string, load func(string) ([]byte, e
 	return e.output.ctx.Err()
 }
 
-// imageWorkingSet 按当前预算估算图像解码工作量
-// 入参: ctx 取消上下文, data 图像编码, limit 估算上限
-// 返回: int 工作量字节数
-func imageWorkingSet(ctx context.Context, data []byte, limit int) int {
-	if len(data) >= limit {
-		return limit
-	}
-	input := bytes.NewReader(data)
-	available := limit - len(data)
-	if baseimage.IsTIFF(data) {
-		layout, err := baseimage.ReadTIFFLayoutContext(ctx, input)
-		if err != nil {
-			return limit
-		}
-		return len(data) + tiffImageWorkingSet(layout, available)
-	}
-	config, _, err := baseimage.DecodeConfig(imageInput{ReadCloser: io.NopCloser(input), ctx: ctx})
-	if err != nil || config.Width <= 0 || config.Height <= 0 {
-		return limit
-	}
-	if config.Width > available/16/config.Height {
-		return limit
-	}
-	return len(data) + config.Width*config.Height*16
-}
-
-// tiffImageWorkingSet 分别估算显示缓冲及主图、蒙版的完整瓦片存储，超预算时返回上限
-// 入参: layout 已校验的主图布局, limit 可用字节数
-// 返回: int 不超过limit的估算值
-func tiffImageWorkingSet(layout baseimage.TIFFLayout, limit int) int {
-	size := layout.DisplaySize()
-	if size.X <= 0 || size.Y <= 0 || size.X > limit/16/size.Y {
-		return limit
-	}
-	cost := size.X * size.Y * 16
-	for source := &layout; source != nil; source = source.Transparency {
-		width, height := uint64(source.Width), uint64(source.Height)
-		if source.TileWidth != 0 {
-			x, y := uint64(source.TileWidth), uint64(source.TileHeight)
-			width, height = ((width-1)/x+1)*x, ((height-1)/y+1)*y
-		}
-		pixelSize := max(uint64(16), source.DecodedPixelBytes())
-		if !source.Planar {
-			pixelSize = max(pixelSize, uint64(source.Samples)*4)
-		}
-		if width > uint64(limit-cost)/pixelSize/height {
-			return limit
-		}
-		cost += int(width * height * pixelSize)
-	}
-	return cost
-}
-
 // runOutputImages 等待整批结束后记录更小候选，失败图片保留原始编码
 // 入参: jobs 独占图片任务, results 本次写出的候选缓存
 // 返回: error 取消错误
@@ -267,24 +287,4 @@ func (e *Editor) runOutputImages(jobs []outputImageJob, results map[outputImageK
 		}
 	}
 	return nil
-}
-
-// optimizeOutputImage 在共享预算内优化独立图像
-// 入参: ctx 转换上下文, job 图像任务
-// 返回: []byte 候选编码, error 转换错误
-func optimizeOutputImage(ctx context.Context, job outputImageJob) ([]byte, error) {
-	if pool, _ := ctx.Value(conversionPoolKey{}).(*ConversionPool); pool != nil {
-		if job.workingSet == 0 {
-			limit := outputImageWorkingSetLimit
-			if available := pool.memoryLimit(); available > 0 {
-				limit = int(min(available, int64(int(^uint(0)>>1))))
-			}
-			job.workingSet = imageWorkingSet(ctx, job.data, limit)
-		}
-		if err := pool.acquire(ctx, true, int64(job.workingSet)); err != nil {
-			return nil, err
-		}
-		defer pool.release(true, int64(job.workingSet))
-	}
-	return optimizeImageResource(ctx, job.data, job.key.options, job.key.size)
 }

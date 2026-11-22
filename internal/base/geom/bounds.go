@@ -19,6 +19,39 @@ import (
 	"math"
 )
 
+// Lerp 线性插值坐标
+// 入参: a 起点, b 终点, t 插值比例
+// 返回: Point 插值坐标
+func Lerp(a, b Point, t float64) Point {
+	return Point{(1-t)*a.X + t*b.X, (1-t)*a.Y + t*b.Y}
+}
+
+// geometryRoots 稳定求解一元二次方程的实根
+// 入参: a 二次项系数, b 一次项系数, c 常数项
+// 返回: []float64 实根
+func geometryRoots(a, b, c float64) []float64 {
+	scale := math.Max(math.Abs(a), math.Max(math.Abs(b), math.Abs(c)))
+	if scale == 0 {
+		return nil
+	}
+	a, b, c = a/scale, b/scale, c/scale
+	if a == 0 {
+		if b == 0 {
+			return nil
+		}
+		return []float64{-c / b}
+	}
+	d := b*b - 4*a*c
+	if d < 0 {
+		return nil
+	}
+	q := -.5 * (b + math.Copysign(math.Sqrt(d), b))
+	if q == 0 {
+		return []float64{-b / (2 * a)}
+	}
+	return []float64{q / a, c / q}
+}
+
 // Bounds 通过解析极值计算直线、贝塞尔和椭圆弧的轴对齐边界
 // 不进行曲线展开且不使用Tolerance，结果受float64舍入误差影响，不保证向外舍入
 // 返回: Box 浮点路径范围, error 无效路径、弧线或数值溢出
@@ -93,37 +126,4 @@ func (p Path) Bounds() (Box, error) {
 		return Box{}, fmt.Errorf("geometry bounds overflow")
 	}
 	return Box{left, top, right - left, bottom - top}, nil
-}
-
-// Lerp 线性插值坐标
-// 入参: a 起点, b 终点, t 插值比例
-// 返回: Point 插值坐标
-func Lerp(a, b Point, t float64) Point {
-	return Point{(1-t)*a.X + t*b.X, (1-t)*a.Y + t*b.Y}
-}
-
-// geometryRoots 稳定求解一元二次方程的实根
-// 入参: a 二次项系数, b 一次项系数, c 常数项
-// 返回: []float64 实根
-func geometryRoots(a, b, c float64) []float64 {
-	scale := math.Max(math.Abs(a), math.Max(math.Abs(b), math.Abs(c)))
-	if scale == 0 {
-		return nil
-	}
-	a, b, c = a/scale, b/scale, c/scale
-	if a == 0 {
-		if b == 0 {
-			return nil
-		}
-		return []float64{-c / b}
-	}
-	d := b*b - 4*a*c
-	if d < 0 {
-		return nil
-	}
-	q := -.5 * (b + math.Copysign(math.Sqrt(d), b))
-	if q == 0 {
-		return []float64{-b / (2 * a)}
-	}
-	return []float64{q / a, c / q}
 }

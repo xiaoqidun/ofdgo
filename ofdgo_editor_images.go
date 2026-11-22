@@ -53,6 +53,32 @@ type ImagePreviewInfo struct {
 	Height float64 `json:"height"`
 }
 
+// editorImagePageInfo 保存同批次已校验图片的建页信息与可选压缩载荷
+type editorImagePageInfo struct {
+	size          image.Point
+	format        string
+	metadata      baseimage.PageInfo
+	payload       []byte
+	payloadFormat string
+}
+
+// editorPreparedImage 保存并发预处理后的建页元数据与待写入载荷
+type editorPreparedImage struct {
+	checksum [32]byte
+	info     editorImagePageInfo
+	data     []byte
+	format   string
+}
+
+// editorImageTask 保存单张导入图片的并发预处理状态
+type editorImageTask struct {
+	name     string
+	data     []byte
+	prepared editorPreparedImage
+	err      error
+	done     chan struct{}
+}
+
 // RenderImagePreview 输出最长边不超过size像素的PNG预览，并返回建页物理尺寸
 // 使用原图方向和密度，缺少密度时使用96DPI，不修改源图片
 // 入参: ctx 取消上下文, data 图片数据, writer 预览输出流, size 最长边像素数
@@ -113,252 +139,6 @@ func RenderImagePreview(ctx context.Context, data []byte, writer io.Writer, size
 		}
 	}
 	return info, pdfgo.EncodePNG(ctx, writer, preview)
-}
-
-// ImportImages 将PNG、JPEG、BMP、单页TIFF或JBIG2逐张建页并插入指定位置，一次操作计入一条撤销记录
-// 保留像素及透明度，方向通过对象变换实现，不重新采样；图片压缩沿用AddImage规则
-// 同一批次的相同图片复用校验及元数据，不额外保留像素数据
-// 失败或取消时不修改文档
-// 入参: ctx 取消上下文, sources 按页面顺序排列的图片, at 插入位置, options 建页选项
-// 返回: error 错误信息
-func (e *Editor) ImportImages(ctx context.Context, sources []ImagePageSource, at int, options ImagePageOptions) error {
-	if at < 0 || at > len(e.pages) {
-		return fmt.Errorf("page index %d out of range", at)
-	}
-	if !finite(options.Width) || !finite(options.Height) || !finite(options.Margin) || !finite(options.DPI) || options.Margin < 0 || options.DPI < 0 {
-		return fmt.Errorf("invalid image page options")
-	}
-	if (options.Width != 0 || options.Height != 0) && (options.Width <= 2*options.Margin || options.Height <= 2*options.Margin) {
-		return fmt.Errorf("page margins leave no image area")
-	}
-	if options.DPI == 0 {
-		options.DPI = 96
-	}
-	for _, source := range sources {
-		if source.Read == nil {
-			return fmt.Errorf("image %q has no reader", source.Name)
-		}
-	}
-	check := func(stage string, completed int) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if options.OnProgress != nil {
-			if err := options.OnProgress(stage, completed, len(sources)); err != nil {
-				return err
-			}
-		}
-		return ctx.Err()
-	}
-	if err := check("images", 0); err != nil || len(sources) == 0 {
-		return err
-	}
-	return e.Transaction(func(e *Editor) error {
-		indexes := make([]int, 0, len(sources))
-		verified := make(map[[32]byte]editorImagePageInfo)
-		workers := min(len(sources), conversionWorkers(ctx))
-		if workers <= 1 {
-			for i, source := range sources {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				data, err := source.Read(ctx)
-				if err != nil {
-					return fmt.Errorf("image %q: %w", source.Name, err)
-				}
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				prepared, err := prepareImagePage(ctx, data, options, verified, nil)
-				if err != nil {
-					return fmt.Errorf("image %q: %w", source.Name, err)
-				}
-				page, err := e.commitPreparedImagePage(ctx, prepared, options)
-				if err != nil {
-					return fmt.Errorf("image %q: %w", source.Name, err)
-				}
-				indexes = append(indexes, page)
-				if err := check("images", i+1); err != nil {
-					return err
-				}
-			}
-			if err := e.MovePages(indexes, at); err != nil {
-				return err
-			}
-			return check("commit", len(sources))
-		}
-		runCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-		var verifiedMu sync.Mutex
-		window := workers * 2
-		jobs := make(chan *editorImageTask, window)
-		inflight := make(chan *editorImageTask, window)
-		var workerWG sync.WaitGroup
-		for range workers {
-			workerWG.Add(1)
-			go func() {
-				defer workerWG.Done()
-				for task := range jobs {
-					if err := runCtx.Err(); err != nil {
-						task.err = err
-						task.data = nil
-						close(task.done)
-						continue
-					}
-					prepared, err := prepareImagePage(runCtx, task.data, options, verified, &verifiedMu)
-					if err != nil {
-						task.err = fmt.Errorf("image %q: %w", task.name, err)
-					} else {
-						task.prepared = prepared
-					}
-					task.data = nil
-					close(task.done)
-				}
-			}()
-		}
-		var producerWG sync.WaitGroup
-		producerWG.Add(1)
-		go func() {
-			defer producerWG.Done()
-			defer close(jobs)
-			defer close(inflight)
-			for _, source := range sources {
-				if err := runCtx.Err(); err != nil {
-					return
-				}
-				data, err := source.Read(runCtx)
-				task := &editorImageTask{name: source.Name, data: data, done: make(chan struct{})}
-				if err != nil {
-					task.err = fmt.Errorf("image %q: %w", source.Name, err)
-					close(task.done)
-					select {
-					case <-runCtx.Done():
-					case inflight <- task:
-					}
-					return
-				}
-				select {
-				case <-runCtx.Done():
-					return
-				case inflight <- task:
-				}
-				select {
-				case <-runCtx.Done():
-					task.err = runCtx.Err()
-					task.data = nil
-					close(task.done)
-					return
-				case jobs <- task:
-				}
-			}
-		}()
-		finish := func() {
-			cancel()
-			producerWG.Wait()
-			workerWG.Wait()
-		}
-		for i := range sources {
-			task, ok := <-inflight
-			if !ok {
-				finish()
-				return runCtx.Err()
-			}
-			select {
-			case <-task.done:
-			case <-ctx.Done():
-				finish()
-				return ctx.Err()
-			}
-			if task.err != nil {
-				finish()
-				return task.err
-			}
-			page, err := e.commitPreparedImagePage(ctx, task.prepared, options)
-			task.prepared.data = nil
-			if err != nil {
-				finish()
-				return fmt.Errorf("image %q: %w", task.name, err)
-			}
-			indexes = append(indexes, page)
-			if err := check("images", i+1); err != nil {
-				finish()
-				return err
-			}
-		}
-		finish()
-		if err := e.MovePages(indexes, at); err != nil {
-			return err
-		}
-		return check("commit", len(sources))
-	})
-}
-
-// editorImagePageInfo 保存同批次已校验图片的建页信息与可选压缩载荷
-type editorImagePageInfo struct {
-	size          image.Point
-	format        string
-	metadata      baseimage.PageInfo
-	payload       []byte
-	payloadFormat string
-}
-
-// editorPreparedImage 保存并发预处理后的建页元数据与待写入载荷
-type editorPreparedImage struct {
-	checksum [32]byte
-	info     editorImagePageInfo
-	data     []byte
-	format   string
-}
-
-// editorImageTask 保存单张导入图片的并发预处理状态
-type editorImageTask struct {
-	name     string
-	data     []byte
-	prepared editorPreparedImage
-	err      error
-	done     chan struct{}
-}
-
-// commitPreparedImagePage 将已预处理完成的图片注册为资源并按物理尺寸与方向建页
-// 入参: ctx 取消上下文, prepared 预处理结果, options 建页选项
-// 返回: int 从0开始的页面索引, error 错误信息
-func (e *Editor) commitPreparedImagePage(ctx context.Context, prepared editorPreparedImage, options ImagePageOptions) (int, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	metadata := prepared.info.metadata
-	w, h := float64(prepared.info.size.X)*25.4/metadata.XDPI, float64(prepared.info.size.Y)*25.4/metadata.YDPI
-	if metadata.Orientation >= 5 {
-		w, h = h, w
-	}
-	pw, ph := options.Width, options.Height
-	if pw == 0 && ph == 0 {
-		pw, ph = w+2*options.Margin, h+2*options.Margin
-	} else {
-		scale := math.Min((pw-2*options.Margin)/w, (ph-2*options.Margin)/h)
-		w, h = w*scale, h*scale
-	}
-	if !finite(w) || !finite(h) || w <= 0 || h <= 0 {
-		return 0, fmt.Errorf("invalid image page dimensions")
-	}
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	resource, err := e.addImage(ctx, prepared.data, prepared.info.size, prepared.format, nil, prepared.checksum)
-	if err != nil {
-		return 0, err
-	}
-	page, err := e.AddPage(pw, ph)
-	if err != nil {
-		return 0, err
-	}
-	matrix := imagePageOrientation(metadata.Orientation, w, h)
-	_, err = e.AddObject(page, GraphicObject{Type: "ImageObject", ImageObject: ImageObject{
-		ResourceID: resource,
-		Boundary:   fmt.Sprintf("%s %s %s %s", ofdNumber((pw-w)/2), ofdNumber((ph-h)/2), ofdNumber(w), ofdNumber(h)),
-		CTM:        matrix.String(),
-	}})
-	return page, err
 }
 
 // prepareImagePage 对单张图片执行摘要计算、轻量结构校验、元数据读取及按需黑白PNG压缩
@@ -876,4 +656,224 @@ func imagePageOrientation(orientation int, w, h float64) Matrix {
 	default:
 		return Matrix{a: w, d: h}
 	}
+}
+
+// ImportImages 将PNG、JPEG、BMP、单页TIFF或JBIG2逐张建页并插入指定位置，一次操作计入一条撤销记录
+// 保留像素及透明度，方向通过对象变换实现，不重新采样；图片压缩沿用AddImage规则
+// 同一批次的相同图片复用校验及元数据，不额外保留像素数据
+// 失败或取消时不修改文档
+// 入参: ctx 取消上下文, sources 按页面顺序排列的图片, at 插入位置, options 建页选项
+// 返回: error 错误信息
+func (e *Editor) ImportImages(ctx context.Context, sources []ImagePageSource, at int, options ImagePageOptions) error {
+	if at < 0 || at > len(e.pages) {
+		return fmt.Errorf("page index %d out of range", at)
+	}
+	if !finite(options.Width) || !finite(options.Height) || !finite(options.Margin) || !finite(options.DPI) || options.Margin < 0 || options.DPI < 0 {
+		return fmt.Errorf("invalid image page options")
+	}
+	if (options.Width != 0 || options.Height != 0) && (options.Width <= 2*options.Margin || options.Height <= 2*options.Margin) {
+		return fmt.Errorf("page margins leave no image area")
+	}
+	if options.DPI == 0 {
+		options.DPI = 96
+	}
+	for _, source := range sources {
+		if source.Read == nil {
+			return fmt.Errorf("image %q has no reader", source.Name)
+		}
+	}
+	check := func(stage string, completed int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if options.OnProgress != nil {
+			if err := options.OnProgress(stage, completed, len(sources)); err != nil {
+				return err
+			}
+		}
+		return ctx.Err()
+	}
+	if err := check("images", 0); err != nil || len(sources) == 0 {
+		return err
+	}
+	return e.Transaction(func(e *Editor) error {
+		indexes := make([]int, 0, len(sources))
+		verified := make(map[[32]byte]editorImagePageInfo)
+		workers := min(len(sources), conversionWorkers(ctx))
+		if workers <= 1 {
+			for i, source := range sources {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				data, err := source.Read(ctx)
+				if err != nil {
+					return fmt.Errorf("image %q: %w", source.Name, err)
+				}
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				prepared, err := prepareImagePage(ctx, data, options, verified, nil)
+				if err != nil {
+					return fmt.Errorf("image %q: %w", source.Name, err)
+				}
+				page, err := e.commitPreparedImagePage(ctx, prepared, options)
+				if err != nil {
+					return fmt.Errorf("image %q: %w", source.Name, err)
+				}
+				indexes = append(indexes, page)
+				if err := check("images", i+1); err != nil {
+					return err
+				}
+			}
+			if err := e.MovePages(indexes, at); err != nil {
+				return err
+			}
+			return check("commit", len(sources))
+		}
+		runCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		var verifiedMu sync.Mutex
+		window := workers * 2
+		jobs := make(chan *editorImageTask, window)
+		inflight := make(chan *editorImageTask, window)
+		var workerWG sync.WaitGroup
+		for range workers {
+			workerWG.Add(1)
+			go func() {
+				defer workerWG.Done()
+				for task := range jobs {
+					if err := runCtx.Err(); err != nil {
+						task.err = err
+						task.data = nil
+						close(task.done)
+						continue
+					}
+					prepared, err := prepareImagePage(runCtx, task.data, options, verified, &verifiedMu)
+					if err != nil {
+						task.err = fmt.Errorf("image %q: %w", task.name, err)
+					} else {
+						task.prepared = prepared
+					}
+					task.data = nil
+					close(task.done)
+				}
+			}()
+		}
+		var producerWG sync.WaitGroup
+		producerWG.Add(1)
+		go func() {
+			defer producerWG.Done()
+			defer close(jobs)
+			defer close(inflight)
+			for _, source := range sources {
+				if err := runCtx.Err(); err != nil {
+					return
+				}
+				data, err := source.Read(runCtx)
+				task := &editorImageTask{name: source.Name, data: data, done: make(chan struct{})}
+				if err != nil {
+					task.err = fmt.Errorf("image %q: %w", source.Name, err)
+					close(task.done)
+					select {
+					case <-runCtx.Done():
+					case inflight <- task:
+					}
+					return
+				}
+				select {
+				case <-runCtx.Done():
+					return
+				case inflight <- task:
+				}
+				select {
+				case <-runCtx.Done():
+					task.err = runCtx.Err()
+					task.data = nil
+					close(task.done)
+					return
+				case jobs <- task:
+				}
+			}
+		}()
+		finish := func() {
+			cancel()
+			producerWG.Wait()
+			workerWG.Wait()
+		}
+		for i := range sources {
+			task, ok := <-inflight
+			if !ok {
+				finish()
+				return runCtx.Err()
+			}
+			select {
+			case <-task.done:
+			case <-ctx.Done():
+				finish()
+				return ctx.Err()
+			}
+			if task.err != nil {
+				finish()
+				return task.err
+			}
+			page, err := e.commitPreparedImagePage(ctx, task.prepared, options)
+			task.prepared.data = nil
+			if err != nil {
+				finish()
+				return fmt.Errorf("image %q: %w", task.name, err)
+			}
+			indexes = append(indexes, page)
+			if err := check("images", i+1); err != nil {
+				finish()
+				return err
+			}
+		}
+		finish()
+		if err := e.MovePages(indexes, at); err != nil {
+			return err
+		}
+		return check("commit", len(sources))
+	})
+}
+
+// commitPreparedImagePage 将已预处理完成的图片注册为资源并按物理尺寸与方向建页
+// 入参: ctx 取消上下文, prepared 预处理结果, options 建页选项
+// 返回: int 从0开始的页面索引, error 错误信息
+func (e *Editor) commitPreparedImagePage(ctx context.Context, prepared editorPreparedImage, options ImagePageOptions) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	metadata := prepared.info.metadata
+	w, h := float64(prepared.info.size.X)*25.4/metadata.XDPI, float64(prepared.info.size.Y)*25.4/metadata.YDPI
+	if metadata.Orientation >= 5 {
+		w, h = h, w
+	}
+	pw, ph := options.Width, options.Height
+	if pw == 0 && ph == 0 {
+		pw, ph = w+2*options.Margin, h+2*options.Margin
+	} else {
+		scale := math.Min((pw-2*options.Margin)/w, (ph-2*options.Margin)/h)
+		w, h = w*scale, h*scale
+	}
+	if !finite(w) || !finite(h) || w <= 0 || h <= 0 {
+		return 0, fmt.Errorf("invalid image page dimensions")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	resource, err := e.addImage(ctx, prepared.data, prepared.info.size, prepared.format, nil, prepared.checksum)
+	if err != nil {
+		return 0, err
+	}
+	page, err := e.AddPage(pw, ph)
+	if err != nil {
+		return 0, err
+	}
+	matrix := imagePageOrientation(metadata.Orientation, w, h)
+	_, err = e.AddObject(page, GraphicObject{Type: "ImageObject", ImageObject: ImageObject{
+		ResourceID: resource,
+		Boundary:   fmt.Sprintf("%s %s %s %s", ofdNumber((pw-w)/2), ofdNumber((ph-h)/2), ofdNumber(w), ofdNumber(h)),
+		CTM:        matrix.String(),
+	}})
+	return page, err
 }

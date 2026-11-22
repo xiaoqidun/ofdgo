@@ -87,11 +87,158 @@ type TextMatchPart struct {
 	End   int    `json:"end"`
 }
 
+// searchPageResult 保存并发搜索单页的预筛或完整文字提取结果
+type searchPageResult struct {
+	index   int
+	text    *PageText
+	matched bool
+	err     error
+}
+
+// searchPageJob 表示并发搜索队列中的单个页面任务
+type searchPageJob struct {
+	index int
+	done  chan searchPageResult
+}
+
+// pageTextEntry 将页面原文和派生搜索索引放在同一预算与失效范围内
+type pageTextEntry struct {
+	text   *PageText
+	search *TextSearchIndex
+}
+
+// textSearchGroup 保存同行连续文字及Unicode字符映射
+type textSearchGroup struct {
+	first   int
+	last    int
+	offsets []int
+	runes   []rune
+	folded  string
+}
+
+// textPageTokens 保留文字及其复合图元和裁剪，跳过独立路径与图片
+type textPageTokens struct {
+	*xml.Decoder
+	parents []string
+}
+
 // NewPageTextCache 创建文字索引缓存，预算包含字符区域和条目开销
 // 入参: bytes 内存预算，非正数禁用缓存
 // 返回: *PageTextCache 独立缓存
 func NewPageTextCache(bytes int) *PageTextCache {
 	return &PageTextCache{cache: resourceCache[int, *pageTextEntry](nil, max(0, bytes))}
+}
+
+// NewTextSearchIndex 创建独立搜索快照，复制字符区域，保留Unicode折叠和跨对象匹配
+// 入参: ctx 取消上下文, text 页面原文
+// 返回: *TextSearchIndex 不可变索引, error 参数或取消错误
+func NewTextSearchIndex(ctx context.Context, text *PageText) (*TextSearchIndex, error) {
+	if text == nil {
+		return nil, fmt.Errorf("missing page text")
+	}
+	copy := PageText{Runs: slices.Clone(text.Runs)}
+	for i := range copy.Runs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		copy.Runs[i].Boxes = slices.Clone(copy.Runs[i].Boxes)
+		copy.Runs[i].Spans = nil
+	}
+	return copy.searchIndex(ctx)
+}
+
+// foldText 统一Unicode大小写等价字符，保留字符数量
+// 入参: text 原文
+// 返回: string 匹配用文字
+func foldText(text string) string {
+	return strings.Map(foldRune, text)
+}
+
+// foldRune 统一单个Unicode大小写等价字符
+// 入参: char 原字符
+// 返回: rune 匹配字符
+func foldRune(char rune) rune {
+	if char < utf8.RuneSelf {
+		if char >= 'a' && char <= 'z' {
+			return char - ('a' - 'A')
+		}
+		return char
+	}
+	folded := char
+	for next := unicode.SimpleFold(char); next != char; next = unicode.SimpleFold(next) {
+		folded = min(folded, next)
+	}
+	return folded
+}
+
+// adjacentTextRuns 判断绘制顺序相邻的文字是否在同一行连续，缺少定位时保持独立
+// 入参: before 前对象, after 后对象
+// 返回: bool 是否可连续搜索
+func adjacentTextRuns(before, after TextRun) bool {
+	if before.Text == "" || after.Text == "" || len(before.Boxes) != utf8.RuneCountInString(before.Text) || len(after.Boxes) == 0 {
+		return false
+	}
+	a, b := before.Boxes[len(before.Boxes)-1], after.Boxes[0]
+	size := math.Min(a.H, b.H)
+	if size <= 0 || a.W <= 0 || b.W <= 0 {
+		return false
+	}
+	gap := b.X - a.X - a.W
+	return math.Abs(a.Y+a.H/2-b.Y-b.H/2) <= size*.25 && gap >= -size*.15 && gap <= size*.35 && b.X > a.X
+}
+
+// textGlyphSpans 将绘制字形映射到原文字符区间
+// 入参: runes 原文字符, transforms 字形变换, offset 文本编码偏移
+// 返回: [][2]int 每个字形对应的字符起止位置
+func textGlyphSpans(runes []rune, transforms map[int]textGlyphTransform, offset int) [][2]int {
+	spans := make([][2]int, 0, len(runes))
+	for i := 0; i < len(runes); {
+		if transform, ok := transforms[offset+i]; ok && i+transform.CodeCount <= len(runes) {
+			if transform.CodeCount == len(transform.Glyphs) {
+				for k := range transform.Glyphs {
+					spans = append(spans, [2]int{i + k, i + k + 1})
+				}
+			} else {
+				for range transform.Glyphs {
+					spans = append(spans, [2]int{i, i + transform.CodeCount})
+				}
+			}
+			i += transform.CodeCount
+		} else {
+			spans = append(spans, [2]int{i, i + 1})
+			i++
+		}
+	}
+	return spans
+}
+
+// unionTextBox 合并同一字符的字形区域
+// 入参: a 已有区域, b 新区域
+// 返回: Box 合并区域
+func unionTextBox(a, b Box) Box {
+	if a.W <= 0 || a.H <= 0 {
+		return b
+	}
+	if b.W <= 0 || b.H <= 0 {
+		return a
+	}
+	x, y := math.Min(a.X, b.X), math.Min(a.Y, b.Y)
+	return Box{X: x, Y: y, W: math.Max(a.X+a.W, b.X+b.W) - x, H: math.Max(a.Y+a.H, b.Y+b.H) - y}
+}
+
+// compactSearchText 移除搜索折叠文本中的所有Unicode空白以支持跨分段预筛
+// 入参: s 已折叠的搜索文本
+// 返回: string 去空白文本
+func compactSearchText(s string) string {
+	if strings.IndexFunc(s, unicode.IsSpace) < 0 {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // Get 获取文字索引并更新最近访问顺序
@@ -126,7 +273,7 @@ func (c *PageTextCache) Delete(index int) {
 	c.cache.mu.Lock()
 	defer c.cache.mu.Unlock()
 	if entry := c.cache.entries[index]; entry != nil {
-		c.cache.remove(entry)
+		c.cache.removeLocal(entry)
 	}
 }
 
@@ -179,24 +326,6 @@ func (c *PageTextCache) SearchEach(ctx context.Context, index int, query string,
 		c.cache.mu.Unlock()
 	}
 	return true, search.SearchEach(ctx, query, visit)
-}
-
-// NewTextSearchIndex 创建独立搜索快照，复制字符区域，保留Unicode折叠和跨对象匹配
-// 入参: ctx 取消上下文, text 页面原文
-// 返回: *TextSearchIndex 不可变索引, error 参数或取消错误
-func NewTextSearchIndex(ctx context.Context, text *PageText) (*TextSearchIndex, error) {
-	if text == nil {
-		return nil, fmt.Errorf("missing page text")
-	}
-	copy := PageText{Runs: slices.Clone(text.Runs)}
-	for i := range copy.Runs {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		copy.Runs[i].Boxes = slices.Clone(copy.Runs[i].Boxes)
-		copy.Runs[i].Spans = nil
-	}
-	return copy.searchIndex(ctx)
 }
 
 // SearchEach 在不可变索引中逐项搜索，回调返回错误时立即停止
@@ -264,11 +393,7 @@ func (p *PageText) SearchEach(ctx context.Context, query string, visit func(Text
 // 入参: page 页面内容
 // 返回: *PageText 页面文字, error 错误信息
 func (r *Renderer) PageText(page *PageContent) (*PageText, error) {
-	ctx := r.pageContext
-	if ctx == nil {
-		ctx = r.outputContext()
-	}
-	return r.PageTextContext(ctx, page)
+	return r.PageTextContext(context.Background(), page)
 }
 
 // PageTextContext 提取页面原文及字形位置，取消时不返回部分结果
@@ -284,9 +409,10 @@ func (r *Renderer) PageTextContext(ctx context.Context, page *PageContent) (*Pag
 	if r.backends.Compiler == nil {
 		return nil, fmt.Errorf("%w: page text", ErrBackendUnavailable)
 	}
-	renderer := *r
-	renderer.pageContext = ctx
-	text, err := renderer.backends.Compiler.PageText(&renderer, page)
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
+	text, err := r.backends.Compiler.PageText(ctx, r, page)
 	if canceled := ctx.Err(); canceled != nil {
 		return nil, canceled
 	}
@@ -297,11 +423,7 @@ func (r *Renderer) PageTextContext(ctx context.Context, page *PageContent) (*Pag
 // 入参: index 页面索引，从0开始
 // 返回: *PageText 页面文字, error 错误信息
 func (r *Renderer) PageTextByIndex(index int) (*PageText, error) {
-	ctx := r.pageContext
-	if ctx == nil {
-		ctx = r.outputContext()
-	}
-	return r.PageTextByIndexContext(ctx, index)
+	return r.PageTextByIndexContext(context.Background(), index)
 }
 
 // PageTextByIndexContext 按索引读取页面并提取文字，读取和页内计算均响应取消
@@ -311,14 +433,14 @@ func (r *Renderer) PageTextByIndexContext(ctx context.Context, index int) (*Page
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	doc, err := r.Reader.docStructureContext(ctx)
+	doc, err := r.reader.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if index < 0 || index >= len(doc.Pages.Page) {
 		return nil, fmt.Errorf("page index %d out of range", index)
 	}
-	page, err := r.Reader.readPageContent(ctx, doc.Pages.Page[index], true, false)
+	page, err := r.reader.readPageContent(ctx, doc.Pages.Page[index], true, false)
 	if err != nil {
 		return nil, err
 	}
@@ -335,7 +457,7 @@ func (r *Renderer) SearchText(ctx context.Context, query string, visit func(int,
 	if query == "" {
 		return nil
 	}
-	doc, err := r.Reader.docStructureContext(ctx)
+	doc, err := r.reader.docStructureContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -347,8 +469,8 @@ func (r *Renderer) SearchText(ctx context.Context, query string, visit func(int,
 	compactQuery := compactSearchText(query)
 	if len(indices) >= 16 {
 		workers := min(runtime.GOMAXPROCS(0), 8, len(indices)/2)
-		if r.Reader != nil && r.Reader.resources != nil && r.Reader.resources.options.Parallelism > 0 && r.Reader.resources.options.Parallelism < workers {
-			workers = r.Reader.resources.options.Parallelism
+		if r.reader != nil && r.reader.resources != nil && r.reader.resources.options.Parallelism > 0 && r.reader.resources.options.Parallelism < workers {
+			workers = r.reader.resources.options.Parallelism
 		}
 		if workers > 1 {
 			return r.searchTextParallel(ctx, doc.Pages.Page, indices, query, compactQuery, workers, visit)
@@ -370,41 +492,6 @@ func (r *Renderer) SearchText(ctx context.Context, query string, visit func(int,
 		}
 	}
 	return ctx.Err()
-}
-
-// searchPageResult 保存并发搜索单页的预筛或完整文字提取结果
-type searchPageResult struct {
-	index   int
-	text    *PageText
-	matched bool
-	err     error
-}
-
-// searchPageJob 表示并发搜索队列中的单个页面任务
-type searchPageJob struct {
-	index int
-	done  chan searchPageResult
-}
-
-// pageTextEntry 将页面原文和派生搜索索引放在同一预算与失效范围内
-type pageTextEntry struct {
-	text   *PageText
-	search *TextSearchIndex
-}
-
-// textSearchGroup 保存同行连续文字及Unicode字符映射
-type textSearchGroup struct {
-	first   int
-	last    int
-	offsets []int
-	runes   []rune
-	folded  string
-}
-
-// textPageTokens 保留文字及其复合图元和裁剪，跳过独立路径与图片
-type textPageTokens struct {
-	*xml.Decoder
-	parents []string
 }
 
 // Token 读取文字页面所需的XML节点
@@ -441,6 +528,13 @@ func (r *Renderer) searchTextParallel(ctx context.Context, pages []Page, indices
 	searchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	clones := make([]*Renderer, 0, workers)
+	defer func() {
+		for _, clone := range clones {
+			if clone != nil && clone.reader != nil {
+				_ = clone.reader.Close()
+			}
+		}
+	}()
 	for range workers {
 		forked, err := r.Fork(searchCtx)
 		if err != nil {
@@ -703,7 +797,7 @@ func (p *PageText) addRun(obj TextObject) *TextRun {
 // 入参: ctx 取消上下文, pageRef 页面引用, query 已折叠搜索词, compactQuery 去空白搜索词
 // 返回: *PageText 页面文本, bool 是否可能命中, error 读取或计算错误
 func (r *Renderer) searchPageTextByIndexContext(ctx context.Context, pageRef Page, query, compactQuery string) (*PageText, bool, error) {
-	page, err := r.Reader.readPageContent(ctx, pageRef, true, false)
+	page, err := r.reader.readPageContent(ctx, pageRef, true, false)
 	if err != nil {
 		return nil, false, err
 	}
@@ -726,17 +820,18 @@ func (r *Renderer) searchPageTextByIndexContext(ctx context.Context, pageRef Pag
 // 入参: ctx 取消上下文, page 页面内容
 // 返回: string 原始文本拼接结果, bool 是否可安全预筛
 func (r *Renderer) extractFastPlainPageText(ctx context.Context, page *PageContent) (string, bool) {
-	if page == nil || r == nil || r.Reader == nil {
+	if page == nil || r == nil || r.reader == nil {
 		return "", false
 	}
-	if r.Reader.doc == nil && r.Reader.OFD != nil {
-		if _, err := r.Reader.docStructureContext(ctx); err != nil {
+	if r.reader.doc == nil && r.reader.ofd != nil {
+		if _, err := r.reader.docStructureContext(ctx); err != nil {
 			return "", false
 		}
 	}
-	view := *r
-	view.pageContext = ctx
-	defer view.bindPageResources(page)()
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
+	defer r.bindPageResources(page)()
 	var sb strings.Builder
 	visitedUnits := make(map[*CompositeGraphicUnit]bool)
 	var collectObj func(GraphicObject) bool
@@ -770,7 +865,7 @@ func (r *Renderer) extractFastPlainPageText(ctx context.Context, page *PageConte
 				return true
 			}
 			if c.ResourceID != "" {
-				unit := view.compositeDefinition(c.ResourceID)
+				unit := r.compositeDefinition(c.ResourceID)
 				if unit != nil {
 					if visitedUnits[unit] {
 						return false
@@ -805,22 +900,22 @@ func (r *Renderer) extractFastPlainPageText(ctx context.Context, page *PageConte
 		return true
 	}
 	for order := range 3 {
-		if view.printing && (view.printContents == "annotations" || view.printContents == "forms") {
+		if r.printing && (r.printContents == "annotations" || r.printContents == "forms") {
 			break
 		}
-		if view.Reader.doc != nil {
+		if r.reader.doc != nil {
 			for _, ref := range page.Template {
-				if view.templateOrder(ref) != order {
+				if r.templateOrder(ref) != order {
 					continue
 				}
-				tplPage := view.loadTemplate(ref.TemplateID)
+				tplPage := r.loadTemplate(ref.TemplateID)
 				if tplPage == nil {
 					if ctx.Err() != nil {
 						return "", false
 					}
 					continue
 				}
-				restoreTpl := view.bindParsedResources(tplPage.pageResources)
+				restoreTpl := r.bindParsedResources(tplPage.pageResources)
 				for tplOrder := range 3 {
 					if !collectLayers(tplPage.Content.Layer, tplOrder) {
 						restoreTpl()
@@ -834,20 +929,20 @@ func (r *Renderer) extractFastPlainPageText(ctx context.Context, page *PageConte
 			return "", false
 		}
 	}
-	if view.RenderAnnotations {
-		annots, err := view.Reader.pageAnnotationsContext(ctx, page.ID)
+	if r.renderAnnotations {
+		annots, err := r.reader.pageAnnotationsContext(ctx, page.ID)
 		if err != nil {
 			return "", false
 		}
 		for i := range annots {
 			annot := annots[i]
-			if view.printing && annot.Print != nil && !*annot.Print {
+			if r.printing && annot.Print != nil && !*annot.Print {
 				continue
 			}
-			if view.printing && (view.printContents == "document" && annot.Subtype != "Widget" || view.printContents == "forms" && annot.Subtype != "Widget" || view.printContents == "annotations" && annot.Subtype == "Widget") {
+			if r.printing && (r.printContents == "document" && annot.Subtype != "Widget" || r.printContents == "forms" && annot.Subtype != "Widget" || r.printContents == "annotations" && annot.Subtype == "Widget") {
 				continue
 			}
-			if view.printing && annot.Print == nil && annot.Parameters != nil {
+			if r.printing && annot.Print == nil && annot.Parameters != nil {
 				for _, parameter := range annot.Parameters.Parameter {
 					if parameter.Name == "PDF.Printable" && (parameter.Value == "true" || parameter.Value == "false") {
 						visible := parameter.Value == "true"
@@ -867,98 +962,4 @@ func (r *Renderer) extractFastPlainPageText(ctx context.Context, page *PageConte
 		}
 	}
 	return sb.String(), true
-}
-
-// foldText 统一Unicode大小写等价字符，保留字符数量
-// 入参: text 原文
-// 返回: string 匹配用文字
-func foldText(text string) string {
-	return strings.Map(foldRune, text)
-}
-
-// foldRune 统一单个Unicode大小写等价字符
-// 入参: char 原字符
-// 返回: rune 匹配字符
-func foldRune(char rune) rune {
-	if char < utf8.RuneSelf {
-		if char >= 'a' && char <= 'z' {
-			return char - ('a' - 'A')
-		}
-		return char
-	}
-	folded := char
-	for next := unicode.SimpleFold(char); next != char; next = unicode.SimpleFold(next) {
-		folded = min(folded, next)
-	}
-	return folded
-}
-
-// adjacentTextRuns 判断绘制顺序相邻的文字是否在同一行连续，缺少定位时保持独立
-// 入参: before 前对象, after 后对象
-// 返回: bool 是否可连续搜索
-func adjacentTextRuns(before, after TextRun) bool {
-	if before.Text == "" || after.Text == "" || len(before.Boxes) != utf8.RuneCountInString(before.Text) || len(after.Boxes) == 0 {
-		return false
-	}
-	a, b := before.Boxes[len(before.Boxes)-1], after.Boxes[0]
-	size := math.Min(a.H, b.H)
-	if size <= 0 || a.W <= 0 || b.W <= 0 {
-		return false
-	}
-	gap := b.X - a.X - a.W
-	return math.Abs(a.Y+a.H/2-b.Y-b.H/2) <= size*.25 && gap >= -size*.15 && gap <= size*.35 && b.X > a.X
-}
-
-// textGlyphSpans 将绘制字形映射到原文字符区间
-// 入参: runes 原文字符, transforms 字形变换, offset 文本编码偏移
-// 返回: [][2]int 每个字形对应的字符起止位置
-func textGlyphSpans(runes []rune, transforms map[int]textGlyphTransform, offset int) [][2]int {
-	spans := make([][2]int, 0, len(runes))
-	for i := 0; i < len(runes); {
-		if transform, ok := transforms[offset+i]; ok && i+transform.CodeCount <= len(runes) {
-			if transform.CodeCount == len(transform.Glyphs) {
-				for k := range transform.Glyphs {
-					spans = append(spans, [2]int{i + k, i + k + 1})
-				}
-			} else {
-				for range transform.Glyphs {
-					spans = append(spans, [2]int{i, i + transform.CodeCount})
-				}
-			}
-			i += transform.CodeCount
-		} else {
-			spans = append(spans, [2]int{i, i + 1})
-			i++
-		}
-	}
-	return spans
-}
-
-// unionTextBox 合并同一字符的字形区域
-// 入参: a 已有区域, b 新区域
-// 返回: Box 合并区域
-func unionTextBox(a, b Box) Box {
-	if a.W <= 0 || a.H <= 0 {
-		return b
-	}
-	if b.W <= 0 || b.H <= 0 {
-		return a
-	}
-	x, y := math.Min(a.X, b.X), math.Min(a.Y, b.Y)
-	return Box{X: x, Y: y, W: math.Max(a.X+a.W, b.X+b.W) - x, H: math.Max(a.Y+a.H, b.Y+b.H) - y}
-}
-
-// compactSearchText 移除搜索折叠文本中的所有Unicode空白以支持跨分段预筛
-// 入参: s 已折叠的搜索文本
-// 返回: string 去空白文本
-func compactSearchText(s string) string {
-	if strings.IndexFunc(s, unicode.IsSpace) < 0 {
-		return s
-	}
-	return strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) {
-			return -1
-		}
-		return r
-	}, s)
 }

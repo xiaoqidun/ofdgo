@@ -50,6 +50,240 @@ type editorResourceRefs struct {
 	fontUnsafe     bool
 }
 
+// editorResourceReferenceKind 区分标准标识和文件引用，其他文本不参与资源扫描
+// 入参: key 字段名称, resource 是否资源索引
+// 返回: int 引用类型
+func editorResourceReferenceKind(key string, resource bool) int {
+	switch key {
+	case "Font", "ResourceID", "Substitution", "ImageMask", "Relative", "DrawParam", "ColorSpace", "DefaultCS", "Thumbnail", "TemplateID", "PageID", "PageRef", "RefId":
+		return editorReferenceID
+	case "DocRoot", "Signatures", "Cover", "PublicRes", "DocumentRes", "PageRes", "Annotations", "CustomTags", "Attachments", "FileLoc", "FileRef", "Profile", "SignedValue", "SchemaLoc", "ExtendData", "File":
+		return editorReferenceFile
+	case "BaseLoc":
+	case "FontFile", "MediaFile":
+	default:
+		return editorReferenceNone
+	}
+	if resource {
+		return editorReferenceNone
+	}
+	return editorReferenceFile
+}
+
+// editorResourceID 规范化ST_ID与ST_RefID的十进制表示
+// 入参: value 标识文本
+// 返回: string 标准十进制标识，无效时为空
+func editorResourceID(value string) string {
+	id, err := strconv.ParseUint(strings.Trim(value, " \t\r\n"), 10, 32)
+	if err != nil || id == 0 {
+		return ""
+	}
+	return strconv.FormatUint(id, 10)
+}
+
+// normalizeResourceReferences 合并数值等价的资源引用，保留内部非数字标识
+// 入参: references 待规范化的引用集合
+func normalizeResourceReferences(references map[string]bool) {
+	for id, used := range references {
+		if key := editorResourceID(id); key != "" && key != id {
+			references[key] = references[key] || used
+			delete(references, id)
+		}
+	}
+}
+
+// editorResourceNode 按资源标识查找标准资源节点并检查别名冲突
+// 入参: root 资源文件根节点, group 资源集合名称, kind 资源类型, id 资源标识
+// 返回: *editorXML 资源节点，未找到时为nil
+func editorResourceNode(root *editorXML, group, kind, id string) *editorXML {
+	nodes := make(map[string]*editorXML)
+	for node := range editorResourceNodes(root, group, kind) {
+		nodes[node.attr("ID")] = node
+	}
+	node, _ := resourceValue(nodes, id)
+	return node
+}
+
+// editorResourceNodes 按原顺序遍历同类资源，包含交错出现的重复集合
+// 入参: root 资源文件根节点, group 集合名称, kind 资源类型
+// 返回: iter.Seq[*editorXML] 资源节点序列
+func editorResourceNodes(root *editorXML, group, kind string) iter.Seq[*editorXML] {
+	return func(yield func(*editorXML) bool) {
+		for _, collection := range root.children {
+			if !collection.matchesOFD(group) {
+				continue
+			}
+			for _, node := range collection.children {
+				if node.matchesOFD(kind) && !yield(node) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// editorResourceLocation 按ST_Loc与Res.BaseLoc解析路径，保留路径大小写
+// 入参: name 所在XML, base 资源目录, value 路径值
+// 返回: string 包内路径
+func editorResourceLocation(name, base, value string) string {
+	value = strings.ReplaceAll(strings.TrimSpace(value), "\\", "/")
+	if value == "" {
+		return ""
+	}
+	if strings.HasPrefix(value, "/") {
+		return cleanPackagePath(value)
+	}
+	base = strings.ReplaceAll(base, "\\", "/")
+	dir := path.Dir(name)
+	if strings.HasPrefix(base, "/") {
+		dir = cleanPackagePath(base)
+	} else {
+		dir = path.Join(dir, base)
+	}
+	return cleanPackagePath(path.Join(dir, value))
+}
+
+// isKnownResourceSafeTagMeta 判断标引入口是否属于明确定义引用规则的已知命名空间白名单
+// 入参: tag 标引入口描述
+// 返回: bool 是否属于已知白名单
+func isKnownResourceSafeTagMeta(tag CustomTag) bool {
+	if tag.TypeID == structureTypeOfficial {
+		return true
+	}
+	if tag.TypeID == structureTypeInvoice {
+		ns := strings.TrimSpace(tag.NameSpace)
+		return ns == "" || ns == structureNamespaceEInvoice2016 || ns == InvoiceStandardEDRM2019 || ns == ofdNamespace2016
+	}
+	switch tag.NameSpace {
+	case textNamespace:
+		return tag.TypeID == textTagType
+	case richTextNamespace:
+		return tag.TypeID == richTextTagType
+	case invoiceNamespace:
+		return tag.TypeID == invoiceTagType
+	case pdfStructureNamespace:
+		return tag.TypeID == pdfStructureTagType || tag.TypeID == pdfAuxiliaryTagType
+	case pdfInformationNamespace:
+		return tag.TypeID == pdfInformationTagType
+	case structureNamespaceEGov2013, ofdNamespace2016:
+		return true
+	case pdfMetadataRDF, pdfMetadataXML:
+		return tag.TypeID == pdfMetadataTagType
+	default:
+		return false
+	}
+}
+
+// knownResourceSafeCustomTag 核验已解析标引的根节点命名空间符合已知白名单语义，拒绝对未知命名空间臆测引用规则
+// 入参: tag 标引入口描述, root 已解析标引根节点
+// 返回: bool 是否确认不含隐式直接资源标识引用
+func knownResourceSafeCustomTag(tag CustomTag, root *StructureNode) bool {
+	if root == nil || !isKnownResourceSafeTagMeta(tag) {
+		return false
+	}
+	if tag.TypeID == pdfMetadataTagType && (tag.NameSpace == pdfMetadataRDF || tag.NameSpace == pdfMetadataXML) && (root.Namespace == pdfMetadataRDF || root.Namespace == pdfMetadataXML) {
+		return true
+	}
+	if strings.TrimSpace(tag.NameSpace) != "" && root.Namespace != tag.NameSpace {
+		return false
+	}
+	if tag.TypeID == structureTypeInvoice {
+		if structureInvoiceReferences(root) {
+			return true
+		}
+		return root.Name == "eInvoice" && len(root.Children) == 0 && strings.TrimSpace(root.Text) == "" && (root.Namespace == "" || root.Namespace == structureNamespaceEInvoice2016 || root.Namespace == InvoiceStandardEDRM2019)
+	}
+	if structureOfficial(tag, root.Namespace) {
+		return true
+	}
+	if strings.TrimSpace(root.Namespace) == "" || root.Namespace != tag.NameSpace {
+		return false
+	}
+	return structureInvoiceReferences(root) || tag.TypeID == pdfAuxiliaryTagType && root.Namespace == pdfStructureNamespace || tag.TypeID == pdfInformationTagType && root.Namespace == pdfInformationNamespace
+}
+
+// sourcePageMayShrink 判断已修改原页面是否可能减少原包资源引用或缩减原文文字内容
+// 入参: page 当前页面内容, orig 原页面快照
+// 返回: bool 是否可能缩减资源引用或文本用字
+func sourcePageMayShrink(page PageContent, orig *editorSourcePage) bool {
+	if orig == nil || orig.original == nil {
+		return false
+	}
+	if len(orig.original.Actions) != 0 && !reflect.DeepEqual(page.Actions, orig.original.Actions) {
+		beforeRefs := make(map[string]bool)
+		collectActionReferences(orig.original.Actions, beforeRefs)
+		normalizeResourceReferences(beforeRefs)
+		if len(beforeRefs) != 0 {
+			afterRefs := make(map[string]bool)
+			collectActionReferences(page.Actions, afterRefs)
+			normalizeResourceReferences(afterRefs)
+			for id := range beforeRefs {
+				if !afterRefs[id] {
+					return true
+				}
+			}
+		}
+	}
+	if len(page.Content.Layer) < len(orig.original.Content.Layer) {
+		return true
+	}
+	for i, origLayer := range orig.original.Content.Layer {
+		curLayer := page.Content.Layer[i]
+		if curLayer.ID != origLayer.ID {
+			return true
+		}
+		if origLayer.DrawParam != "" && curLayer.DrawParam != origLayer.DrawParam {
+			return true
+		}
+		if len(origLayer.Objects) == 0 {
+			continue
+		}
+		curObjects := make(map[string]GraphicObject, len(curLayer.Objects))
+		for _, obj := range curLayer.Objects {
+			curObjects[editorObjectID(obj)] = obj
+		}
+		for _, origObj := range origLayer.Objects {
+			curObj, ok := curObjects[editorObjectID(origObj)]
+			if !ok {
+				return true
+			}
+			if reflect.DeepEqual(origObj, curObj) {
+				continue
+			}
+			if !objectPreservesRefsAndText(origObj, curObj) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// objectPreservesRefsAndText 判断对象修改是否保留原有文字内容及全部既有资源引用
+// 入参: before 原对象, after 新对象
+// 返回: bool 是否未缩减原有资源引用或文本用字
+func objectPreservesRefsAndText(before, after GraphicObject) bool {
+	if !editorPreservedObject(before, after) {
+		return false
+	}
+	beforeRefs := make(map[string]bool)
+	collectObjectReferences(before, beforeRefs)
+	delete(beforeRefs, "")
+	if len(beforeRefs) == 0 {
+		return true
+	}
+	afterRefs := make(map[string]bool)
+	collectObjectReferences(after, afterRefs)
+	delete(afterRefs, "")
+	normalizeResourceReferences(beforeRefs)
+	normalizeResourceReferences(afterRefs)
+	for id := range beforeRefs {
+		if !afterRefs[id] {
+			return false
+		}
+	}
+	return true
+}
+
 // addCustomTagFile 按路径去重追加标引入口描述
 // 入参: target 包内路径, tag 标引入口描述
 func (r *editorResourceRefs) addCustomTagFile(target string, tag CustomTag) {
@@ -62,13 +296,6 @@ func (r *editorResourceRefs) addCustomTagFile(target string, tag CustomTag) {
 	if !slices.Contains(r.customTagFiles[target], tag) {
 		r.customTagFiles[target] = append(r.customTagFiles[target], tag)
 	}
-}
-
-// scan 流式读取包内XML引用，二进制条目只探测文件头，不展开页面对象或图片像素
-// 入参: input 文件流, name 包内路径
-// 返回: bool 是否资源索引, bool 是否可完整判断引用
-func (r *editorResourceRefs) scan(input io.Reader, name string) (bool, bool) {
-	return r.scanContext(nil, input, name)
 }
 
 // scanContext 流式收集资源引用，在读取和字体用字处理期间检查取消
@@ -544,238 +771,4 @@ func (e *Editor) canSkipResourceCompaction(reader *Reader) bool {
 		}
 	}
 	return keptSourceCount == len(e.source.pages)
-}
-
-// editorResourceReferenceKind 区分标准标识和文件引用，其他文本不参与资源扫描
-// 入参: key 字段名称, resource 是否资源索引
-// 返回: int 引用类型
-func editorResourceReferenceKind(key string, resource bool) int {
-	switch key {
-	case "Font", "ResourceID", "Substitution", "ImageMask", "Relative", "DrawParam", "ColorSpace", "DefaultCS", "Thumbnail", "TemplateID", "PageID", "PageRef", "RefId":
-		return editorReferenceID
-	case "DocRoot", "Signatures", "Cover", "PublicRes", "DocumentRes", "PageRes", "Annotations", "CustomTags", "Attachments", "FileLoc", "FileRef", "Profile", "SignedValue", "SchemaLoc", "ExtendData", "File":
-		return editorReferenceFile
-	case "BaseLoc":
-	case "FontFile", "MediaFile":
-	default:
-		return editorReferenceNone
-	}
-	if resource {
-		return editorReferenceNone
-	}
-	return editorReferenceFile
-}
-
-// editorResourceID 规范化ST_ID与ST_RefID的十进制表示
-// 入参: value 标识文本
-// 返回: string 标准十进制标识，无效时为空
-func editorResourceID(value string) string {
-	id, err := strconv.ParseUint(strings.Trim(value, " \t\r\n"), 10, 32)
-	if err != nil || id == 0 {
-		return ""
-	}
-	return strconv.FormatUint(id, 10)
-}
-
-// normalizeResourceReferences 合并数值等价的资源引用，保留内部非数字标识
-// 入参: references 待规范化的引用集合
-func normalizeResourceReferences(references map[string]bool) {
-	for id, used := range references {
-		if key := editorResourceID(id); key != "" && key != id {
-			references[key] = references[key] || used
-			delete(references, id)
-		}
-	}
-}
-
-// editorResourceNode 按资源标识查找标准资源节点并检查别名冲突
-// 入参: root 资源文件根节点, group 资源集合名称, kind 资源类型, id 资源标识
-// 返回: *editorXML 资源节点，未找到时为nil
-func editorResourceNode(root *editorXML, group, kind, id string) *editorXML {
-	nodes := make(map[string]*editorXML)
-	for node := range editorResourceNodes(root, group, kind) {
-		nodes[node.attr("ID")] = node
-	}
-	node, _ := resourceValue(nodes, id)
-	return node
-}
-
-// editorResourceNodes 按原顺序遍历同类资源，包含交错出现的重复集合
-// 入参: root 资源文件根节点, group 集合名称, kind 资源类型
-// 返回: iter.Seq[*editorXML] 资源节点序列
-func editorResourceNodes(root *editorXML, group, kind string) iter.Seq[*editorXML] {
-	return func(yield func(*editorXML) bool) {
-		for _, collection := range root.children {
-			if !collection.matchesOFD(group) {
-				continue
-			}
-			for _, node := range collection.children {
-				if node.matchesOFD(kind) && !yield(node) {
-					return
-				}
-			}
-		}
-	}
-}
-
-// editorResourceLocation 按ST_Loc与Res.BaseLoc解析路径，保留路径大小写
-// 入参: name 所在XML, base 资源目录, value 路径值
-// 返回: string 包内路径
-func editorResourceLocation(name, base, value string) string {
-	value = strings.ReplaceAll(strings.TrimSpace(value), "\\", "/")
-	if value == "" {
-		return ""
-	}
-	if strings.HasPrefix(value, "/") {
-		return cleanPackagePath(value)
-	}
-	base = strings.ReplaceAll(base, "\\", "/")
-	dir := path.Dir(name)
-	if strings.HasPrefix(base, "/") {
-		dir = cleanPackagePath(base)
-	} else {
-		dir = path.Join(dir, base)
-	}
-	return cleanPackagePath(path.Join(dir, value))
-}
-
-// isKnownResourceSafeTagMeta 判断标引入口是否属于明确定义引用规则的已知命名空间白名单
-// 入参: tag 标引入口描述
-// 返回: bool 是否属于已知白名单
-func isKnownResourceSafeTagMeta(tag CustomTag) bool {
-	if tag.TypeID == structureTypeOfficial {
-		return true
-	}
-	if tag.TypeID == structureTypeInvoice {
-		ns := strings.TrimSpace(tag.NameSpace)
-		return ns == "" || ns == structureNamespaceEInvoice2016 || ns == InvoiceStandardEDRM2019 || ns == ofdNamespace2016
-	}
-	switch tag.NameSpace {
-	case textNamespace:
-		return tag.TypeID == textTagType
-	case richTextNamespace:
-		return tag.TypeID == richTextTagType
-	case invoiceNamespace:
-		return tag.TypeID == invoiceTagType
-	case pdfStructureNamespace:
-		return tag.TypeID == pdfStructureTagType || tag.TypeID == pdfAuxiliaryTagType
-	case pdfInformationNamespace:
-		return tag.TypeID == pdfInformationTagType
-	case structureNamespaceEGov2013, ofdNamespace2016:
-		return true
-	case pdfMetadataRDF, pdfMetadataXML:
-		return tag.TypeID == pdfMetadataTagType
-	default:
-		return false
-	}
-}
-
-// knownResourceSafeCustomTag 核验已解析标引的根节点命名空间符合已知白名单语义，拒绝对未知命名空间臆测引用规则
-// 入参: tag 标引入口描述, root 已解析标引根节点
-// 返回: bool 是否确认不含隐式直接资源标识引用
-func knownResourceSafeCustomTag(tag CustomTag, root *StructureNode) bool {
-	if root == nil || !isKnownResourceSafeTagMeta(tag) {
-		return false
-	}
-	if tag.TypeID == pdfMetadataTagType && (tag.NameSpace == pdfMetadataRDF || tag.NameSpace == pdfMetadataXML) && (root.Namespace == pdfMetadataRDF || root.Namespace == pdfMetadataXML) {
-		return true
-	}
-	if strings.TrimSpace(tag.NameSpace) != "" && root.Namespace != tag.NameSpace {
-		return false
-	}
-	if tag.TypeID == structureTypeInvoice {
-		if structureInvoiceReferences(root) {
-			return true
-		}
-		return root.Name == "eInvoice" && len(root.Children) == 0 && strings.TrimSpace(root.Text) == "" && (root.Namespace == "" || root.Namespace == structureNamespaceEInvoice2016 || root.Namespace == InvoiceStandardEDRM2019)
-	}
-	if structureOfficial(tag, root.Namespace) {
-		return true
-	}
-	if strings.TrimSpace(root.Namespace) == "" || root.Namespace != tag.NameSpace {
-		return false
-	}
-	return structureInvoiceReferences(root) || tag.TypeID == pdfAuxiliaryTagType && root.Namespace == pdfStructureNamespace || tag.TypeID == pdfInformationTagType && root.Namespace == pdfInformationNamespace
-}
-
-// sourcePageMayShrink 判断已修改原页面是否可能减少原包资源引用或缩减原文文字内容
-// 入参: page 当前页面内容, orig 原页面快照
-// 返回: bool 是否可能缩减资源引用或文本用字
-func sourcePageMayShrink(page PageContent, orig *editorSourcePage) bool {
-	if orig == nil || orig.original == nil {
-		return false
-	}
-	if len(orig.original.Actions) != 0 && !reflect.DeepEqual(page.Actions, orig.original.Actions) {
-		beforeRefs := make(map[string]bool)
-		collectActionReferences(orig.original.Actions, beforeRefs)
-		normalizeResourceReferences(beforeRefs)
-		if len(beforeRefs) != 0 {
-			afterRefs := make(map[string]bool)
-			collectActionReferences(page.Actions, afterRefs)
-			normalizeResourceReferences(afterRefs)
-			for id := range beforeRefs {
-				if !afterRefs[id] {
-					return true
-				}
-			}
-		}
-	}
-	if len(page.Content.Layer) < len(orig.original.Content.Layer) {
-		return true
-	}
-	for i, origLayer := range orig.original.Content.Layer {
-		curLayer := page.Content.Layer[i]
-		if curLayer.ID != origLayer.ID {
-			return true
-		}
-		if origLayer.DrawParam != "" && curLayer.DrawParam != origLayer.DrawParam {
-			return true
-		}
-		if len(origLayer.Objects) == 0 {
-			continue
-		}
-		curObjects := make(map[string]GraphicObject, len(curLayer.Objects))
-		for _, obj := range curLayer.Objects {
-			curObjects[editorObjectID(obj)] = obj
-		}
-		for _, origObj := range origLayer.Objects {
-			curObj, ok := curObjects[editorObjectID(origObj)]
-			if !ok {
-				return true
-			}
-			if reflect.DeepEqual(origObj, curObj) {
-				continue
-			}
-			if !objectPreservesRefsAndText(origObj, curObj) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// objectPreservesRefsAndText 判断对象修改是否保留原有文字内容及全部既有资源引用
-// 入参: before 原对象, after 新对象
-// 返回: bool 是否未缩减原有资源引用或文本用字
-func objectPreservesRefsAndText(before, after GraphicObject) bool {
-	if !editorPreservedObject(before, after) {
-		return false
-	}
-	beforeRefs := make(map[string]bool)
-	collectObjectReferences(before, beforeRefs)
-	delete(beforeRefs, "")
-	if len(beforeRefs) == 0 {
-		return true
-	}
-	afterRefs := make(map[string]bool)
-	collectObjectReferences(after, afterRefs)
-	delete(afterRefs, "")
-	normalizeResourceReferences(beforeRefs)
-	normalizeResourceReferences(afterRefs)
-	for id := range beforeRefs {
-		if !afterRefs[id] {
-			return false
-		}
-	}
-	return true
 }

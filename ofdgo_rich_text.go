@@ -80,6 +80,55 @@ type TextFormatPatch struct {
 	Background *string  `json:"background,omitempty"`
 }
 
+// validateRichLayout 校验富文本段落的有限数值及枚举
+// 入参: v 段落选项
+// 返回: error 无效选项
+func validateRichLayout(v TextLayout) error {
+	if !finite(v.LineHeight) || v.LineHeight < 0 || !finite(v.LetterSpacing) || !finite(v.LeftIndent) || !finite(v.RightIndent) || !finite(v.FirstLineIndent) {
+		return fmt.Errorf("invalid rich text layout dimensions")
+	}
+	switch v.Align {
+	case "", "left", "center", "right", "justify", "distributed":
+	default:
+		return fmt.Errorf("invalid rich text alignment")
+	}
+	return nil
+}
+
+// richTextBoundaries 返回包含首尾位置的扩展字素边界
+// 入参: value 原文
+// 返回: map[int]bool 有效码点边界
+func richTextBoundaries(value string) map[int]bool {
+	runes := []rune(value)
+	result := map[int]bool{0: true, len(runes): true}
+	var seg segmenter.Segmenter
+	seg.Init(runes)
+	for it := seg.GraphemeIterator(); it.Next(); {
+		g := it.Grapheme()
+		result[g.Offset] = true
+	}
+	return result
+}
+
+// normalizeRichText 合并相同格式，保留空文档的插入格式
+// 入参: v 完整富文本
+// 返回: RichText 归一化副本
+func normalizeRichText(v RichText) RichText {
+	runs := make([]RichTextRun, 0, len(v.Runs))
+	for _, run := range v.Runs {
+		if len(runs) > 0 && runs[len(runs)-1].Format == run.Format {
+			runs[len(runs)-1].Text += run.Text
+		} else {
+			runs = append(runs, run)
+		}
+	}
+	if len(runs) == 0 && len(v.Runs) > 0 {
+		runs = append(runs, RichTextRun{Format: v.Runs[0].Format})
+	}
+	v.Runs = runs
+	return v
+}
+
 // ParagraphLayout 返回指定段落覆盖后的排版选项
 // 入参: index 段落序号
 // 返回: TextLayout 有效段落选项
@@ -380,36 +429,6 @@ func (f TextFormat) validate() error {
 	return nil
 }
 
-// validateRichLayout 校验富文本段落的有限数值及枚举
-// 入参: v 段落选项
-// 返回: error 无效选项
-func validateRichLayout(v TextLayout) error {
-	if !finite(v.LineHeight) || v.LineHeight < 0 || !finite(v.LetterSpacing) || !finite(v.LeftIndent) || !finite(v.RightIndent) || !finite(v.FirstLineIndent) {
-		return fmt.Errorf("invalid rich text layout dimensions")
-	}
-	switch v.Align {
-	case "", "left", "center", "right", "justify", "distributed":
-	default:
-		return fmt.Errorf("invalid rich text alignment")
-	}
-	return nil
-}
-
-// richTextBoundaries 返回包含首尾位置的扩展字素边界
-// 入参: value 原文
-// 返回: map[int]bool 有效码点边界
-func richTextBoundaries(value string) map[int]bool {
-	runes := []rune(value)
-	result := map[int]bool{0: true, len(runes): true}
-	var seg segmenter.Segmenter
-	seg.Init(runes)
-	for it := seg.GraphemeIterator(); it.Next(); {
-		g := it.Grapheme()
-		result[g.Offset] = true
-	}
-	return result
-}
-
 // checkRange 检查半开范围及其字素边界
 // 入参: start 起点, end 终点
 // 返回: error 无效范围
@@ -473,23 +492,4 @@ func (p TextFormatPatch) apply(f TextFormat) TextFormat {
 		f.Background = *p.Background
 	}
 	return f
-}
-
-// normalizeRichText 合并相同格式，保留空文档的插入格式
-// 入参: v 完整富文本
-// 返回: RichText 归一化副本
-func normalizeRichText(v RichText) RichText {
-	runs := make([]RichTextRun, 0, len(v.Runs))
-	for _, run := range v.Runs {
-		if len(runs) > 0 && runs[len(runs)-1].Format == run.Format {
-			runs[len(runs)-1].Text += run.Text
-		} else {
-			runs = append(runs, run)
-		}
-	}
-	if len(runs) == 0 && len(v.Runs) > 0 {
-		runs = append(runs, RichTextRun{Format: v.Runs[0].Format})
-	}
-	v.Runs = runs
-	return v
 }

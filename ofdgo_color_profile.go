@@ -36,6 +36,48 @@ type colorProfile struct {
 	err   error
 }
 
+// parseColorProfile 验证OFD模型与ICC源模型一致，不以设备色替代声明的配置
+// 入参: kind OFD颜色模型, data ICC文件
+// 返回: *colorProfile 解析结果, error 模型或配置错误
+func parseColorProfile(kind string, data []byte) (*colorProfile, error) {
+	model := map[string]string{"GRAY": "GRAY", "RGB": "RGB ", "CMYK": "CMYK"}[strings.ToUpper(kind)]
+	if len(data) < 132 || model == "" || string(data[16:20]) != model {
+		return nil, fmt.Errorf("ICC source model does not match OFD color space %q", kind)
+	}
+	space, err := pdfgo.NewICCColorSpace(data)
+	if err != nil {
+		return nil, err
+	}
+	return &colorProfile{space: space}, nil
+}
+
+// displayColor 按源模型及配置转换显示颜色，保持源分量精度
+// 入参: kind 源模型, values 归一化分量, profile 可选ICC配置
+// 返回: [3]float64 sRGB分量, error 模型或转换错误
+func displayColor(kind string, values [4]float64, profile *colorProfile) ([3]float64, error) {
+	if profile != nil {
+		return profile.srgb(values)
+	}
+	switch kind {
+	case "GRAY":
+		return [3]float64{values[0], values[0], values[0]}, nil
+	case "RGB":
+		return [3]float64{values[0], values[1], values[2]}, nil
+	case "CMYK":
+		return pdfgo.DeviceCMYKToSRGB(values[0], values[1], values[2], values[3]), nil
+	default:
+		return [3]float64{}, fmt.Errorf("unsupported color space %q", kind)
+	}
+}
+
+// profileColor 将显示分量一次量化并按透明度预乘
+// 入参: rgb sRGB分量, alpha 非预乘透明度
+// 返回: color.RGBA 预乘颜色
+func profileColor(rgb [3]float64, alpha float64) color.RGBA {
+	alpha = math.Max(0, math.Min(1, alpha))
+	return color.RGBA{meshByte(rgb[0] * alpha), meshByte(rgb[1] * alpha), meshByte(rgb[2] * alpha), meshByte(alpha)}
+}
+
 // srgb 转换归一化源分量，不在ICC变换前量化为8位
 // 入参: values 源分量
 // 返回: [3]float64 sRGB分量, error 变换错误
@@ -98,54 +140,12 @@ func (r *Reader) colorProfile(space *ColorSpace) (*colorProfile, error) {
 // 入参: id 颜色空间标识
 // 返回: *ColorSpace 已加载定义，未声明时为nil
 func (r *Renderer) colorDefinition(id string) *ColorSpace {
-	if r == nil || r.Reader == nil {
+	if r == nil || r.reader == nil {
 		return nil
 	}
-	if id == "" && r.Reader.doc != nil {
-		id = formatUnitID(uint64(r.Reader.doc.CommonData.DefaultCS))
+	if id == "" && r.reader.doc != nil {
+		id = formatUnitID(r.reader.doc.CommonData.DefaultCS)
 	}
-	space, _ := r.Reader.resolveColorSpaceScoped(r.pageResources, id)
+	space, _ := r.reader.resolveColorSpaceScoped(r.pageResources, id)
 	return space
-}
-
-// parseColorProfile 验证OFD模型与ICC源模型一致，不以设备色替代声明的配置
-// 入参: kind OFD颜色模型, data ICC文件
-// 返回: *colorProfile 解析结果, error 模型或配置错误
-func parseColorProfile(kind string, data []byte) (*colorProfile, error) {
-	model := map[string]string{"GRAY": "GRAY", "RGB": "RGB ", "CMYK": "CMYK"}[strings.ToUpper(kind)]
-	if len(data) < 132 || model == "" || string(data[16:20]) != model {
-		return nil, fmt.Errorf("ICC source model does not match OFD color space %q", kind)
-	}
-	space, err := pdfgo.NewICCColorSpace(data)
-	if err != nil {
-		return nil, err
-	}
-	return &colorProfile{space: space}, nil
-}
-
-// displayColor 按源模型及配置转换显示颜色，保持源分量精度
-// 入参: kind 源模型, values 归一化分量, profile 可选ICC配置
-// 返回: [3]float64 sRGB分量, error 模型或转换错误
-func displayColor(kind string, values [4]float64, profile *colorProfile) ([3]float64, error) {
-	if profile != nil {
-		return profile.srgb(values)
-	}
-	switch kind {
-	case "GRAY":
-		return [3]float64{values[0], values[0], values[0]}, nil
-	case "RGB":
-		return [3]float64{values[0], values[1], values[2]}, nil
-	case "CMYK":
-		return pdfgo.DeviceCMYKToSRGB(values[0], values[1], values[2], values[3]), nil
-	default:
-		return [3]float64{}, fmt.Errorf("unsupported color space %q", kind)
-	}
-}
-
-// profileColor 将显示分量一次量化并按透明度预乘
-// 入参: rgb sRGB分量, alpha 非预乘透明度
-// 返回: color.RGBA 预乘颜色
-func profileColor(rgb [3]float64, alpha float64) color.RGBA {
-	alpha = math.Max(0, math.Min(1, alpha))
-	return color.RGBA{meshByte(rgb[0] * alpha), meshByte(rgb[1] * alpha), meshByte(rgb[2] * alpha), meshByte(alpha)}
 }

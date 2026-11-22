@@ -32,6 +32,100 @@ type pageReferenceNode struct {
 	standard, drop    bool
 }
 
+// pruneCreatedPageReferences 清理创作文档中被明确删除页面的直接跳转，不检查其他目标是否可达
+// 入参: ctx 取消上下文, data 创作XML, removed 已删除页面标识
+// 返回: []byte 更新后的XML, error 解析或取消错误
+func pruneCreatedPageReferences(ctx context.Context, data []byte, removed map[string]bool) ([]byte, error) {
+	d := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
+	var stack []pageReferenceNode
+	var patches []editorXMLPatch
+	root := false
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		start := int(d.InputOffset())
+		token, err := d.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch token := token.(type) {
+		case xml.StartElement:
+			node := pageReferenceNode{name: token.Name.Local, start: start, patch: len(patches), standard: token.Name.Space == ofdNamespace2016}
+			if len(stack) == 0 {
+				if root {
+					return nil, fmt.Errorf("multiple XML roots")
+				}
+				root = true
+			} else {
+				parent := &stack[len(stack)-1]
+				parent.children++
+				node.standard = node.standard && parent.standard
+			}
+			if node.standard && node.name == "Dest" && len(stack) >= 2 && stack[len(stack)-1].name == "Goto" && stack[len(stack)-2].name == "Action" {
+				for _, attr := range token.Attr {
+					if attr.Name.Space == "" && attr.Name.Local == "PageID" && removed[editorResourceID(attr.Value)] {
+						stack[len(stack)-2].drop = true
+					}
+				}
+			}
+			stack = append(stack, node)
+		case xml.EndElement:
+			node := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if node.drop || node.standard && node.name == "Actions" && node.removed > 0 && node.children == node.removed {
+				patches = append(patches[:node.patch], editorXMLPatch{start: node.start, end: int(d.InputOffset())})
+				if len(stack) > 0 {
+					stack[len(stack)-1].removed++
+				}
+			}
+		}
+	}
+	if !root {
+		return nil, fmt.Errorf("empty XML document")
+	}
+	if len(patches) > 0 {
+		data = editorPatchXML(data, patches)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// editorPageLocation 按所在XML解析引用，绝对路径以包根目录为基准
+// 入参: reader 原包, parts 覆盖条目, name 所在XML, value 路径
+// 返回: string 包内路径, error 路径不存在
+func editorPageLocation(reader *Reader, parts map[string][]byte, name, value string) (string, error) {
+	return editorPageResourceLocation(reader, parts, name, "", value)
+}
+
+// editorPageResourceLocation 按所在XML与可选资源基准目录解析引用
+// 入参: reader 原包, parts 覆盖条目, name 所在XML, base 资源基准目录, value 路径
+// 返回: string 包内路径, error 路径不存在
+func editorPageResourceLocation(reader *Reader, parts map[string][]byte, name, base, value string) (string, error) {
+	candidate := resolveResourcePath(name, base, value)
+	if !validPackagePath(candidate) {
+		return "", fmt.Errorf("page reference %q in %s not found", value, name)
+	}
+	if _, ok := parts[candidate]; ok {
+		return candidate, nil
+	}
+	if _, ok := reader.files[candidate]; ok {
+		return candidate, nil
+	}
+	if file, ok := reader.packageFile(candidate); ok {
+		return cleanPackagePath(file.Name), nil
+	}
+	if reader.encryptedSource().has(candidate) {
+		return candidate, nil
+	}
+	return "", fmt.Errorf("page reference %q in %s not found", value, name)
+}
+
 // pruneDocumentReferences 在输出快照中清理已删除页面和附件的引用，不修改历史快照或其他文档
 // 沿当前文档、页面、模板、资源、注释和签名索引检查，不进入附件、私有扩展和签名原始凭据
 // 版本包通过独立副本隔离更新当前版本可见的签名列表与签名描述，保留历史版本原始签名快照
@@ -66,7 +160,7 @@ func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][
 		}
 	}
 	queue := []string{reader.documentRoot}
-	if name := e.source.document.Signatures; len(removed) != 0 && name != "" && !reader.OFD.DocBody[reader.documentIndex].versioned {
+	if name := e.source.document.Signatures; len(removed) != 0 && name != "" && !reader.ofd.DocBody[reader.documentIndex].versioned {
 		queue = append(queue, reader.ResPath(name))
 	}
 	seen := make(map[string]bool)
@@ -203,7 +297,7 @@ func (e *Editor) pruneDocumentReferences(ctx context.Context, parts map[string][
 			delete(generated, name)
 		}
 	}
-	if len(removed) != 0 && e.source.document.Signatures != "" && reader.OFD.DocBody[reader.documentIndex].versioned {
+	if len(removed) != 0 && e.source.document.Signatures != "" && reader.ofd.DocBody[reader.documentIndex].versioned {
 		remaps, err := e.pruneVersionSignatureReferences(ctx, parts, removed)
 		if err != nil {
 			return nil, err
@@ -365,98 +459,4 @@ func (e *Editor) pruneVersionSignatureReferences(ctx context.Context, parts map[
 	parts[ofdName] = updatedOFD
 	remaps[listPath] = newListPath
 	return remaps, nil
-}
-
-// pruneCreatedPageReferences 清理创作文档中被明确删除页面的直接跳转，不检查其他目标是否可达
-// 入参: ctx 取消上下文, data 创作XML, removed 已删除页面标识
-// 返回: []byte 更新后的XML, error 解析或取消错误
-func pruneCreatedPageReferences(ctx context.Context, data []byte, removed map[string]bool) ([]byte, error) {
-	d := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
-	var stack []pageReferenceNode
-	var patches []editorXMLPatch
-	root := false
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		start := int(d.InputOffset())
-		token, err := d.Token()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		switch token := token.(type) {
-		case xml.StartElement:
-			node := pageReferenceNode{name: token.Name.Local, start: start, patch: len(patches), standard: token.Name.Space == ofdNamespace2016}
-			if len(stack) == 0 {
-				if root {
-					return nil, fmt.Errorf("multiple XML roots")
-				}
-				root = true
-			} else {
-				parent := &stack[len(stack)-1]
-				parent.children++
-				node.standard = node.standard && parent.standard
-			}
-			if node.standard && node.name == "Dest" && len(stack) >= 2 && stack[len(stack)-1].name == "Goto" && stack[len(stack)-2].name == "Action" {
-				for _, attr := range token.Attr {
-					if attr.Name.Space == "" && attr.Name.Local == "PageID" && removed[editorResourceID(attr.Value)] {
-						stack[len(stack)-2].drop = true
-					}
-				}
-			}
-			stack = append(stack, node)
-		case xml.EndElement:
-			node := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			if node.drop || node.standard && node.name == "Actions" && node.removed > 0 && node.children == node.removed {
-				patches = append(patches[:node.patch], editorXMLPatch{start: node.start, end: int(d.InputOffset())})
-				if len(stack) > 0 {
-					stack[len(stack)-1].removed++
-				}
-			}
-		}
-	}
-	if !root {
-		return nil, fmt.Errorf("empty XML document")
-	}
-	if len(patches) > 0 {
-		data = editorPatchXML(data, patches)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return data, nil
-}
-
-// editorPageLocation 按所在XML解析引用，绝对路径以包根目录为基准
-// 入参: reader 原包, parts 覆盖条目, name 所在XML, value 路径
-// 返回: string 包内路径, error 路径不存在
-func editorPageLocation(reader *Reader, parts map[string][]byte, name, value string) (string, error) {
-	return editorPageResourceLocation(reader, parts, name, "", value)
-}
-
-// editorPageResourceLocation 按所在XML与可选资源基准目录解析引用
-// 入参: reader 原包, parts 覆盖条目, name 所在XML, base 资源基准目录, value 路径
-// 返回: string 包内路径, error 路径不存在
-func editorPageResourceLocation(reader *Reader, parts map[string][]byte, name, base, value string) (string, error) {
-	candidate := resolveResourcePath(name, base, value)
-	if !validPackagePath(candidate) {
-		return "", fmt.Errorf("page reference %q in %s not found", value, name)
-	}
-	if _, ok := parts[candidate]; ok {
-		return candidate, nil
-	}
-	if _, ok := reader.files[candidate]; ok {
-		return candidate, nil
-	}
-	if file, ok := reader.packageFile(candidate); ok {
-		return cleanPackagePath(file.Name), nil
-	}
-	if reader.encryptedSource().has(candidate) {
-		return candidate, nil
-	}
-	return "", fmt.Errorf("page reference %q in %s not found", value, name)
 }

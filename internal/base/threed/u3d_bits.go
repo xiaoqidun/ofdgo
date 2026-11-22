@@ -30,6 +30,33 @@ type u3dValues struct {
 	err  error
 }
 
+// u3dBits 按ECMA-363第10章逆解16位算术区间，字节内按低位优先读取
+type u3dBits struct {
+	data            []byte
+	pos             uint64
+	low, high, code uint32
+	err             error
+	reserve         func(uint64, uint64) error
+}
+
+// u3dHistogram 保存一个动态压缩上下文的频次及前缀和
+type u3dHistogram struct {
+	counts []uint32
+	tree   []uint32
+	total  uint32
+}
+
+// newU3DBits 初始化当前块的独立算术解码状态
+// 入参: data 块数据
+// 返回: *u3dBits 解码器
+func newU3DBits(data []byte) *u3dBits {
+	r := &u3dBits{data: data, high: 0xffff}
+	for range 16 {
+		r.code = r.code<<1 | r.bit()
+	}
+	return r
+}
+
 // take 读取定长字段，失败后不继续推进位置
 // 入参: size 字节数
 // 返回: []byte 字段数据，失败时为空
@@ -100,26 +127,6 @@ func (r *u3dValues) done() error {
 		return fmt.Errorf("unexpected U3D block data")
 	}
 	return nil
-}
-
-// u3dBits 按ECMA-363第10章逆解16位算术区间，字节内按低位优先读取
-type u3dBits struct {
-	data            []byte
-	pos             uint64
-	low, high, code uint32
-	err             error
-	reserve         func(uint64, uint64) error
-}
-
-// newU3DBits 初始化当前块的独立算术解码状态
-// 入参: data 块数据
-// 返回: *u3dBits 解码器
-func newU3DBits(data []byte) *u3dBits {
-	r := &u3dBits{data: data, high: 0xffff}
-	for range 16 {
-		r.code = r.code<<1 | r.bit()
-	}
-	return r
 }
 
 // finish 校验压缩块的冲刷字段及结束位置
@@ -302,13 +309,6 @@ func (r *u3dBits) histogramAdd(h *u3dHistogram, symbol uint32) {
 		}
 	}
 	h.add(symbol)
-}
-
-// u3dHistogram 保存一个动态压缩上下文的频次及前缀和
-type u3dHistogram struct {
-	counts []uint32
-	tree   []uint32
-	total  uint32
 }
 
 // find 以树状前缀和定位符号，避免按符号数量线性扫描

@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"context"
 	"fmt"
 )
 
@@ -24,24 +25,50 @@ type ObjectContour struct {
 	EvenOdd bool   `json:"evenOdd,omitempty"`
 }
 
+// annotationMeasurement 按注解绘制顺序收集对象范围和轮廓
+type annotationMeasurement struct {
+	renderer *Renderer
+	result   ObjectMeasurement
+}
+
 // RenderPage 编译页面为与绘图库无关的只读绘制数据
 // 入参: page 页面内容
 // 返回: *RasterPage 绘制页面, error 错误信息
 func (r *Renderer) RenderPage(page *PageContent) (*RasterPage, error) {
-	return r.CompilePage(page)
+	return r.RenderPageContext(context.Background(), page)
+}
+
+// RenderPageContext 按取消上下文编译页面为与绘图库无关的只读绘制数据
+// 入参: ctx 取消上下文，nil使用后台上下文, page 页面内容
+// 返回: *RasterPage 绘制页面, error 编译或取消错误
+func (r *Renderer) RenderPageContext(ctx context.Context, page *PageContent) (*RasterPage, error) {
+	return r.CompilePageContext(ctx, page)
 }
 
 // GetPageBox 获取页面物理区域
 // 入参: page 页面内容
 // 返回: Box 区域, error 错误信息
 func (r *Renderer) GetPageBox(page *PageContent) (Box, error) {
+	return r.GetPageBoxContext(context.Background(), page)
+}
+
+// GetPageBoxContext 按取消上下文获取页面物理区域
+// 入参: ctx 取消上下文，nil使用后台上下文, page 页面内容
+// 返回: Box 区域, error 读取或取消错误
+func (r *Renderer) GetPageBoxContext(ctx context.Context, page *PageContent) (Box, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return Box{}, err
+	}
 	area := page.Area
-	if r != nil && r.Reader != nil {
-		if r.Reader.doc == nil && r.Reader.OFD != nil {
-			_, _ = r.Reader.docStructureContext(r.outputContext())
+	if r != nil && r.reader != nil {
+		if r.reader.doc == nil && r.reader.ofd != nil {
+			_, _ = r.reader.docStructureContext(ctx)
 		}
 		var err error
-		area, err = r.Reader.resolvePageAreaContext(r.outputContext(), page.Area, page.Template)
+		area, err = r.reader.resolvePageAreaContext(ctx, page.Area, page.Template)
 		if err != nil {
 			return Box{}, err
 		}
@@ -53,29 +80,38 @@ func (r *Renderer) GetPageBox(page *PageContent) (Box, error) {
 // 入参: page 页面内容
 // 返回: []PageLink 页面链接, error 错误信息
 func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
-	ctx := r.pageContext
+	return r.PageLinksContext(context.Background(), page)
+}
+
+// PageLinksContext 按取消上下文获取页面、模板和可见注释中图元的点击动作
+// 入参: ctx 取消上下文，nil使用后台上下文, page 页面内容
+// 返回: []PageLink 页面链接, error 读取或取消错误
+func (r *Renderer) PageLinksContext(ctx context.Context, page *PageContent) ([]PageLink, error) {
 	if ctx == nil {
-		ctx = r.outputContext()
+		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if r.Reader != nil && r.Reader.doc == nil && r.Reader.OFD != nil {
-		if _, err := r.Reader.docStructureContext(ctx); err != nil {
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
+	if r.reader != nil && r.reader.doc == nil && r.reader.ofd != nil {
+		if _, err := r.reader.docStructureContext(ctx); err != nil {
 			return nil, err
 		}
 	}
 	defer r.bindPageResources(page)()
 	var annotations []Annotation
-	if r.RenderAnnotations && r.Reader != nil {
+	if r.renderAnnotations && r.reader != nil {
 		var err error
-		annotations, err = r.Reader.pageAnnotationsContext(ctx, page.ID)
+		annotations, err = r.reader.pageAnnotationsContext(ctx, page.ID)
 		if err != nil {
 			return nil, err
 		}
 	}
 	sources := r.pageActionSources(page)
-	if r.RenderAnnotations && len(annotations) > 0 {
+	if r.renderAnnotations && len(annotations) > 0 {
 		if r.printing {
 			filtered := make([]Annotation, 0, len(annotations))
 			for _, annot := range annotations {
@@ -95,7 +131,23 @@ func (r *Renderer) PageLinks(page *PageContent) ([]PageLink, error) {
 // DocumentOpenLinks 获取文档打开动作的有序目标，不执行动作
 // 返回: []PageLink 动作目标, error 文档解析错误
 func (r *Renderer) DocumentOpenLinks() ([]PageLink, error) {
-	doc, err := r.Reader.docStructure()
+	return r.DocumentOpenLinksContext(context.Background())
+}
+
+// DocumentOpenLinksContext 按取消上下文获取文档打开动作的有序目标，不执行动作
+// 入参: ctx 取消上下文，nil使用后台上下文
+// 返回: []PageLink 动作目标, error 文档解析或取消错误
+func (r *Renderer) DocumentOpenLinksContext(ctx context.Context) ([]PageLink, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
+	doc, err := r.reader.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -106,8 +158,24 @@ func (r *Renderer) DocumentOpenLinks() ([]PageLink, error) {
 // 入参: page 页面内容
 // 返回: []PageLink 动作目标, error 目标解析错误
 func (r *Renderer) PageOpenLinks(page *PageContent) ([]PageLink, error) {
-	if r.Reader != nil && r.Reader.doc == nil && r.Reader.OFD != nil {
-		if _, err := r.Reader.docStructureContext(r.outputContext()); err != nil {
+	return r.PageOpenLinksContext(context.Background(), page)
+}
+
+// PageOpenLinksContext 按取消上下文获取页面及模板打开动作的有序目标
+// 入参: ctx 取消上下文，nil使用后台上下文, page 页面内容
+// 返回: []PageLink 动作目标, error 目标解析或取消错误
+func (r *Renderer) PageOpenLinksContext(ctx context.Context, page *PageContent) ([]PageLink, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
+	if r.reader != nil && r.reader.doc == nil && r.reader.ofd != nil {
+		if _, err := r.reader.docStructureContext(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -119,7 +187,23 @@ func (r *Renderer) PageOpenLinks(page *PageContent) ([]PageLink, error) {
 // 入参: path 从根节点开始的各级索引
 // 返回: []PageLink 动作目标，不包含页面点击区域, error 目录路径或解析错误
 func (r *Renderer) OutlineLinks(path []int) ([]PageLink, error) {
-	doc, err := r.Reader.docStructure()
+	return r.OutlineLinksContext(context.Background(), path)
+}
+
+// OutlineLinksContext 按取消上下文获取目录节点的有序动作目标，不执行动作
+// 入参: ctx 取消上下文，nil使用后台上下文, path 从根节点开始的各级索引
+// 返回: []PageLink 动作目标，不包含页面点击区域, error 目录路径、解析或取消错误
+func (r *Renderer) OutlineLinksContext(ctx context.Context, path []int) ([]PageLink, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
+	doc, err := r.reader.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -142,11 +226,24 @@ func (r *Renderer) OutlineLinks(path []int) ([]PageLink, error) {
 // 入参: index 页面索引，从0开始
 // 返回: *RasterPage 绘制页面, error 错误信息
 func (r *Renderer) RenderPageByIndex(index int) (*RasterPage, error) {
-	page, err := r.Reader.PageContentByIndex(index)
+	return r.RenderPageByIndexContext(context.Background(), index)
+}
+
+// RenderPageByIndexContext 按取消上下文与索引渲染页面
+// 入参: ctx 取消上下文，nil使用后台上下文, index 页面索引，从0开始
+// 返回: *RasterPage 绘制页面, error 读取、编译或取消错误
+func (r *Renderer) RenderPageByIndexContext(ctx context.Context, index int) (*RasterPage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	page, err := r.reader.PageContentByIndexContext(ctx, index)
 	if err != nil {
 		return nil, err
 	}
-	return r.RenderPage(page)
+	return r.RenderPageContext(ctx, page)
 }
 
 // ObjectBounds 获取文字、路径、图片或复合对象在页面坐标中的轴对齐范围，不修改对象
@@ -156,7 +253,14 @@ func (r *Renderer) RenderPageByIndex(index int) (*RasterPage, error) {
 // 入参: object 图形对象, drawParam 图层绘制参数标识，无继承时为空
 // 返回: Box 毫米坐标范围, error 错误信息
 func (r *Renderer) ObjectBounds(object GraphicObject, drawParam string) (Box, error) {
-	result, err := r.MeasureObject(object, MeasureOptions{Defaults: r.drawParamDefaults(drawParam, nil)})
+	return r.ObjectBoundsContext(context.Background(), object, drawParam)
+}
+
+// ObjectBoundsContext 按取消上下文获取对象在页面坐标中的轴对齐范围，不修改对象
+// 入参: ctx 取消上下文，nil使用后台上下文, object 图形对象, drawParam 图层绘制参数标识，无继承时为空
+// 返回: Box 毫米坐标范围, error 度量或取消错误
+func (r *Renderer) ObjectBoundsContext(ctx context.Context, object GraphicObject, drawParam string) (Box, error) {
+	result, err := r.MeasureObjectContext(ctx, object, MeasureOptions{Defaults: r.drawParamDefaults(drawParam, nil)})
 	return result.Bounds, err
 }
 
@@ -165,6 +269,22 @@ func (r *Renderer) ObjectBounds(object GraphicObject, drawParam string) (Box, er
 // 入参: annotation 注解
 // 返回: Box 页面范围, []ObjectContour 命中轮廓, error 错误信息
 func (r *Renderer) AnnotationGeometry(annotation Annotation) (Box, []ObjectContour, error) {
+	return r.AnnotationGeometryContext(context.Background(), annotation)
+}
+
+// AnnotationGeometryContext 按取消上下文获取注解外观的实际内容轮廓
+// 入参: ctx 取消上下文，nil使用后台上下文, annotation 注解
+// 返回: Box 页面范围, []ObjectContour 命中轮廓, error 度量或取消错误
+func (r *Renderer) AnnotationGeometryContext(ctx context.Context, annotation Annotation) (Box, []ObjectContour, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return Box{}, nil, err
+	}
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
 	measurement := &annotationMeasurement{renderer: r}
 	if err := r.walkAnnotation(annotation, measurement); err != nil {
 		return Box{}, nil, err
@@ -197,7 +317,14 @@ func (r *Renderer) AnnotationGeometry(annotation Annotation) (Box, []ObjectConto
 // 入参: object 路径、图片或复合对象, drawParam 图层绘制参数标识
 // 返回: []ObjectContour 可用于点选的轮廓, error 错误信息
 func (r *Renderer) ObjectContours(object GraphicObject, drawParam string) ([]ObjectContour, error) {
-	_, contours, err := r.ObjectGeometry(object, drawParam)
+	return r.ObjectContoursContext(context.Background(), object, drawParam)
+}
+
+// ObjectContoursContext 按取消上下文获取路径、图片或复合对象的实际绘制区域
+// 入参: ctx 取消上下文，nil使用后台上下文, object 路径、图片或复合对象, drawParam 图层绘制参数标识
+// 返回: []ObjectContour 可用于点选的轮廓, error 度量或取消错误
+func (r *Renderer) ObjectContoursContext(ctx context.Context, object GraphicObject, drawParam string) ([]ObjectContour, error) {
+	_, contours, err := r.ObjectGeometryContext(ctx, object, drawParam)
 	return contours, err
 }
 
@@ -205,10 +332,17 @@ func (r *Renderer) ObjectContours(object GraphicObject, drawParam string) ([]Obj
 // 入参: object 图形对象, drawParam 图层绘制参数标识
 // 返回: Box 毫米范围, []ObjectContour 绘制轮廓, error 错误信息
 func (r *Renderer) ObjectGeometry(object GraphicObject, drawParam string) (Box, []ObjectContour, error) {
+	return r.ObjectGeometryContext(context.Background(), object, drawParam)
+}
+
+// ObjectGeometryContext 按取消上下文一次度量路径、图片或复合对象的范围与轮廓
+// 入参: ctx 取消上下文，nil使用后台上下文, object 图形对象, drawParam 图层绘制参数标识
+// 返回: Box 毫米范围, []ObjectContour 绘制轮廓, error 度量或取消错误
+func (r *Renderer) ObjectGeometryContext(ctx context.Context, object GraphicObject, drawParam string) (Box, []ObjectContour, error) {
 	if object.Type != "PathObject" && object.Type != "ImageObject" && object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
 		return Box{}, nil, fmt.Errorf("contours require a path, image or composite object")
 	}
-	result, err := r.MeasureObject(object, MeasureOptions{Defaults: r.drawParamDefaults(drawParam, nil), Contours: true})
+	result, err := r.MeasureObjectContext(ctx, object, MeasureOptions{Defaults: r.drawParamDefaults(drawParam, nil), Contours: true})
 	return result.Bounds, result.Contours, err
 }
 
@@ -216,16 +350,30 @@ func (r *Renderer) ObjectGeometry(object GraphicObject, drawParam string) (Box, 
 // 入参: object 图形对象, options 度量上下文
 // 返回: ObjectMeasurement 度量结果, error 错误信息
 func (r *Renderer) MeasureObject(object GraphicObject, options MeasureOptions) (ObjectMeasurement, error) {
+	return r.MeasureObjectContext(context.Background(), object, options)
+}
+
+// MeasureObjectContext 按取消上下文使用当前页面编译器度量对象
+// 入参: ctx 取消上下文，nil使用后台上下文, object 图形对象, options 度量上下文
+// 返回: ObjectMeasurement 度量结果, error 度量或取消错误
+func (r *Renderer) MeasureObjectContext(ctx context.Context, object GraphicObject, options MeasureOptions) (ObjectMeasurement, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return ObjectMeasurement{}, err
+	}
 	if r.backends.Compiler == nil {
 		return ObjectMeasurement{}, fmt.Errorf("%w: object measurement", ErrBackendUnavailable)
 	}
-	return r.backends.Compiler.MeasureObject(r, object, options)
-}
-
-// annotationMeasurement 按注解绘制顺序收集对象范围和轮廓
-type annotationMeasurement struct {
-	renderer *Renderer
-	result   ObjectMeasurement
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
+	result, err := r.backends.Compiler.MeasureObject(ctx, r, object, options)
+	if canceled := ctx.Err(); canceled != nil {
+		return ObjectMeasurement{}, canceled
+	}
+	return result, err
 }
 
 // DrawObject 使用对象实际继承状态度量注解内容，保留外观边界裁剪
@@ -235,7 +383,7 @@ func (m *annotationMeasurement) DrawObject(object *GraphicObject, state RenderSt
 	if state.Hidden {
 		return nil
 	}
-	result, err := m.renderer.MeasureObject(*object, MeasureOptions{Defaults: state.Defaults, Parent: state.Parent, BoundaryInCTM: state.BoundaryInCTM, Clip: state.Clip, Contours: true})
+	result, err := m.renderer.MeasureObjectContext(m.renderer.pageContext, *object, MeasureOptions{Defaults: state.Defaults, Parent: state.Parent, BoundaryInCTM: state.BoundaryInCTM, Clip: state.Clip, Contours: true})
 	if err != nil {
 		return err
 	}
@@ -258,7 +406,7 @@ func (r *Renderer) translateActionSources(page *PageContent, sources []actionSou
 	if page == nil || len(sources) == 0 {
 		return sources
 	}
-	box, err := r.GetPageBox(page)
+	box, err := r.GetPageBoxContext(r.pageContext, page)
 	if err != nil || (box.X == 0 && box.Y == 0) {
 		return sources
 	}
@@ -306,7 +454,7 @@ func (r *Renderer) sourceLinks(sources []actionSource, event string) ([]PageLink
 			}
 			if action.Goto != nil {
 				if bookmarks == nil {
-					doc, err := r.Reader.docStructure()
+					doc, err := r.reader.docStructureContext(r.outputContext())
 					if err != nil {
 						return nil, err
 					}

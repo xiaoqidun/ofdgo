@@ -15,7 +15,6 @@
 package ofdgo
 
 import (
-	"encoding/binary"
 	"image/color"
 	"math"
 	"strings"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/tdewolff/canvas"
 	canvastext "github.com/tdewolff/canvas/text"
+	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 )
 
@@ -31,6 +31,39 @@ type pdfGlyphItem struct {
 	glyph textGlyph
 	id    uint16
 	x     float64
+}
+
+// pdfOpaqueSolidColor 提取用于Tr=2伪粗体描边的不透明纯色，非纯色或半透明返回false
+// 入参: paint 填充画刷
+// 返回: color.RGBA 填充颜色, bool 是否为不透明纯色
+func pdfOpaqueSolidColor(paint any) (color.RGBA, bool) {
+	c, ok := paint.(color.Color)
+	if !ok || c == nil {
+		return color.RGBA{}, false
+	}
+	r, g, b, a := c.RGBA()
+	if a != 0xFFFF {
+		return color.RGBA{}, false
+	}
+	return color.RGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: 255}, true
+}
+
+// pdfSingleGlyphID 解析可直接合并为批量PDF字形输出的唯一GID
+// 入参: face 字体, glyph 绘制字形
+// 返回: uint16 字形编号, bool 是否可作为单字形批量输出
+func pdfSingleGlyphID(face *canvas.FontFace, glyph textGlyph) (uint16, bool) {
+	if glyph.GlyphID > 0 && glyph.GlyphID <= 0xFFFF {
+		return uint16(glyph.GlyphID), true
+	}
+	if glyph.GlyphID < 0 {
+		runes := []rune(glyph.Text)
+		if len(runes) == 1 {
+			if id := face.Font.GlyphIndex(runes[0]); id != 0 {
+				return id, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // RenderText 向单遍内容流写入文字并同步span计数以供原地包裹ActualText、伪粗体与矢量裁剪
@@ -384,7 +417,7 @@ func (r *Renderer) pdfActualText(object TextObject, fontID string, face *canvas.
 			continue
 		}
 		if reverse == nil {
-			reverse = buildFontReverseCmap(face.Font.Tables["cmap"])
+			reverse = basefont.ReverseCmap(face.Font.Tables["cmap"])
 		}
 		glyphs := r.parseIndexGlyphs(code.Index, fontID)
 		mapped := false
@@ -407,138 +440,4 @@ func (r *Renderer) pdfActualText(object TextObject, fontID string, face *canvas.
 		}
 	}
 	return text.String()
-}
-
-// buildFontReverseCmap 从OpenType cmap表构建GID到Unicode码点的反查表
-// 入参: cmap cmap表字节
-// 返回: map[uint16]rune 字形编号到Unicode字符的映射
-func buildFontReverseCmap(cmap []byte) map[uint16]rune {
-	result := make(map[uint16]rune)
-	if len(cmap) < 4 {
-		return result
-	}
-	numTables := int(binary.BigEndian.Uint16(cmap[2:4]))
-	if 4+numTables*8 > len(cmap) {
-		return result
-	}
-	for i := range numTables {
-		rec := cmap[4+i*8:]
-		platform := binary.BigEndian.Uint16(rec[0:2])
-		encoding := binary.BigEndian.Uint16(rec[2:4])
-		offset := int(binary.BigEndian.Uint32(rec[4:8]))
-		if !(platform == 0 || platform == 3 && (encoding == 1 || encoding == 10)) {
-			continue
-		}
-		if offset < 0 || offset+4 > len(cmap) {
-			continue
-		}
-		sub := cmap[offset:]
-		format := binary.BigEndian.Uint16(sub[0:2])
-		switch format {
-		case 4:
-			if len(sub) < 14 {
-				continue
-			}
-			segCount := int(binary.BigEndian.Uint16(sub[6:8])) / 2
-			endOff := 14
-			startOff := endOff + segCount*2 + 2
-			deltaOff := startOff + segCount*2
-			rangeOff := deltaOff + segCount*2
-			if rangeOff+segCount*2 > len(sub) {
-				continue
-			}
-			for s := range segCount {
-				endCode := uint32(binary.BigEndian.Uint16(sub[endOff+s*2:]))
-				startCode := uint32(binary.BigEndian.Uint16(sub[startOff+s*2:]))
-				if startCode == 0xFFFF && endCode == 0xFFFF {
-					break
-				}
-				idDelta := int32(int16(binary.BigEndian.Uint16(sub[deltaOff+s*2:])))
-				idRangeOffset := int(binary.BigEndian.Uint16(sub[rangeOff+s*2:]))
-				for code := startCode; code <= endCode; code++ {
-					var gid uint16
-					if idRangeOffset == 0 {
-						gid = uint16((int32(code) + idDelta) & 0xFFFF)
-					} else {
-						pos := rangeOff + s*2 + idRangeOffset + int(code-startCode)*2
-						if pos+2 > len(sub) {
-							continue
-						}
-						raw := binary.BigEndian.Uint16(sub[pos:])
-						if raw != 0 {
-							gid = uint16((int32(raw) + idDelta) & 0xFFFF)
-						}
-					}
-					if gid != 0 && utf8.ValidRune(rune(code)) {
-						if _, exists := result[gid]; !exists {
-							result[gid] = rune(code)
-						}
-					}
-				}
-			}
-		case 12:
-			if len(sub) < 16 {
-				continue
-			}
-			numGroups := int(binary.BigEndian.Uint32(sub[12:16]))
-			if 16+numGroups*12 > len(sub) {
-				continue
-			}
-			for g := range numGroups {
-				group := sub[16+g*12:]
-				startChar := binary.BigEndian.Uint32(group[0:4])
-				endChar := binary.BigEndian.Uint32(group[4:8])
-				startGID := binary.BigEndian.Uint32(group[8:12])
-				if endChar < startChar || startChar > utf8.MaxRune {
-					continue
-				}
-				limit := min(endChar, uint32(utf8.MaxRune))
-				if limit-startChar > 65535 {
-					limit = startChar + 65535
-				}
-				for code := startChar; code <= limit; code++ {
-					gid := startGID + (code - startChar)
-					if gid > 0 && gid <= 0xFFFF && utf8.ValidRune(rune(code)) {
-						if _, exists := result[uint16(gid)]; !exists {
-							result[uint16(gid)] = rune(code)
-						}
-					}
-				}
-			}
-		}
-	}
-	return result
-}
-
-// pdfOpaqueSolidColor 提取用于Tr=2伪粗体描边的不透明纯色，非纯色或半透明返回false
-// 入参: paint 填充画刷
-// 返回: color.RGBA 填充颜色, bool 是否为不透明纯色
-func pdfOpaqueSolidColor(paint any) (color.RGBA, bool) {
-	c, ok := paint.(color.Color)
-	if !ok || c == nil {
-		return color.RGBA{}, false
-	}
-	r, g, b, a := c.RGBA()
-	if a != 0xFFFF {
-		return color.RGBA{}, false
-	}
-	return color.RGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: 255}, true
-}
-
-// pdfSingleGlyphID 解析可直接合并为批量PDF字形输出的唯一GID
-// 入参: face 字体, glyph 绘制字形
-// 返回: uint16 字形编号, bool 是否可作为单字形批量输出
-func pdfSingleGlyphID(face *canvas.FontFace, glyph textGlyph) (uint16, bool) {
-	if glyph.GlyphID > 0 && glyph.GlyphID <= 0xFFFF {
-		return uint16(glyph.GlyphID), true
-	}
-	if glyph.GlyphID < 0 {
-		runes := []rune(glyph.Text)
-		if len(runes) == 1 {
-			if id := face.Font.GlyphIndex(runes[0]); id != 0 {
-				return id, true
-			}
-		}
-	}
-	return 0, false
 }

@@ -62,6 +62,62 @@ func NewNavWriter(writer *StreamWriter) *NavWriter {
 	}
 }
 
+// destinationArray 将PDF跳转目标转换为标准显式目标数组
+// 入参: dest 跳转目标
+// 返回: pdfgo.Array 目标数组
+func destinationArray(dest pdfgo.Destination) pdfgo.Array {
+	mode := dest.Mode
+	if mode == "" {
+		mode = "Fit"
+	}
+	arr := make(pdfgo.Array, 0, 2+len(dest.Parameters))
+	arr = append(arr, dest.Page, mode)
+	arr = append(arr, dest.Parameters...)
+	return arr
+}
+
+// rectArray 将点空间矩形转换为四元素PDF数组
+// 入参: r 矩形范围
+// 返回: pdfgo.Array 四元素坐标数组
+func rectArray(r pdfgo.Rectangle) pdfgo.Array {
+	return pdfgo.Array{pdfgo.Real(r.XMin), pdfgo.Real(r.YMin), pdfgo.Real(r.XMax), pdfgo.Real(r.YMax)}
+}
+
+// asciiFallback 将含非ASCII字符的文件名转为兼容旧版阅读器的F字段ASCII文本
+// 入参: s 原始UTF-8文件名
+// 返回: string ASCII文件名
+func asciiFallback(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := range len(s) {
+		if s[i] >= 0x20 && s[i] <= 0x7E {
+			out = append(out, s[i])
+		} else {
+			out = append(out, '_')
+		}
+	}
+	if len(out) == 0 {
+		return "file"
+	}
+	return string(out)
+}
+
+// encodeURIString 将URI中的非ASCII或控制字符按RFC 3986百分号转义为ASCII
+// 入参: raw 原始URI文本
+// 返回: string ASCII转义后URI
+func encodeURIString(raw string) string {
+	const hex = "0123456789ABCDEF"
+	out := make([]byte, 0, len(raw))
+	for i := range len(raw) {
+		c := raw[i]
+		if c >= 0x21 && c <= 0x7E {
+			out = append(out, c)
+		} else {
+			out = append(out, '%', hex[c>>4], hex[c&0x0F])
+		}
+	}
+	return string(out)
+}
+
 // WriteAttachments 写出文档内嵌附件并返回EmbeddedFiles名称树字典
 // 入参: ctx 取消上下文, attachments 附件映射
 // 返回: pdfgo.Dictionary 名称树节点字典, error 写入错误
@@ -701,60 +757,4 @@ func (n *NavWriter) ensureEmptyForm() (pdfgo.Reference, error) {
 	}
 	n.emptyForm = ref
 	return ref, nil
-}
-
-// destinationArray 将PDF跳转目标转换为标准显式目标数组
-// 入参: dest 跳转目标
-// 返回: pdfgo.Array 目标数组
-func destinationArray(dest pdfgo.Destination) pdfgo.Array {
-	mode := dest.Mode
-	if mode == "" {
-		mode = "Fit"
-	}
-	arr := make(pdfgo.Array, 0, 2+len(dest.Parameters))
-	arr = append(arr, dest.Page, mode)
-	arr = append(arr, dest.Parameters...)
-	return arr
-}
-
-// rectArray 将点空间矩形转换为四元素PDF数组
-// 入参: r 矩形范围
-// 返回: pdfgo.Array 四元素坐标数组
-func rectArray(r pdfgo.Rectangle) pdfgo.Array {
-	return pdfgo.Array{pdfgo.Real(r.XMin), pdfgo.Real(r.YMin), pdfgo.Real(r.XMax), pdfgo.Real(r.YMax)}
-}
-
-// asciiFallback 将含非ASCII字符的文件名转为兼容旧版阅读器的F字段ASCII文本
-// 入参: s 原始UTF-8文件名
-// 返回: string ASCII文件名
-func asciiFallback(s string) string {
-	out := make([]byte, 0, len(s))
-	for i := range len(s) {
-		if s[i] >= 0x20 && s[i] <= 0x7E {
-			out = append(out, s[i])
-		} else {
-			out = append(out, '_')
-		}
-	}
-	if len(out) == 0 {
-		return "file"
-	}
-	return string(out)
-}
-
-// encodeURIString 将URI中的非ASCII或控制字符按RFC 3986百分号转义为ASCII
-// 入参: raw 原始URI文本
-// 返回: string ASCII转义后URI
-func encodeURIString(raw string) string {
-	const hex = "0123456789ABCDEF"
-	out := make([]byte, 0, len(raw))
-	for i := range len(raw) {
-		c := raw[i]
-		if c >= 0x21 && c <= 0x7E {
-			out = append(out, c)
-		} else {
-			out = append(out, '%', hex[c>>4], hex[c&0x0F])
-		}
-	}
-	return string(out)
 }

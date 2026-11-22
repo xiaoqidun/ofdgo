@@ -53,6 +53,113 @@ type pdfCompositeNode struct {
 	glyph      *pdfgo.TextMark
 }
 
+// pdfCompositePixel 复用内部PDF像素布局
+type pdfCompositePixel = codecpdf.CompositePixel
+
+// pdfCompositor 在指定局部区域中按源颜色空间合成PDF图元
+type pdfCompositor struct {
+	importer        *pdfImporter
+	box             Box
+	width, height   int
+	inverse         pdfgo.Matrix
+	cache           *pdfCompositeCache
+	scratch         *pdfCompositeScratch
+	origins         *pdfOriginSet
+	masks           map[*pdfgo.SoftMask][]float64
+	meshes          map[pdfMeshKey][]pdfShadingPixel
+	gradients       map[pdfGradientKey][]pdfShadingPixel
+	transfers       []*pdfgo.TransferFunction
+	channels        []uint8
+	transferModel   pdfgo.Name
+	transferBlocked bool
+	shadingSource   bool
+	softMask        bool
+}
+
+// pdfCompositeKey 区分图元的填充与描边几何
+type pdfCompositeKey struct {
+	path   *pdfgo.PathMark
+	text   *pdfgo.TextMark
+	image  *pdfgo.ImageMark
+	stroke bool
+}
+
+// pdfCompositeSceneKey 隔离不同图案坐标系，在单页内共享场景缓存预算
+type pdfCompositeSceneKey struct {
+	owner *pdfCompositeCache
+	mark  pdfCompositeKey
+}
+
+// pdfCompositeGeometry 保存后端中立的绘制命令及其页面边界
+type pdfCompositeGeometry struct {
+	scene *RasterPage
+	box   Box
+}
+
+// pdfCompositeColorSampler 复用渐变几何和相同轴向参数的颜色，不近似函数
+type pdfCompositeColorSampler struct {
+	paint      pdfgo.Paint
+	space      *pdfgo.ColorSpace
+	intent     pdfgo.Name
+	conversion pdfgo.ColorConversion
+	values     map[float64][4]float64
+	position   pdfgo.GradientPosition
+	converter  pdfgo.ColorConverter
+	colorants  *codecpdf.ShadingColorants
+	prepared   bool
+	converted  bool
+}
+
+// pdfImageProcessKey 隔离图像的组空间及软蒙版采样，不复用错误的原生映射
+type pdfImageProcessKey struct {
+	image    *pdfgo.Image
+	space    *pdfgo.ColorSpace
+	softMask bool
+}
+
+// pdfCompositeImageColor 复用图像颜色变换及相邻相同分量的精确结果
+type pdfCompositeImageColor struct {
+	mark       *pdfgo.ImageMark
+	space      *pdfgo.ColorSpace
+	source     *pdfgo.ColorSpace
+	intent     pdfgo.Name
+	conversion pdfgo.ColorConversion
+	converter  pdfgo.ColorConverter
+	input      [4]float64
+	output     [4]float64
+	ready      bool
+}
+
+// pdfCompositeCache 在单页内复用几何、图像分量及蒙版内容
+type pdfCompositeCache struct {
+	resources       *Resources
+	geometry        *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry]
+	clips           *renderCache[[32]byte, GeometryPath]
+	bounds          map[pdfCompositeKey]Box
+	images          map[*pdfgo.Image]*pdfgo.ImageComponents
+	imageMatrix     map[*pdfgo.ImageMark]pdfgo.Matrix
+	imageProcesses  map[pdfImageProcessKey]*pdfgo.ImageProcess
+	imageColor      pdfCompositeImageColor
+	masks           map[*pdfgo.SoftMask][]pdfCompositeNode
+	meshes          map[*pdfgo.MeshGradient][]codecpdf.MeshTriangle
+	linearMeshes    *renderCache[pdfLinearMeshKey, []pdfgo.MeshTriangle]
+	patterns        map[pdfgo.Paint]*pdfCompositePattern
+	shadingPatterns map[*pdfgo.ShadingPattern][]pdfCompositeNode
+	shadingSources  map[pdfShadingSourceKey][]pdfCompositeNode
+	shadings        map[pdfGradientKey]pdfCompositeGeometry
+	transfers       codecpdf.TransferCache
+	textDisjoint    map[*pdfgo.GroupMark]bool
+	groups          map[*pdfgo.GroupMark]Box
+}
+
+// pdfCompositeScratch 复用像素及蒙版缓冲，不跨页持有活动内容
+type pdfCompositeScratch struct {
+	pixels   codecpdf.CompositeBuffers[pdfCompositePixel]
+	masks    codecpdf.CompositeBuffers[float64]
+	channels codecpdf.CompositeBuffers[uint8]
+	rasters  codecpdf.RasterBuffers
+}
+
 // direct 检查sRGB图元能否使用标准OFD透明度而无需背景合成
 // 返回: bool 是否可直接转换
 func (n pdfCompositeNode) direct() bool {
@@ -186,29 +293,6 @@ func (n pdfCompositeNode) coverage(p *pdfImporter, stroke bool) error {
 		{Operator: "C"},
 	}}
 	return p.path(pdfgo.PathMark{Path: path, Style: style, Fill: true})
-}
-
-// pdfCompositePixel 复用内部PDF像素布局
-type pdfCompositePixel = codecpdf.CompositePixel
-
-// pdfCompositor 在指定局部区域中按源颜色空间合成PDF图元
-type pdfCompositor struct {
-	importer        *pdfImporter
-	box             Box
-	width, height   int
-	inverse         pdfgo.Matrix
-	cache           *pdfCompositeCache
-	scratch         *pdfCompositeScratch
-	origins         *pdfOriginSet
-	masks           map[*pdfgo.SoftMask][]float64
-	meshes          map[pdfMeshKey][]pdfShadingPixel
-	gradients       map[pdfGradientKey][]pdfShadingPixel
-	transfers       []*pdfgo.TransferFunction
-	channels        []uint8
-	transferModel   pdfgo.Name
-	transferBlocked bool
-	shadingSource   bool
-	softMask        bool
 }
 
 // coverage 复用已编译的覆盖场景，跳过与当前区域无交集的图元
@@ -462,82 +546,6 @@ func (c *pdfCompositor) releaseMasks() {
 	clear(c.masks)
 }
 
-// pdfCompositeKey 区分图元的填充与描边几何
-type pdfCompositeKey struct {
-	path   *pdfgo.PathMark
-	text   *pdfgo.TextMark
-	image  *pdfgo.ImageMark
-	stroke bool
-}
-
-// pdfCompositeSceneKey 隔离不同图案坐标系，在单页内共享场景缓存预算
-type pdfCompositeSceneKey struct {
-	owner *pdfCompositeCache
-	mark  pdfCompositeKey
-}
-
-// pdfCompositeGeometry 保存后端中立的绘制命令及其页面边界
-type pdfCompositeGeometry struct {
-	scene *RasterPage
-	box   Box
-}
-
-// pdfCompositeColorSampler 复用渐变几何和相同轴向参数的颜色，不近似函数
-type pdfCompositeColorSampler struct {
-	paint      pdfgo.Paint
-	space      *pdfgo.ColorSpace
-	intent     pdfgo.Name
-	conversion pdfgo.ColorConversion
-	values     map[float64][4]float64
-	position   pdfgo.GradientPosition
-	converter  pdfgo.ColorConverter
-	colorants  *codecpdf.ShadingColorants
-	prepared   bool
-	converted  bool
-}
-
-// pdfImageProcessKey 隔离图像的组空间及软蒙版采样，不复用错误的原生映射
-type pdfImageProcessKey struct {
-	image    *pdfgo.Image
-	space    *pdfgo.ColorSpace
-	softMask bool
-}
-
-// pdfCompositeImageColor 复用图像颜色变换及相邻相同分量的精确结果
-type pdfCompositeImageColor struct {
-	mark       *pdfgo.ImageMark
-	space      *pdfgo.ColorSpace
-	source     *pdfgo.ColorSpace
-	intent     pdfgo.Name
-	conversion pdfgo.ColorConversion
-	converter  pdfgo.ColorConverter
-	input      [4]float64
-	output     [4]float64
-	ready      bool
-}
-
-// pdfCompositeCache 在单页内复用几何、图像分量及蒙版内容
-type pdfCompositeCache struct {
-	resources       *Resources
-	geometry        *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry]
-	clips           *renderCache[[32]byte, GeometryPath]
-	bounds          map[pdfCompositeKey]Box
-	images          map[*pdfgo.Image]*pdfgo.ImageComponents
-	imageMatrix     map[*pdfgo.ImageMark]pdfgo.Matrix
-	imageProcesses  map[pdfImageProcessKey]*pdfgo.ImageProcess
-	imageColor      pdfCompositeImageColor
-	masks           map[*pdfgo.SoftMask][]pdfCompositeNode
-	meshes          map[*pdfgo.MeshGradient][]codecpdf.MeshTriangle
-	linearMeshes    *renderCache[pdfLinearMeshKey, []pdfgo.MeshTriangle]
-	patterns        map[pdfgo.Paint]*pdfCompositePattern
-	shadingPatterns map[*pdfgo.ShadingPattern][]pdfCompositeNode
-	shadingSources  map[pdfShadingSourceKey][]pdfCompositeNode
-	shadings        map[pdfGradientKey]pdfCompositeGeometry
-	transfers       codecpdf.TransferCache
-	textDisjoint    map[*pdfgo.GroupMark]bool
-	groups          map[*pdfgo.GroupMark]Box
-}
-
 // geometryCache 限制完整覆盖场景的保留量，边界独立保存以便排除无交集图元
 // 返回: *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry] 单页场景缓存
 func (c *pdfCompositeCache) geometryCache() *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry] {
@@ -554,14 +562,6 @@ func (c *pdfCompositeCache) clipCache() *renderCache[[32]byte, GeometryPath] {
 		c.clips = resourceCache[[32]byte, GeometryPath](c.resources, 8<<20)
 	}
 	return c.clips
-}
-
-// pdfCompositeScratch 复用像素及蒙版缓冲，不跨页持有活动内容
-type pdfCompositeScratch struct {
-	pixels   codecpdf.CompositeBuffers[pdfCompositePixel]
-	masks    codecpdf.CompositeBuffers[float64]
-	channels codecpdf.CompositeBuffers[uint8]
-	rasters  codecpdf.RasterBuffers
 }
 
 // compositingCache 按需创建单页合成缓存，页面切换时由导入器释放
@@ -828,9 +828,16 @@ func (p *pdfImporter) compositePage(space *pdfgo.ColorSpace, walk func(pdfgo.Vis
 func (p *pdfImporter) compositeObjects(nodes []pdfCompositeNode) error {
 	space := p.compositeSpace
 	previousLocalForms := p.localFormCounts
+	previousNeighborForms := p.neighborFormRefs
 	p.localFormCounts = countLocalForms(nodes)
 	p.recordPageForms(p.localFormCounts)
-	defer func() { p.localFormCounts = previousLocalForms }()
+	if previousNeighborForms == nil && p.formRefCounts == nil && len(p.pageOrder) >= 2 && len(p.localFormCounts) != 0 {
+		p.neighborFormRefs = p.probeNeighborFormRefs(p.localFormCounts)
+	}
+	defer func() {
+		p.localFormCounts = previousLocalForms
+		p.neighborFormRefs = previousNeighborForms
+	}()
 	for i := 0; i < len(nodes); i++ {
 		node := nodes[i]
 		if len(node.forms) > 0 && !p.transferBackdrop {

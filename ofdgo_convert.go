@@ -120,6 +120,30 @@ type ConversionPool struct {
 	memory  int64
 }
 
+// convertPageTask 保存单页并发渲染结果与同步信号
+type convertPageTask struct {
+	index int
+	buf   bytes.Buffer
+	err   error
+	done  chan struct{}
+}
+
+// convertReader 将取消上下文传递到随机读取
+type convertReader struct {
+	ctx   context.Context
+	input io.ReaderAt
+}
+
+// convertWriter 将取消上下文传递到写入并统计实际字节数
+type convertWriter struct {
+	ctx    context.Context
+	writer io.Writer
+	count  *int64
+}
+
+// conversionPoolKey 标识单次转换使用的共享预算
+type conversionPoolKey struct{}
+
 // Convert 将PDF或OFD转换为指定格式，不关闭调用方的输入和输出
 // 原始模式完整OFD另存保持源字节；选页和跨格式输出重新生成文档，压缩仅作用于输出副本
 // 输入按需随机读取，输出分块写出；解析对象及后端可能缓存资源，不保证恒定内存
@@ -271,6 +295,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 		if err != nil {
 			return report, err
 		}
+		defer editor.Close()
 		count = editor.PageCount()
 	case "ofd":
 		readerOpts := slices.Clone(options.ReaderOptions)
@@ -323,6 +348,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 				if extractErr != nil {
 					return report, extractErr
 				}
+				defer extracted.Close()
 				editor, err = extracted.EditorContext(ctx)
 			} else {
 				editor, err = reader.EditorContext(ctx)
@@ -330,13 +356,18 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 			if err != nil {
 				return report, err
 			}
+			defer editor.Close()
 		}
 		editor.OnWriteProgress = writeProgress
 		if options.Fonts != FontKeep {
 			if err = progress("fonts", 0, 0); err != nil {
 				return report, err
 			}
-			configuration := NewRenderer(&Reader{}, options.RendererOptions...)
+			fontResources := options.Resources
+			if fontResources == nil {
+				fontResources = editor.runtimeResources
+			}
+			configuration := NewRenderer(&Reader{resources: fontResources}, options.RendererOptions...)
 			if options.Backends != nil {
 				WithRenderBackends(*options.Backends)(configuration)
 			}
@@ -379,8 +410,7 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 		defer reader.Close()
 	}
 	renderer := NewRenderer(reader, options.RendererOptions...)
-	renderer.Compression = options.Compression
-	renderer.OutputContext = ctx
+	renderer.SetCompression(options.Compression)
 	if options.Backends != nil {
 		WithRenderBackends(*options.Backends)(renderer)
 	}
@@ -389,9 +419,9 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 	}
 	switch format {
 	case "pdf":
-		err = renderer.RenderToMultiPagePDF(writer, indices...)
+		err = renderer.RenderToMultiPagePDFContext(ctx, writer, indices...)
 	case "txt":
-		err = renderer.RenderToMultiPageText(writer, indices...)
+		err = renderer.RenderToMultiPageTextContext(ctx, writer, indices...)
 	default:
 		err = convertPagedOutput(ctx, renderer, indices, format, writer, &report, options.PageOutput, progress)
 	}
@@ -444,10 +474,6 @@ func NewConversionPool(options ConversionPoolOptions) (*ConversionPool, error) {
 	return &ConversionPool{options: options, changed: make(chan struct{})}, nil
 }
 
-// Parallelism 返回同时运行的转换数量上限
-// 返回: int 并行上限
-func (p *ConversionPool) Parallelism() int { return p.options.Parallelism }
-
 // OutputFormats 返回独立的输出格式列表，不依赖WebUI或具体渲染后端
 // 返回: []OutputFormat 输出格式列表
 func OutputFormats() []OutputFormat {
@@ -485,7 +511,7 @@ func DetectFormat(input *Input) (string, error) {
 	}
 	archive, err := zip.NewReader(input, size)
 	if err == nil {
-		reader := &Reader{Zip: archive}
+		reader := &Reader{zip: archive}
 		if err := reader.indexPackage(); err != nil {
 			return "", err
 		}
@@ -503,87 +529,13 @@ func DetectFormat(input *Input) (string, error) {
 	return "", fmt.Errorf("unsupported input format")
 }
 
-// convertPageTask 保存单页并发渲染结果与同步信号
-type convertPageTask struct {
-	index int
-	buf   bytes.Buffer
-	err   error
-	done  chan struct{}
-}
-
-// convertReader 将取消上下文传递到随机读取
-type convertReader struct {
-	ctx   context.Context
-	input io.ReaderAt
-}
-
-// ReadAt 读取前后响应取消，保留读取字节数和源错误
-// 入参: data 目标缓冲, offset 源偏移
-// 返回: int 读取字节数, error 读取错误
-func (r convertReader) ReadAt(data []byte, offset int64) (int, error) {
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
-	}
-	n, err := r.input.ReadAt(data, offset)
-	if err == nil {
-		err = r.ctx.Err()
-	}
-	return n, err
-}
-
-// convertWriter 将取消上下文传递到写入并统计实际字节数
-type convertWriter struct {
-	ctx    context.Context
-	writer io.Writer
-	count  *int64
-}
-
-// Write 写入前后响应取消，保留写入及短写错误
-// 入参: data 待写数据
-// 返回: int 写入字节数, error 写入错误
-func (w convertWriter) Write(data []byte) (int, error) {
-	if err := w.ctx.Err(); err != nil {
-		return 0, err
-	}
-	n, err := w.writer.Write(data)
-	*w.count += int64(n)
-	if err == nil && n != len(data) {
-		err = io.ErrShortWrite
-	}
-	if err == nil {
-		err = w.ctx.Err()
-	}
-	return n, err
-}
-
-// WriteString 写入字符串并保留底层原生写入能力，前后响应取消
-// 入参: data 待写文本
-// 返回: int 写入字节数, error 写入、短写或取消错误
-func (w convertWriter) WriteString(data string) (int, error) {
-	if err := w.ctx.Err(); err != nil {
-		return 0, err
-	}
-	n, err := io.WriteString(w.writer, data)
-	*w.count += int64(n)
-	if err == nil && n != len(data) {
-		err = io.ErrShortWrite
-	}
-	if err == nil {
-		err = w.ctx.Err()
-	}
-	return n, err
-}
-
-// conversionPoolKey 标识单次转换使用的共享预算
-type conversionPoolKey struct{}
-
 // convertPagedOutput 按页序执行逐页图像或矢量导出，多页时使用ConversionPool与Reader.Fork多核并发渲染
 // 入参: ctx 取消上下文, renderer 渲染器, indices 导出页索引, format 输出格式, writer ZIP输出流, report 转换报告, pageOutput 逐页回调, progress 进度回调
 // 返回: error 导出或取消错误
 func convertPagedOutput(ctx context.Context, renderer *Renderer, indices []int, format string, writer io.Writer, report *ConvertReport, pageOutput func(int, func(io.Writer) error) error, progress func(string, int, int) error) error {
 	if pageOutput == nil {
 		report.Format = OutputFormat{Value: "zip", Label: "ZIP", Extension: "zip", MIME: "application/zip"}
-		return renderer.RenderToZIP(writer, format, indices...)
+		return renderer.RenderToZIPContext(ctx, writer, format, indices...)
 	}
 	workers := min(len(indices), conversionWorkers(ctx))
 	if workers <= 1 {
@@ -591,24 +543,31 @@ func convertPagedOutput(ctx context.Context, renderer *Renderer, indices []int, 
 			if err := progress("export", i, len(indices)); err != nil {
 				return err
 			}
-			page, readErr := renderer.Reader.PageContentByIndex(index)
+			page, readErr := renderer.reader.PageContentByIndexContext(ctx, index)
 			if readErr != nil {
 				return readErr
 			}
 			if err := pageOutput(index, func(output io.Writer) error {
-				return renderer.RenderTo(page, convertWriter{ctx: ctx, writer: output, count: &report.Bytes}, format)
+				return renderer.RenderToContext(ctx, page, convertWriter{ctx: ctx, writer: output, count: &report.Bytes}, format)
 			}); err != nil {
 				return fmt.Errorf("export page %d: %w", index+1, err)
 			}
 		}
 		return progress("export", len(indices), len(indices))
 	}
-	if _, err := renderer.Reader.DocContext(ctx); err != nil {
+	if _, err := renderer.reader.DocContext(ctx); err != nil {
 		return err
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	forked := make([]*Renderer, 0, workers)
+	defer func() {
+		for _, clone := range forked {
+			if clone != nil && clone.reader != nil {
+				_ = clone.reader.Close()
+			}
+		}
+	}()
 	for range workers {
 		clone, err := renderer.Fork(runCtx)
 		if err != nil {
@@ -632,7 +591,7 @@ func convertPagedOutput(ctx context.Context, renderer *Renderer, indices []int, 
 					close(task.done)
 					continue
 				}
-				page, readErr := r.Reader.PageContentByIndex(task.index)
+				page, readErr := r.reader.PageContentByIndexContext(runCtx, task.index)
 				if readErr != nil {
 					task.err = readErr
 					close(task.done)
@@ -649,7 +608,7 @@ func convertPagedOutput(ctx context.Context, renderer *Renderer, indices []int, 
 					}
 					acquired = true
 				}
-				task.err = r.RenderTo(page, &task.buf, format)
+				task.err = r.RenderToContext(runCtx, page, &task.buf, format)
 				if acquired {
 					pool.release(true, estimated)
 				}
@@ -717,89 +676,6 @@ func convertPagedOutput(ctx context.Context, renderer *Renderer, indices []int, 
 	return progress("export", len(indices), len(indices))
 }
 
-// memoryLimit 读取当前可分配的图像工作量预算
-// 返回: int64 可用字节数，负值表示未设置预算
-func (p *ConversionPool) memoryLimit() int64 {
-	limit := int64(-1)
-	if p.options.MemoryLimit > 0 {
-		limit = p.options.MemoryLimit
-	}
-	if p.options.AvailableMemory != nil {
-		available := max(0, p.options.AvailableMemory())
-		if limit < 0 || available < limit {
-			limit = available
-		}
-	}
-	return limit
-}
-
-// acquire 等待转换或图像预算，超预算图像可独占运行
-// 入参: ctx 取消上下文, image 是否为图像任务, size 图像工作量
-// 返回: error 取消错误
-func (p *ConversionPool) acquire(ctx context.Context, image bool, size int64) error {
-	var timer *time.Timer
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-	}()
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		limit := p.memoryLimit()
-		p.mu.Lock()
-		allowed := p.active < p.options.Parallelism && (p.active == 0 || limit != 0)
-		if image {
-			allowed = p.images < p.options.Parallelism && (p.images == 0 || limit < 0 || size <= limit-p.memory)
-		}
-		if allowed {
-			if image {
-				p.images++
-				p.memory += size
-			} else {
-				p.active++
-			}
-			p.mu.Unlock()
-			return nil
-		}
-		changed := p.changed
-		p.mu.Unlock()
-		var tick <-chan time.Time
-		if p.options.AvailableMemory != nil {
-			if timer == nil {
-				timer = time.NewTimer(250 * time.Millisecond)
-			} else {
-				timer.Reset(250 * time.Millisecond)
-			}
-			tick = timer.C
-		}
-		select {
-		case <-ctx.Done():
-		case <-changed:
-		case <-tick:
-		}
-		if timer != nil {
-			timer.Stop()
-		}
-	}
-}
-
-// release 归还任务预算并唤醒等待者
-// 入参: image 是否为图像任务, size 图像工作量
-func (p *ConversionPool) release(image bool, size int64) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if image {
-		p.images--
-		p.memory -= size
-	} else {
-		p.active--
-	}
-	close(p.changed)
-	p.changed = make(chan struct{})
-}
-
 // conversionWorkers 按当前文件数量分配内部计算任务
 // 入参: ctx 转换上下文
 // 返回: int 内部并行数
@@ -825,7 +701,7 @@ func estimateRasterPageBytes(r *Renderer, page *PageContent) int64 {
 	if err != nil {
 		return 0
 	}
-	w, h, err := (&RasterPage{Width: box.W, Height: box.H, DPI: r.DPI}).PixelSize()
+	w, h, err := (&RasterPage{Width: box.W, Height: box.H, DPI: r.dpi}).PixelSize()
 	if err != nil {
 		return 0
 	}
@@ -901,7 +777,7 @@ func extractConvertDocument(ctx context.Context, reader *Reader, options Convert
 	if err != nil {
 		return nil, err
 	}
-	next := &Reader{Path: reader.Path, sourceFile: reader.sourceFile, files: map[string][]byte{"OFD.xml": root}, encryption: reader.encryption, resources: reader.resources}
+	next := &Reader{path: reader.path, sourceFile: reader.sourceFile, files: map[string][]byte{"OFD.xml": root}, encryption: reader.encryption, resources: reader.resources}
 	for name := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -913,17 +789,20 @@ func extractConvertDocument(ctx context.Context, reader *Reader, options Convert
 		}
 	}
 	maps.Copy(next.files, overrideFiles)
-	if reader.Zip != nil {
-		next.Zip = &zip.Reader{Comment: reader.Zip.Comment}
-		for _, file := range reader.Zip.File {
+	if reader.zip != nil {
+		var kept []*zip.File
+		for _, file := range reader.zip.File {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
 			name := cleanPackagePath(file.Name)
 			if name != "OFD.xml" && files[name] && !file.FileInfo().IsDir() {
-				next.Zip.File = append(next.Zip.File, file)
+				kept = append(kept, file)
 			}
 		}
+		next.zip = &zip.Reader{Comment: reader.zip.Comment, File: kept}
+		next.archiveID = nextReaderArchiveID.Add(1)
+		next.maxIDCache = &archiveMaxIDCache{}
 	}
 	if src := reader.encryptedSource(); src != nil {
 		keep := make(map[string]bool, len(files))
@@ -940,6 +819,7 @@ func extractConvertDocument(ctx context.Context, reader *Reader, options Convert
 	if _, err := next.docStructureContext(ctx); err != nil {
 		return nil, err
 	}
+	next.bindEncryptionHold()
 	return next, nil
 }
 
@@ -1092,4 +972,141 @@ func filterPrimarySignatureFiles(ctx context.Context, reader *Reader, entry, lis
 		return nil, keptFiles, ctx.Err()
 	}
 	return editorPatchXML(listData, dropPatches), keptFiles, ctx.Err()
+}
+
+// Parallelism 返回同时运行的转换数量上限
+// 返回: int 并行上限
+func (p *ConversionPool) Parallelism() int { return p.options.Parallelism }
+
+// ReadAt 读取前后响应取消，保留读取字节数和源错误
+// 入参: data 目标缓冲, offset 源偏移
+// 返回: int 读取字节数, error 读取错误
+func (r convertReader) ReadAt(data []byte, offset int64) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.input.ReadAt(data, offset)
+	if err == nil {
+		err = r.ctx.Err()
+	}
+	return n, err
+}
+
+// Write 写入前后响应取消，保留写入及短写错误
+// 入参: data 待写数据
+// 返回: int 写入字节数, error 写入错误
+func (w convertWriter) Write(data []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := w.writer.Write(data)
+	*w.count += int64(n)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err == nil {
+		err = w.ctx.Err()
+	}
+	return n, err
+}
+
+// WriteString 写入字符串并保留底层原生写入能力，前后响应取消
+// 入参: data 待写文本
+// 返回: int 写入字节数, error 写入、短写或取消错误
+func (w convertWriter) WriteString(data string) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := io.WriteString(w.writer, data)
+	*w.count += int64(n)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err == nil {
+		err = w.ctx.Err()
+	}
+	return n, err
+}
+
+// memoryLimit 读取当前可分配的图像工作量预算
+// 返回: int64 可用字节数，负值表示未设置预算
+func (p *ConversionPool) memoryLimit() int64 {
+	limit := int64(-1)
+	if p.options.MemoryLimit > 0 {
+		limit = p.options.MemoryLimit
+	}
+	if p.options.AvailableMemory != nil {
+		available := max(0, p.options.AvailableMemory())
+		if limit < 0 || available < limit {
+			limit = available
+		}
+	}
+	return limit
+}
+
+// acquire 等待转换或图像预算，超预算图像可独占运行
+// 入参: ctx 取消上下文, image 是否为图像任务, size 图像工作量
+// 返回: error 取消错误
+func (p *ConversionPool) acquire(ctx context.Context, image bool, size int64) error {
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		limit := p.memoryLimit()
+		p.mu.Lock()
+		allowed := p.active < p.options.Parallelism && (p.active == 0 || limit != 0)
+		if image {
+			allowed = p.images < p.options.Parallelism && (p.images == 0 || limit < 0 || size <= limit-p.memory)
+		}
+		if allowed {
+			if image {
+				p.images++
+				p.memory += size
+			} else {
+				p.active++
+			}
+			p.mu.Unlock()
+			return nil
+		}
+		changed := p.changed
+		p.mu.Unlock()
+		var tick <-chan time.Time
+		if p.options.AvailableMemory != nil {
+			if timer == nil {
+				timer = time.NewTimer(250 * time.Millisecond)
+			} else {
+				timer.Reset(250 * time.Millisecond)
+			}
+			tick = timer.C
+		}
+		select {
+		case <-ctx.Done():
+		case <-changed:
+		case <-tick:
+		}
+		if timer != nil {
+			timer.Stop()
+		}
+	}
+}
+
+// release 归还任务预算并唤醒等待者
+// 入参: image 是否为图像任务, size 图像工作量
+func (p *ConversionPool) release(image bool, size int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if image {
+		p.images--
+		p.memory -= size
+	} else {
+		p.active--
+	}
+	close(p.changed)
+	p.changed = make(chan struct{})
 }

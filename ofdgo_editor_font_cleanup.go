@@ -15,6 +15,7 @@
 package ofdgo
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -24,6 +25,66 @@ import (
 	"maps"
 	"slices"
 )
+
+// fontCleanupDirectory 检查SFNT表目录或字体集合索引，不读取字形数据
+// 入参: input 文件流, size 文件长度
+// 返回: bool 是否具有有效目录, error 读取错误
+func fontCleanupDirectory(input io.Reader, size uint64) (bool, error) {
+	var header [12]byte
+	if _, err := io.ReadFull(input, header[:]); err != nil {
+		return false, err
+	}
+	if size < uint64(len(header)) {
+		return false, nil
+	}
+	if string(header[:4]) == "ttcf" {
+		version := binary.BigEndian.Uint32(header[4:])
+		count := uint64(binary.BigEndian.Uint32(header[8:]))
+		if version != 0x00010000 && version != 0x00020000 || count == 0 || count > (size-12)/4 {
+			return false, nil
+		}
+		end := 12 + count*4
+		if version == 0x00020000 {
+			end += 12
+		}
+		var entry [4]byte
+		for range count {
+			if _, err := io.ReadFull(input, entry[:]); err != nil {
+				return false, err
+			}
+			offset := uint64(binary.BigEndian.Uint32(entry[:]))
+			if offset < end || offset > size-12 {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+	switch string(header[:4]) {
+	case "\x00\x01\x00\x00", "OTTO", "true":
+	default:
+		return false, nil
+	}
+	count := uint64(binary.BigEndian.Uint16(header[4:]))
+	if count == 0 || count > (size-12)/16 {
+		return false, nil
+	}
+	end := 12 + count*16
+	seen := make(map[uint32]bool, count)
+	var entry [16]byte
+	for range count {
+		if _, err := io.ReadFull(input, entry[:]); err != nil {
+			return false, err
+		}
+		tag := binary.BigEndian.Uint32(entry[:])
+		offset := uint64(binary.BigEndian.Uint32(entry[8:]))
+		length := uint64(binary.BigEndian.Uint32(entry[12:]))
+		if seen[tag] || offset < end || offset > size || length > size-offset {
+			return false, nil
+		}
+		seen[tag] = true
+	}
+	return true, nil
+}
 
 // compactPackageFonts 清理无引用字体，补齐多文档及历史版本的字体裁剪，不修改编辑器快照
 // 入参: ctx 取消上下文, parts 输出修改, removed 待删除条目, generated 本次编码的页面引用
@@ -60,11 +121,43 @@ func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byt
 	if resources == nil {
 		resources = reader.resources
 	}
-	view := &Reader{Zip: reader.Zip, encrypted: reader.encryptedSource(), sourceFile: reader.sourceFile, files: maps.Clone(reader.files), documentIndex: reader.documentIndex, selectedVersion: cloneEditorData(reader.selectedVersion), resources: resources}
+	view := &Reader{zip: reader.zip, encrypted: reader.encryptedSource(), sourceFile: reader.sourceFile, files: maps.Clone(reader.files), documentIndex: reader.documentIndex, selectedVersion: cloneEditorData(reader.selectedVersion), resources: resources}
 	if view.files == nil {
 		view.files = make(map[string][]byte)
 	}
-	maps.Copy(view.files, parts)
+	if len(removed) != 0 {
+		for name := range view.files {
+			if removed[cleanPackagePath(name)] {
+				delete(view.files, name)
+			}
+		}
+		if view.zip != nil {
+			pruneReaderZip(view, func(file *zip.File) bool { return !removed[cleanPackagePath(file.Name)] })
+		}
+		if src := view.encryptedSource(); src != nil {
+			view.setEncryptedSource(src.omit(removed))
+		}
+	}
+	var stagedRaw map[string][]byte
+	for name, data := range parts {
+		if data != nil {
+			view.files[name] = data
+			continue
+		}
+		if staged := generated[name].staged; staged != nil {
+			input := imageInput{ReadCloser: staged.open(), ctx: ctx}
+			raw, readErr := io.ReadAll(input)
+			_ = input.Close()
+			if readErr != nil {
+				return readErr
+			}
+			view.files[name] = raw
+			if stagedRaw == nil {
+				stagedRaw = make(map[string][]byte)
+			}
+			stagedRaw[name] = raw
+		}
+	}
 	if err := view.initRootContext(ctx); err != nil {
 		return err
 	}
@@ -128,6 +221,9 @@ func (e *Editor) compactPackageFonts(ctx context.Context, parts map[string][]byt
 		if protectedFiles[cleanPackagePath(name)] {
 			continue
 		}
+		if raw, wasStaged := stagedRaw[name]; wasStaged && bytes.Equal(raw, data) {
+			continue
+		}
 		if original, ok := reader.files[name]; !ok || !bytes.Equal(original, data) {
 			parts[name] = data
 		}
@@ -171,66 +267,6 @@ func (r *Reader) fontCleanupCandidate(ctx context.Context, name string) (bool, e
 		return false, canceled
 	}
 	return candidate, err
-}
-
-// fontCleanupDirectory 检查SFNT表目录或字体集合索引，不读取字形数据
-// 入参: input 文件流, size 文件长度
-// 返回: bool 是否具有有效目录, error 读取错误
-func fontCleanupDirectory(input io.Reader, size uint64) (bool, error) {
-	var header [12]byte
-	if _, err := io.ReadFull(input, header[:]); err != nil {
-		return false, err
-	}
-	if size < uint64(len(header)) {
-		return false, nil
-	}
-	if string(header[:4]) == "ttcf" {
-		version := binary.BigEndian.Uint32(header[4:])
-		count := uint64(binary.BigEndian.Uint32(header[8:]))
-		if version != 0x00010000 && version != 0x00020000 || count == 0 || count > (size-12)/4 {
-			return false, nil
-		}
-		end := 12 + count*4
-		if version == 0x00020000 {
-			end += 12
-		}
-		var entry [4]byte
-		for range count {
-			if _, err := io.ReadFull(input, entry[:]); err != nil {
-				return false, err
-			}
-			offset := uint64(binary.BigEndian.Uint32(entry[:]))
-			if offset < end || offset > size-12 {
-				return false, nil
-			}
-		}
-		return true, nil
-	}
-	switch string(header[:4]) {
-	case "\x00\x01\x00\x00", "OTTO", "true":
-	default:
-		return false, nil
-	}
-	count := uint64(binary.BigEndian.Uint16(header[4:]))
-	if count == 0 || count > (size-12)/16 {
-		return false, nil
-	}
-	end := 12 + count*16
-	seen := make(map[uint32]bool, count)
-	var entry [16]byte
-	for range count {
-		if _, err := io.ReadFull(input, entry[:]); err != nil {
-			return false, err
-		}
-		tag := binary.BigEndian.Uint32(entry[:])
-		offset := uint64(binary.BigEndian.Uint32(entry[8:]))
-		length := uint64(binary.BigEndian.Uint32(entry[12:]))
-		if seen[tag] || offset < end || offset > size || length > size-offset {
-			return false, nil
-		}
-		seen[tag] = true
-	}
-	return true, nil
 }
 
 // subsetPackageFonts 按文档作用域收集用字，复用引用缓存并跳过已裁剪收敛及受签章保护字体

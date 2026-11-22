@@ -59,47 +59,6 @@ func pdfPatternInstanceRange(columns, rows float64, bounds []Box, width, height,
 	return int(left), int(right), int(top), int(bottom)
 }
 
-// tilingPattern 有界复用矢量图案，返回可独立编辑的对象副本
-// 入参: source 平铺图案, base 无色图案基色
-// 返回: *Pattern OFD图案, error 转换或取消错误
-func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Paint) (*Pattern, error) {
-	if err := p.ctx.Err(); err != nil {
-		return nil, err
-	}
-	if p.resolveFile != nil || p.resolveReference != nil {
-		return p.buildTilingPattern(source, base)
-	}
-	if p.patternCells == nil {
-		p.patternCells = resourceCache[pdfPatternCellKey, pdfPatternCell](p.resources, pdfPatternCellLimit)
-	}
-	key := pdfPatternCellKey{source: source, matrix: p.matrix, dpi: p.rasterDPI, editor: p.editor, space: p.compositeSpace, pageWidth: p.pageWidth, pageHeight: p.pageHeight}
-	if source.PaintType == 2 {
-		base.Tiling, base.Axial, base.Radial, base.Mesh, base.Function, base.Shading = nil, nil, nil, nil, nil, nil
-		base.Alpha = 1
-		key.base = base
-	}
-	if cached, ok := p.patternCells.get(key); ok {
-		pattern := cloneEditorData(cached.pattern)
-		if cached.origin.sequence != nil || len(cached.origin.related) != 0 {
-			p.patternOrigins[pattern] = cached.origin
-		}
-		return pattern, p.ctx.Err()
-	}
-	pattern, err := p.buildTilingPattern(source, base)
-	if err != nil {
-		return nil, err
-	}
-	if err := p.ctx.Err(); err != nil {
-		return nil, err
-	}
-	cost := pdfPatternCellCost(reflect.ValueOf(pattern), p.patternCells.limit, 0)
-	cost += int(reflect.TypeFor[pdfPatternCell]().Size()) + len(p.patternOrigins[pattern].related)*int(reflect.TypeFor[*pdfgo.ContentSequence]().Size())
-	if cost <= p.patternCells.limit {
-		p.patternCells.put(key, pdfPatternCell{pattern: cloneEditorData(pattern), origin: p.patternOrigins[pattern]}, cost)
-	}
-	return pattern, p.ctx.Err()
-}
-
 // pdfPatternCellCost 有界估算公开数据的快照成本，不扫描共享的私有排版来源
 // 入参: value 对象值, budget 剩余预算, depth 嵌套深度
 // 返回: int 字节成本，超预算时返回预算加一
@@ -188,6 +147,47 @@ func pdfPatternRectangleBounds(path pdfgo.Path) (pdfgo.Rectangle, bool) {
 // 返回: pdfgo.Path 闭合矩形
 func pdfPatternRectanglePath(box pdfgo.Rectangle) pdfgo.Path {
 	return pdfgo.Path{Segments: []pdfgo.Segment{{Operator: "M", Points: []pdfgo.Point{{X: box.XMin, Y: box.YMin}}}, {Operator: "L", Points: []pdfgo.Point{{X: box.XMax, Y: box.YMin}}}, {Operator: "L", Points: []pdfgo.Point{{X: box.XMax, Y: box.YMax}}}, {Operator: "L", Points: []pdfgo.Point{{X: box.XMin, Y: box.YMax}}}, {Operator: "C"}}}
+}
+
+// tilingPattern 有界复用矢量图案，返回可独立编辑的对象副本
+// 入参: source 平铺图案, base 无色图案基色
+// 返回: *Pattern OFD图案, error 转换或取消错误
+func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Paint) (*Pattern, error) {
+	if err := p.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p.resolveFile != nil || p.resolveReference != nil {
+		return p.buildTilingPattern(source, base)
+	}
+	if p.patternCells == nil {
+		p.patternCells = resourceCache[pdfPatternCellKey, pdfPatternCell](p.resources, pdfPatternCellLimit)
+	}
+	key := pdfPatternCellKey{source: source, matrix: p.matrix, dpi: p.rasterDPI, editor: p.editor, space: p.compositeSpace, pageWidth: p.pageWidth, pageHeight: p.pageHeight}
+	if source.PaintType == 2 {
+		base.Tiling, base.Axial, base.Radial, base.Mesh, base.Function, base.Shading = nil, nil, nil, nil, nil, nil
+		base.Alpha = 1
+		key.base = base
+	}
+	if cached, ok := p.patternCells.get(key); ok {
+		pattern := cloneEditorData(cached.pattern)
+		if cached.origin.sequence != nil || len(cached.origin.related) != 0 {
+			p.patternOrigins[pattern] = cached.origin
+		}
+		return pattern, p.ctx.Err()
+	}
+	pattern, err := p.buildTilingPattern(source, base)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.ctx.Err(); err != nil {
+		return nil, err
+	}
+	cost := pdfPatternCellCost(reflect.ValueOf(pattern), p.patternCells.limit, 0)
+	cost += int(reflect.TypeFor[pdfPatternCell]().Size()) + len(p.patternOrigins[pattern].related)*int(reflect.TypeFor[*pdfgo.ContentSequence]().Size())
+	if cost <= p.patternCells.limit {
+		p.patternCells.put(key, pdfPatternCell{pattern: cloneEditorData(pattern), origin: p.patternOrigins[pattern]}, cost)
+	}
+	return pattern, p.ctx.Err()
 }
 
 // densePatternRectangle 对单一不透明矩形的连续重叠轴求精确并集，不修改源步距或近似采样

@@ -29,33 +29,6 @@ import (
 	"golang.org/x/text/unicode/bidi"
 )
 
-// LayoutRichText 生成局部坐标的标准文字和路径，不修改页面或编辑历史
-// 边界包含内容的排版高度和溢出墨迹，不包含空余段落宽度，可能有负的X或Y
-// 非标准RGB文档按需复用或注册RGB颜色空间，返回对象可直接用于当前文档
-// 注册不产生修订或撤销记录；失败时不保留新增资源和资源编号
-// 提交对象后应创建新的Reader；已有Reader是独立快照，不包含新注册的资源
-// 返回值的资源编号属于当前资源视图，切换文档、版本或替换资源快照后须重新排版
-// 入参: value 富文本内容, width 段落排版宽度
-// 返回: []GraphicObject 生成的标准图元, Box 局部边界, error 排版或资源错误
-func (e *Editor) LayoutRichText(value RichText, width float64) ([]GraphicObject, Box, error) {
-	result, err := e.layoutRichText(value, width)
-	if err != nil {
-		return nil, Box{}, err
-	}
-	err = e.Transaction(func(editor *Editor) error {
-		for i := range result.objects {
-			if err := editor.richTextColors(&result.objects[i]); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, Box{}, err
-	}
-	return result.objects, result.bounds, nil
-}
-
 // richLayout 保存局部标准对象、含墨迹的边界及各片段的字体锚点序号
 type richLayout struct {
 	width   float64
@@ -86,6 +59,309 @@ type richContextShaper struct {
 	text       []rune
 	start, end int
 	options    TextShapeOptions
+}
+
+// richParagraphOptions 以整段原文检测双向排版，与普通文字的自动模式一致
+// 入参: chars 段落字符, options 排版选项
+// 返回: TextLayout 生效的段落排版选项
+func richParagraphOptions(chars []rune, options TextLayout) TextLayout {
+	if options.AutoBidi && !options.Shaping.Bidi {
+		for _, char := range chars {
+			p, _ := bidi.LookupRune(char)
+			switch p.Class() {
+			case bidi.R, bidi.AL, bidi.RLE, bidi.RLO, bidi.RLI, bidi.FSI:
+				options.Shaping.Bidi = true
+			}
+		}
+	}
+	return options
+}
+
+// richShapeLine 按方向、脚本和格式塑形整行，跨同格式片段合并，保留区间外的塑形上下文
+// 入参: chars 行字符, owners 字符所属运行段索引, value 富文本, metrics 字体度量, options 排版选项, face 分段字体
+// 返回: []richSpan 塑形片段, []float64 字符步进, error 塑形或缺字错误
+func richShapeLine(chars []rune, owners []int, value RichText, metrics []richMetrics, options TextLayout, face *typefont.Face) ([]richSpan, []float64, error) {
+	advances := make([]float64, len(chars))
+	if len(chars) == 0 {
+		return nil, advances, nil
+	}
+	direction := di.DirectionLTR
+	if options.Shaping.Direction == "rtl" {
+		direction = di.DirectionRTL
+	}
+	parts := []shaping.Input{{Text: chars, RunEnd: len(chars), Direction: direction}}
+	if options.Shaping.Bidi {
+		var segmenter shaping.Segmenter
+		parts = segmenter.Split(parts[0], shapingFace{face})
+	}
+	var spans []richSpan
+	for _, part := range parts {
+		for start := part.RunStart; start < part.RunEnd; {
+			owner := owners[start]
+			format := value.Runs[owner].Format
+			end := start + 1
+			for end < part.RunEnd && value.Runs[owners[end]].Format == format {
+				end++
+			}
+			font := metrics[owner].font
+			span := richSpan{start: start, end: end, owner: owner, rtl: part.Direction.Progression() == di.TowardTopLeft}
+			if options.Shape || options.Shaping != (TextShapeOptions{}) {
+				settings := options.Shaping
+				settings.Bidi = false
+				if options.Shaping.Bidi {
+					settings.Direction = "ltr"
+					if span.rtl {
+						settings.Direction = "rtl"
+					}
+					if settings.Script == "" {
+						settings.Script = part.Script.String()
+					}
+				}
+				shaper, ok := font.(FontShaper)
+				if !ok {
+					return nil, nil, fmt.Errorf("rich text shaping: %w", ErrBackendUnavailable)
+				}
+				if contextual, ok := font.(FontShaperRun); ok {
+					shaper = richContextShaper{FontShaperRun: contextual, text: chars, start: start, end: end, options: settings}
+				} else if settings != (TextShapeOptions{}) {
+					configured, ok := font.(FontShaperOptions)
+					if !ok {
+						return nil, nil, fmt.Errorf("rich text shaping options: %w", ErrBackendUnavailable)
+					}
+					shaper = configuredTextShaper{FontShaperOptions: configured, options: settings}
+				}
+				glyphs, steps, err := shapeTextLine(shaper, chars[start:end], format.Font, format.Size, 1, 0)
+				if err != nil {
+					return nil, nil, err
+				}
+				span.glyphs = glyphs
+				copy(advances[start:end], steps)
+			} else {
+				var missing []rune
+				var x float64
+				for i, char := range chars[start:end] {
+					id := font.GlyphIndex(char)
+					if id == 0 {
+						missing = append(missing, char)
+					}
+					step := float64(font.GlyphAdvance(id)) * format.Size / float64(font.UnitsPerEm())
+					span.glyphs = append(span.glyphs, ShapedGlyph{Glyph: id, Cluster: i, VisualOrder: i, X: x, Advance: step})
+					advances[start+i] = step
+					x += step
+				}
+				if err := missingGlyphError(format.Font, missing); err != nil {
+					return nil, nil, err
+				}
+			}
+			spans = append(spans, span)
+			start = end
+		}
+	}
+	spaceTextAdvances(chars, advances, options.LetterSpacing)
+	var sum float64
+	for _, advance := range advances {
+		sum += advance
+		if !finite(advance) || !finite(sum) {
+			return nil, nil, fmt.Errorf("rich text advance overflow")
+		}
+	}
+	return spans, advances, nil
+}
+
+// richPositionSpans 按核心排版相同的方向分组规则排列片段，按视觉簇分配字距及两端对齐
+// 入参: spans 塑形片段, steps 字符步进, options 排版选项, x 行起始横坐标
+// 返回: error 坐标溢出错误
+func richPositionSpans(spans []richSpan, steps []float64, options TextLayout, x float64) error {
+	order := make([]int, len(spans))
+	for i := range order {
+		order[i] = i
+	}
+	rtl := options.Shaping.Direction == "rtl"
+	for start := 0; start < len(order); {
+		end := start + 1
+		for end < len(order) && spans[end].rtl == spans[start].rtl {
+			end++
+		}
+		if spans[start].rtl != rtl {
+			slices.Reverse(order[start:end])
+		}
+		start = end
+	}
+	if rtl {
+		slices.Reverse(order)
+	}
+	for _, index := range order {
+		span := &spans[index]
+		extra := make([]float64, span.end-span.start+1)
+		raw := make([]float64, span.end-span.start)
+		for _, glyph := range span.glyphs {
+			raw[glyph.Cluster] += glyph.Advance
+		}
+		for j, step := range steps[span.start:span.end] {
+			extra[j+1] = extra[j] + step - raw[j]
+			span.width += step
+		}
+		shifts := bidiClusterShifts(span.glyphs, extra)
+		span.x = x
+		for j := range span.glyphs {
+			glyph := &span.glyphs[j]
+			glyph.X += x + shifts[glyph.Cluster]
+			if !finite(glyph.X) {
+				return fmt.Errorf("rich text position overflow")
+			}
+		}
+		x += span.width
+		if !finite(x) {
+			return fmt.Errorf("rich text position overflow")
+		}
+	}
+	return nil
+}
+
+// richSpanText 将逻辑原文和绝对视觉位置写为标准字符字形映射
+// 入参: chars 行字符, span 塑形片段, format 文字格式, baseline 基线纵坐标
+// 返回: TextObject 标准文字对象
+func richSpanText(chars []rune, span richSpan, format TextFormat, baseline float64) TextObject {
+	text := richTextObject(format)
+	code := TextCode{Value: escapeOFDText(string(chars[span.start:span.end]))}
+	dx, dy := make([]string, 0, len(span.glyphs)), make([]string, 0, len(span.glyphs))
+	for i, glyph := range span.glyphs {
+		if i == 0 {
+			code.X, code.Y = ofdNumber(glyph.X), ofdNumber(baseline+glyph.Y)
+		} else {
+			dx = append(dx, ofdNumber(glyph.X-span.glyphs[i-1].X))
+			dy = append(dy, ofdNumber(glyph.Y-span.glyphs[i-1].Y))
+		}
+	}
+	code.DeltaX, code.DeltaY = strings.Join(dx, " "), strings.Join(dy, " ")
+	text.TextCode = []TextCode{code}
+	for i := 0; i < len(span.glyphs); {
+		end := i + 1
+		for end < len(span.glyphs) && span.glyphs[end].Cluster == span.glyphs[i].Cluster {
+			end++
+		}
+		next := span.end - span.start
+		if end < len(span.glyphs) {
+			next = span.glyphs[end].Cluster
+		}
+		ids := make([]string, end-i)
+		for j := i; j < end; j++ {
+			ids[j-i] = strconv.Itoa(int(span.glyphs[j].Glyph))
+		}
+		text.CGTransform = append(text.CGTransform, CGTransform{CodePosition: span.glyphs[i].Cluster, CodeCount: next - span.glyphs[i].Cluster, GlyphCount: end - i, Glyphs: strings.Join(ids, " ")})
+		i = end
+	}
+	return text
+}
+
+// richSpanOutline 使用现有字体及几何后端生成与文字合成样式一致的墨迹
+// 入参: span 塑形片段, format 文字格式, metrics 字体度量, geometry 几何后端, baseline 基线纵坐标
+// 返回: GeometryPath 合成轮廓路径, error 轮廓计算错误
+func richSpanOutline(span richSpan, format TextFormat, metrics richMetrics, geometry GeometryBackend, baseline float64) (GeometryPath, error) {
+	font, ok := metrics.font.(FontOutlines)
+	if !ok {
+		return nil, fmt.Errorf("rich text outlines: %w", ErrBackendUnavailable)
+	}
+	var result GeometryPath
+	for _, glyph := range span.glyphs {
+		path, exists := metrics.outlines[glyph.Glyph]
+		if !exists {
+			var err error
+			path, err = font.GlyphOutline(glyph.Glyph, format.Size)
+			if err != nil {
+				return nil, err
+			}
+			if metrics.bold && len(path) > 0 {
+				stroke, err := geometry.Stroke(path, StrokeOptions{Width: format.Size * 0.04, Join: "Round", Cap: "Round"})
+				if err != nil {
+					return nil, err
+				}
+				path, err = geometry.Combine(path, stroke, GeometryUnion)
+				if err != nil {
+					return nil, err
+				}
+			}
+			metrics.outlines[glyph.Glyph] = path
+		}
+		if len(path) == 0 {
+			continue
+		}
+		matrix := TranslationMatrix(glyph.X, baseline+glyph.Y)
+		if metrics.italic {
+			matrix = matrix.Multiply(Matrix{a: 1, c: -0.3, d: 1})
+		}
+		placed, err := geometry.Transform(path, matrix)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, placed...)
+	}
+	return result, nil
+}
+
+// richTextObject 构造具有显式填充和标准字重的文字对象
+// 入参: format 文字格式
+// 返回: TextObject 文字对象
+func richTextObject(format TextFormat) TextObject {
+	fill, stroke := true, false
+	weight := 400
+	if format.Bold {
+		weight = 700
+	}
+	return TextObject{Font: format.Font, Size: format.Size, Weight: weight, Italic: format.Italic, Fill: &fill, Stroke: &stroke, FillColor: &FillColor{Value: richColor(format.Color)}}
+}
+
+// richColor 将空前景色转换为标准黑色
+// 入参: value 颜色文本
+// 返回: string 标准RGB颜色值
+func richColor(value string) string {
+	if value == "" {
+		return "0 0 0"
+	}
+	return value
+}
+
+// richUnion 合并排版范围和墨迹范围，保留负坐标及零宽空行
+// 入参: a 矩形范围, b 矩形范围
+// 返回: Box 合并后的外接矩形
+func richUnion(a, b Box) Box {
+	x, y := math.Min(a.X, b.X), math.Min(a.Y, b.Y)
+	return Box{X: x, Y: y, W: math.Max(a.X+a.W, b.X+b.W) - x, H: math.Max(a.Y+a.H, b.Y+b.H) - y}
+}
+
+// richRectangle 使用标准填充路径绘制背景或文字装饰
+// 入参: box 局部矩形范围, color 填充色值
+// 返回: GraphicObject 路径图元
+func richRectangle(box Box, color string) GraphicObject {
+	fill, stroke := true, false
+	return GraphicObject{Type: "PathObject", PathObject: PathObject{Boundary: editorBoxString(box), Fill: &fill, Stroke: &stroke, FillColor: &FillColor{Value: color}, AbbreviatedData: fmt.Sprintf("M 0 0 L %s 0 L %s %s L 0 %s C", ofdNumber(box.W), ofdNumber(box.W), ofdNumber(box.H), ofdNumber(box.H))}}
+}
+
+// LayoutRichText 生成局部坐标的标准文字和路径，不修改页面或编辑历史
+// 边界包含内容的排版高度和溢出墨迹，不包含空余段落宽度，可能有负的X或Y
+// 非标准RGB文档按需复用或注册RGB颜色空间，返回对象可直接用于当前文档
+// 注册不产生修订或撤销记录；失败时不保留新增资源和资源编号
+// 提交对象后应创建新的Reader；已有Reader是独立快照，不包含新注册的资源
+// 返回值的资源编号属于当前资源视图，切换文档、版本或替换资源快照后须重新排版
+// 入参: value 富文本内容, width 段落排版宽度
+// 返回: []GraphicObject 生成的标准图元, Box 局部边界, error 排版或资源错误
+func (e *Editor) LayoutRichText(value RichText, width float64) ([]GraphicObject, Box, error) {
+	result, err := e.layoutRichText(value, width)
+	if err != nil {
+		return nil, Box{}, err
+	}
+	err = e.Transaction(func(editor *Editor) error {
+		for i := range result.objects {
+			if err := editor.richTextColors(&result.objects[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, Box{}, err
+	}
+	return result.objects, result.bounds, nil
 }
 
 // ShapeText 返回区间相对簇索引，同时保留完整行提供的上下文
@@ -390,244 +666,6 @@ func (e *Editor) layoutRichText(value RichText, width float64) (richLayout, erro
 	return result, nil
 }
 
-// richParagraphOptions 以整段原文检测双向排版，与普通文字的自动模式一致
-// 入参: chars 段落字符, options 排版选项
-// 返回: TextLayout 生效的段落排版选项
-func richParagraphOptions(chars []rune, options TextLayout) TextLayout {
-	if options.AutoBidi && !options.Shaping.Bidi {
-		for _, char := range chars {
-			p, _ := bidi.LookupRune(char)
-			switch p.Class() {
-			case bidi.R, bidi.AL, bidi.RLE, bidi.RLO, bidi.RLI, bidi.FSI:
-				options.Shaping.Bidi = true
-			}
-		}
-	}
-	return options
-}
-
-// richShapeLine 按方向、脚本和格式塑形整行，跨同格式片段合并，保留区间外的塑形上下文
-// 入参: chars 行字符, owners 字符所属运行段索引, value 富文本, metrics 字体度量, options 排版选项, face 分段字体
-// 返回: []richSpan 塑形片段, []float64 字符步进, error 塑形或缺字错误
-func richShapeLine(chars []rune, owners []int, value RichText, metrics []richMetrics, options TextLayout, face *typefont.Face) ([]richSpan, []float64, error) {
-	advances := make([]float64, len(chars))
-	if len(chars) == 0 {
-		return nil, advances, nil
-	}
-	direction := di.DirectionLTR
-	if options.Shaping.Direction == "rtl" {
-		direction = di.DirectionRTL
-	}
-	parts := []shaping.Input{{Text: chars, RunEnd: len(chars), Direction: direction}}
-	if options.Shaping.Bidi {
-		var segmenter shaping.Segmenter
-		parts = segmenter.Split(parts[0], shapingFace{face})
-	}
-	var spans []richSpan
-	for _, part := range parts {
-		for start := part.RunStart; start < part.RunEnd; {
-			owner := owners[start]
-			format := value.Runs[owner].Format
-			end := start + 1
-			for end < part.RunEnd && value.Runs[owners[end]].Format == format {
-				end++
-			}
-			font := metrics[owner].font
-			span := richSpan{start: start, end: end, owner: owner, rtl: part.Direction.Progression() == di.TowardTopLeft}
-			if options.Shape || options.Shaping != (TextShapeOptions{}) {
-				settings := options.Shaping
-				settings.Bidi = false
-				if options.Shaping.Bidi {
-					settings.Direction = "ltr"
-					if span.rtl {
-						settings.Direction = "rtl"
-					}
-					if settings.Script == "" {
-						settings.Script = part.Script.String()
-					}
-				}
-				shaper, ok := font.(FontShaper)
-				if !ok {
-					return nil, nil, fmt.Errorf("rich text shaping: %w", ErrBackendUnavailable)
-				}
-				if contextual, ok := font.(FontShaperRun); ok {
-					shaper = richContextShaper{FontShaperRun: contextual, text: chars, start: start, end: end, options: settings}
-				} else if settings != (TextShapeOptions{}) {
-					configured, ok := font.(FontShaperOptions)
-					if !ok {
-						return nil, nil, fmt.Errorf("rich text shaping options: %w", ErrBackendUnavailable)
-					}
-					shaper = configuredTextShaper{FontShaperOptions: configured, options: settings}
-				}
-				glyphs, steps, err := shapeTextLine(shaper, chars[start:end], format.Font, format.Size, 1, 0)
-				if err != nil {
-					return nil, nil, err
-				}
-				span.glyphs = glyphs
-				copy(advances[start:end], steps)
-			} else {
-				var missing []rune
-				var x float64
-				for i, char := range chars[start:end] {
-					id := font.GlyphIndex(char)
-					if id == 0 {
-						missing = append(missing, char)
-					}
-					step := float64(font.GlyphAdvance(id)) * format.Size / float64(font.UnitsPerEm())
-					span.glyphs = append(span.glyphs, ShapedGlyph{Glyph: id, Cluster: i, VisualOrder: i, X: x, Advance: step})
-					advances[start+i] = step
-					x += step
-				}
-				if err := missingGlyphError(format.Font, missing); err != nil {
-					return nil, nil, err
-				}
-			}
-			spans = append(spans, span)
-			start = end
-		}
-	}
-	spaceTextAdvances(chars, advances, options.LetterSpacing)
-	var sum float64
-	for _, advance := range advances {
-		sum += advance
-		if !finite(advance) || !finite(sum) {
-			return nil, nil, fmt.Errorf("rich text advance overflow")
-		}
-	}
-	return spans, advances, nil
-}
-
-// richPositionSpans 按核心排版相同的方向分组规则排列片段，按视觉簇分配字距及两端对齐
-// 入参: spans 塑形片段, steps 字符步进, options 排版选项, x 行起始横坐标
-// 返回: error 坐标溢出错误
-func richPositionSpans(spans []richSpan, steps []float64, options TextLayout, x float64) error {
-	order := make([]int, len(spans))
-	for i := range order {
-		order[i] = i
-	}
-	rtl := options.Shaping.Direction == "rtl"
-	for start := 0; start < len(order); {
-		end := start + 1
-		for end < len(order) && spans[end].rtl == spans[start].rtl {
-			end++
-		}
-		if spans[start].rtl != rtl {
-			slices.Reverse(order[start:end])
-		}
-		start = end
-	}
-	if rtl {
-		slices.Reverse(order)
-	}
-	for _, index := range order {
-		span := &spans[index]
-		extra := make([]float64, span.end-span.start+1)
-		raw := make([]float64, span.end-span.start)
-		for _, glyph := range span.glyphs {
-			raw[glyph.Cluster] += glyph.Advance
-		}
-		for j, step := range steps[span.start:span.end] {
-			extra[j+1] = extra[j] + step - raw[j]
-			span.width += step
-		}
-		shifts := bidiClusterShifts(span.glyphs, extra)
-		span.x = x
-		for j := range span.glyphs {
-			glyph := &span.glyphs[j]
-			glyph.X += x + shifts[glyph.Cluster]
-			if !finite(glyph.X) {
-				return fmt.Errorf("rich text position overflow")
-			}
-		}
-		x += span.width
-		if !finite(x) {
-			return fmt.Errorf("rich text position overflow")
-		}
-	}
-	return nil
-}
-
-// richSpanText 将逻辑原文和绝对视觉位置写为标准字符字形映射
-// 入参: chars 行字符, span 塑形片段, format 文字格式, baseline 基线纵坐标
-// 返回: TextObject 标准文字对象
-func richSpanText(chars []rune, span richSpan, format TextFormat, baseline float64) TextObject {
-	text := richTextObject(format)
-	code := TextCode{Value: escapeOFDText(string(chars[span.start:span.end]))}
-	dx, dy := make([]string, 0, len(span.glyphs)), make([]string, 0, len(span.glyphs))
-	for i, glyph := range span.glyphs {
-		if i == 0 {
-			code.X, code.Y = ofdNumber(glyph.X), ofdNumber(baseline+glyph.Y)
-		} else {
-			dx = append(dx, ofdNumber(glyph.X-span.glyphs[i-1].X))
-			dy = append(dy, ofdNumber(glyph.Y-span.glyphs[i-1].Y))
-		}
-	}
-	code.DeltaX, code.DeltaY = strings.Join(dx, " "), strings.Join(dy, " ")
-	text.TextCode = []TextCode{code}
-	for i := 0; i < len(span.glyphs); {
-		end := i + 1
-		for end < len(span.glyphs) && span.glyphs[end].Cluster == span.glyphs[i].Cluster {
-			end++
-		}
-		next := span.end - span.start
-		if end < len(span.glyphs) {
-			next = span.glyphs[end].Cluster
-		}
-		ids := make([]string, end-i)
-		for j := i; j < end; j++ {
-			ids[j-i] = strconv.Itoa(int(span.glyphs[j].Glyph))
-		}
-		text.CGTransform = append(text.CGTransform, CGTransform{CodePosition: span.glyphs[i].Cluster, CodeCount: next - span.glyphs[i].Cluster, GlyphCount: end - i, Glyphs: strings.Join(ids, " ")})
-		i = end
-	}
-	return text
-}
-
-// richSpanOutline 使用现有字体及几何后端生成与文字合成样式一致的墨迹
-// 入参: span 塑形片段, format 文字格式, metrics 字体度量, geometry 几何后端, baseline 基线纵坐标
-// 返回: GeometryPath 合成轮廓路径, error 轮廓计算错误
-func richSpanOutline(span richSpan, format TextFormat, metrics richMetrics, geometry GeometryBackend, baseline float64) (GeometryPath, error) {
-	font, ok := metrics.font.(FontOutlines)
-	if !ok {
-		return nil, fmt.Errorf("rich text outlines: %w", ErrBackendUnavailable)
-	}
-	var result GeometryPath
-	for _, glyph := range span.glyphs {
-		path, exists := metrics.outlines[glyph.Glyph]
-		if !exists {
-			var err error
-			path, err = font.GlyphOutline(glyph.Glyph, format.Size)
-			if err != nil {
-				return nil, err
-			}
-			if metrics.bold && len(path) > 0 {
-				stroke, err := geometry.Stroke(path, StrokeOptions{Width: format.Size * 0.04, Join: "Round", Cap: "Round"})
-				if err != nil {
-					return nil, err
-				}
-				path, err = geometry.Combine(path, stroke, GeometryUnion)
-				if err != nil {
-					return nil, err
-				}
-			}
-			metrics.outlines[glyph.Glyph] = path
-		}
-		if len(path) == 0 {
-			continue
-		}
-		matrix := TranslationMatrix(glyph.X, baseline+glyph.Y)
-		if metrics.italic {
-			matrix = matrix.Multiply(Matrix{a: 1, c: -0.3, d: 1})
-		}
-		placed, err := geometry.Transform(path, matrix)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, placed...)
-	}
-	return result, nil
-}
-
 // richSynthetic 与标准绘制一样避免对已加粗或倾斜的字体重复合成
 // 入参: format 文字格式
 // 返回: bool 是否合成加粗, bool 是否合成斜体
@@ -651,42 +689,4 @@ func (e *Editor) richSynthetic(format TextFormat) (bool, bool) {
 		}
 	}
 	return bold, italic
-}
-
-// richTextObject 构造具有显式填充和标准字重的文字对象
-// 入参: format 文字格式
-// 返回: TextObject 文字对象
-func richTextObject(format TextFormat) TextObject {
-	fill, stroke := true, false
-	weight := 400
-	if format.Bold {
-		weight = 700
-	}
-	return TextObject{Font: format.Font, Size: format.Size, Weight: weight, Italic: format.Italic, Fill: &fill, Stroke: &stroke, FillColor: &FillColor{Value: richColor(format.Color)}}
-}
-
-// richColor 将空前景色转换为标准黑色
-// 入参: value 颜色文本
-// 返回: string 标准RGB颜色值
-func richColor(value string) string {
-	if value == "" {
-		return "0 0 0"
-	}
-	return value
-}
-
-// richUnion 合并排版范围和墨迹范围，保留负坐标及零宽空行
-// 入参: a 矩形范围, b 矩形范围
-// 返回: Box 合并后的外接矩形
-func richUnion(a, b Box) Box {
-	x, y := math.Min(a.X, b.X), math.Min(a.Y, b.Y)
-	return Box{X: x, Y: y, W: math.Max(a.X+a.W, b.X+b.W) - x, H: math.Max(a.Y+a.H, b.Y+b.H) - y}
-}
-
-// richRectangle 使用标准填充路径绘制背景或文字装饰
-// 入参: box 局部矩形范围, color 填充色值
-// 返回: GraphicObject 路径图元
-func richRectangle(box Box, color string) GraphicObject {
-	fill, stroke := true, false
-	return GraphicObject{Type: "PathObject", PathObject: PathObject{Boundary: editorBoxString(box), Fill: &fill, Stroke: &stroke, FillColor: &FillColor{Value: color}, AbbreviatedData: fmt.Sprintf("M 0 0 L %s 0 L %s %s L 0 %s C", ofdNumber(box.W), ofdNumber(box.W), ofdNumber(box.H), ofdNumber(box.H))}}
 }

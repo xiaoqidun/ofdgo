@@ -23,6 +23,79 @@ import (
 	"strings"
 )
 
+// graphicObjectTarget 图形对象集合
+type graphicObjectTarget struct {
+	objects   *[]GraphicObject
+	text      *[]TextObject
+	path      *[]PathObject
+	image     *[]ImageObject
+	composite *[]CompositeGraphicUnit
+}
+
+// graphicAttributeTokens 提供图形节点的起止令牌，仅用于解码无命名空间属性
+type graphicAttributeTokens struct {
+	start xml.StartElement
+	step  int
+}
+
+// decodeGraphicAttributes 按结构字段解析图形属性，忽略带命名空间的扩展属性
+// 入参: start 起始节点, value 不含自身解码方法的接收结构
+// 返回: error 解码错误
+func decodeGraphicAttributes(start xml.StartElement, value any) error {
+	return xml.NewTokenDecoder(&graphicAttributeTokens{start: ofdXMLStart(start)}).Decode(value)
+}
+
+// decodeGraphicObject 解析图形对象
+// 入参: d XML解码器, start 起始节点, target 图形对象集合
+// 返回: bool 是否为图形对象, error 错误信息
+func decodeGraphicObject(d *xml.Decoder, start xml.StartElement, target graphicObjectTarget) (bool, error) {
+	switch start.Name.Local {
+	case "TextObject":
+		var obj TextObject
+		if err := d.DecodeElement(&obj, &start); err != nil {
+			return true, err
+		}
+		*target.text = append(*target.text, obj)
+		*target.objects = append(*target.objects, GraphicObject{Type: start.Name.Local, TextObject: obj})
+	case "PathObject":
+		var obj PathObject
+		if err := d.DecodeElement(&obj, &start); err != nil {
+			return true, err
+		}
+		*target.path = append(*target.path, obj)
+		*target.objects = append(*target.objects, GraphicObject{Type: start.Name.Local, PathObject: obj})
+	case "ImageObject":
+		var obj ImageObject
+		if err := d.DecodeElement(&obj, &start); err != nil {
+			return true, err
+		}
+		*target.image = append(*target.image, obj)
+		*target.objects = append(*target.objects, GraphicObject{Type: start.Name.Local, ImageObject: obj})
+	case "CompositeGraphicUnit", "CompositeObject":
+		var obj CompositeGraphicUnit
+		if err := d.DecodeElement(&obj, &start); err != nil {
+			return true, err
+		}
+		*target.composite = append(*target.composite, obj)
+		*target.objects = append(*target.objects, GraphicObject{Type: start.Name.Local, CompositeGraphicUnit: obj})
+	default:
+		return false, nil
+	}
+	return true, nil
+}
+
+// attrValue 获取无命名空间的XML属性值
+// 入参: start 起始节点, name 属性名
+// 返回: string 属性值
+func attrValue(start xml.StartElement, name string) string {
+	for _, attr := range start.Attr {
+		if attr.Name.Space == "" && attr.Name.Local == name {
+			return attr.Value
+		}
+	}
+	return ""
+}
+
 // Actions 返回对象动作的独立副本，不修改原对象
 // 返回: []Action 动作列表
 func (o GraphicObject) Actions() []Action {
@@ -101,7 +174,7 @@ func (p *PathObject) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 		case "MiterLimit":
 			p.MiterLimitSet = p.MiterLimit == 0
 		case "DashPattern":
-			p.dashPatternSet = p.DashPattern == ""
+			p.DashPatternSet = p.DashPattern == ""
 		}
 	}
 	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
@@ -121,7 +194,7 @@ func (p *PathObject) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 	})
 }
 
-// UnmarshalXML 解析图片及其边框、裁剪和动作，忽略外部同名内容
+// UnmarshalXML 解析图片及其边框、裁剪和动作，区分省略样式与显式零值描边参数
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解码错误
 func (image *ImageObject) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
@@ -131,6 +204,16 @@ func (image *ImageObject) UnmarshalXML(d *xml.Decoder, start xml.StartElement) e
 		return err
 	}
 	*image = ImageObject(value)
+	for _, attr := range ofdXMLStart(start).Attr {
+		switch attr.Name.Local {
+		case "LineWidth":
+			image.LineWidthSet = image.LineWidth == 0
+		case "MiterLimit":
+			image.MiterLimitSet = image.MiterLimit == 0
+		case "DashPattern":
+			image.DashPatternSet = image.DashPattern == ""
+		}
+	}
 	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
 		switch node.Name.Local {
 		case "Border":
@@ -187,7 +270,7 @@ func (p *DrawParam) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 		case "Size":
 			target = &p.Size
 		case "DashPattern":
-			p.dashPatternSet = p.DashPattern == ""
+			p.DashPatternSet = p.DashPattern == ""
 		case "Weight":
 			if value := strings.TrimSpace(attr.Value); value != "" {
 				weight, err := strconv.Atoi(value)
@@ -342,7 +425,7 @@ func (c *CompositeGraphicUnit) UnmarshalXML(d *xml.Decoder, start xml.StartEleme
 				c.DashOffset = &v
 			}
 		case "DashPattern":
-			c.dashPatternSet = c.DashPattern == ""
+			c.DashPatternSet = c.DashPattern == ""
 		}
 	}
 	if value := attrValue(start, "Alpha"); value != "" {
@@ -469,21 +552,6 @@ func (c *ShdColor) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	return d.Skip()
 }
 
-// graphicObjectTarget 图形对象集合
-type graphicObjectTarget struct {
-	objects   *[]GraphicObject
-	text      *[]TextObject
-	path      *[]PathObject
-	image     *[]ImageObject
-	composite *[]CompositeGraphicUnit
-}
-
-// graphicAttributeTokens 提供图形节点的起止令牌，仅用于解码无命名空间属性
-type graphicAttributeTokens struct {
-	start xml.StartElement
-	step  int
-}
-
 // Token 返回起始节点和结束节点，不读取图形子节点
 // 返回: xml.Token XML令牌, error 读取错误
 func (s *graphicAttributeTokens) Token() (xml.Token, error) {
@@ -495,13 +563,6 @@ func (s *graphicAttributeTokens) Token() (xml.Token, error) {
 		return s.start.End(), nil
 	}
 	return nil, io.EOF
-}
-
-// decodeGraphicAttributes 按结构字段解析图形属性，忽略带命名空间的扩展属性
-// 入参: start 起始节点, value 不含自身解码方法的接收结构
-// 返回: error 解码错误
-func decodeGraphicAttributes(start xml.StartElement, value any) error {
-	return xml.NewTokenDecoder(&graphicAttributeTokens{start: ofdXMLStart(start)}).Decode(value)
 }
 
 // usesObjectMatrix 判断旧式扩展是否要求裁剪跟随对象变换，标准裁剪以外接矩形为基准
@@ -585,45 +646,6 @@ func (c *ShdColor) decodeAttributes(start xml.StartElement) error {
 		}
 	}
 	return nil
-}
-
-// decodeGraphicObject 解析图形对象
-// 入参: d XML解码器, start 起始节点, target 图形对象集合
-// 返回: bool 是否为图形对象, error 错误信息
-func decodeGraphicObject(d *xml.Decoder, start xml.StartElement, target graphicObjectTarget) (bool, error) {
-	switch start.Name.Local {
-	case "TextObject":
-		var obj TextObject
-		if err := d.DecodeElement(&obj, &start); err != nil {
-			return true, err
-		}
-		*target.text = append(*target.text, obj)
-		*target.objects = append(*target.objects, GraphicObject{Type: start.Name.Local, TextObject: obj})
-	case "PathObject":
-		var obj PathObject
-		if err := d.DecodeElement(&obj, &start); err != nil {
-			return true, err
-		}
-		*target.path = append(*target.path, obj)
-		*target.objects = append(*target.objects, GraphicObject{Type: start.Name.Local, PathObject: obj})
-	case "ImageObject":
-		var obj ImageObject
-		if err := d.DecodeElement(&obj, &start); err != nil {
-			return true, err
-		}
-		*target.image = append(*target.image, obj)
-		*target.objects = append(*target.objects, GraphicObject{Type: start.Name.Local, ImageObject: obj})
-	case "CompositeGraphicUnit", "CompositeObject":
-		var obj CompositeGraphicUnit
-		if err := d.DecodeElement(&obj, &start); err != nil {
-			return true, err
-		}
-		*target.composite = append(*target.composite, obj)
-		*target.objects = append(*target.objects, GraphicObject{Type: start.Name.Local, CompositeGraphicUnit: obj})
-	default:
-		return false, nil
-	}
-	return true, nil
 }
 
 // decodeObject 解析图层子对象
@@ -725,16 +747,4 @@ func (p *PatternContent) decodeObject(d *xml.Decoder, start xml.StartElement) er
 		return decodeOFDChildren(d, start, p.decodeObject)
 	}
 	return d.Skip()
-}
-
-// attrValue 获取无命名空间的XML属性值
-// 入参: start 起始节点, name 属性名
-// 返回: string 属性值
-func attrValue(start xml.StartElement, name string) string {
-	for _, attr := range start.Attr {
-		if attr.Name.Space == "" && attr.Name.Local == name {
-			return attr.Value
-		}
-	}
-	return ""
 }

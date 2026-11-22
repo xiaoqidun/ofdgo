@@ -22,16 +22,6 @@ import (
 	"slices"
 )
 
-// sourceInfoXML 更新文档描述字段，保留未识别内容
-// 返回: []byte 根索引XML, error 错误信息
-func (e *Editor) sourceInfoXML() ([]byte, error) {
-	data, err := e.source.reader.readFile("OFD.xml")
-	if err != nil {
-		return nil, err
-	}
-	return editorUpdateInfoXML(data, e.source.fallbackDocID, e.source.reader.documentIndex, e.source.info, e.Info)
-}
-
 // editorUpdateInfoXML 更新指定文档的描述和自定义字段，保留未修改内容
 // 入参: data 根索引XML, docID 缺少描述时使用的标识, index 文档索引, before 原信息, after 新信息
 // 返回: []byte 修改后的XML, error 解析错误
@@ -279,4 +269,14 @@ func editorCustomDatas(data []byte, info *editorXML, values *CustomDatas) ([]byt
 		}
 	}
 	return editorPatchXML(data, patches), nil
+}
+
+// sourceInfoXML 更新文档描述字段，保留未识别内容
+// 返回: []byte 根索引XML, error 错误信息
+func (e *Editor) sourceInfoXML() ([]byte, error) {
+	data, err := e.source.reader.readFile("OFD.xml")
+	if err != nil {
+		return nil, err
+	}
+	return editorUpdateInfoXML(data, e.source.fallbackDocID, e.source.reader.documentIndex, e.source.info, e.Info)
 }

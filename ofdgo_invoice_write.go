@@ -99,6 +99,22 @@ type InvoiceEncodingOptions struct {
 	TaxBureauSignatureXML   []byte         `json:"taxBureauSignatureXML,omitempty"`
 }
 
+// invoiceWriteField 保存按规范排列的字段与值
+type invoiceWriteField struct{ name, value string }
+
+// invoiceXMLSpan 保存节点原始字节边界
+type invoiceXMLSpan struct {
+	node                     *invoiceXMLNode
+	begin, inner, close, end int
+	empty                    bool
+}
+
+// invoiceXMLPatch 保存不重序列化其他节点的字节修改
+type invoiceXMLPatch struct {
+	begin, end int
+	data       []byte
+}
+
 // InvoiceFields 获取发票字段描述，原始事实通过来源补丁修改
 // 入参: value 发票数据
 // 返回: []InvoiceFieldDescriptor 字段描述列表
@@ -795,22 +811,6 @@ func UpdateInvoiceXML(ctx context.Context, data []byte, invoiceIndex int, value 
 		return nil, err
 	}
 	return result, nil
-}
-
-// invoiceWriteField 保存按规范排列的字段与值
-type invoiceWriteField struct{ name, value string }
-
-// invoiceXMLSpan 保存节点原始字节边界
-type invoiceXMLSpan struct {
-	node                     *invoiceXMLNode
-	begin, inner, close, end int
-	empty                    bool
-}
-
-// invoiceXMLPatch 保存不重序列化其他节点的字节修改
-type invoiceXMLPatch struct {
-	begin, end int
-	data       []byte
 }
 
 // invoiceWriteContext 统一空上下文

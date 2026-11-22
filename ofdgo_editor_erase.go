@@ -16,14 +16,28 @@ package ofdgo
 
 import (
 	"fmt"
-	"maps"
 	"math"
 	"reflect"
 	"slices"
 	"strings"
-
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
+
+// editorObjectClips 获取基本对象的裁剪字段
+// 入参: object 文字、路径、图片或复合对象
+// 返回: **Clips 裁剪字段地址，不支持的对象返回nil
+func editorObjectClips(object *GraphicObject) **Clips {
+	switch object.Type {
+	case "TextObject":
+		return &object.TextObject.Clips
+	case "PathObject":
+		return &object.PathObject.Clips
+	case "ImageObject":
+		return &object.ImageObject.Clips
+	case "CompositeObject", "CompositeGraphicUnit":
+		return &object.CompositeGraphicUnit.Clips
+	}
+	return nil
+}
 
 // EraseObjects 擦除同页对象与矩形区域重叠的可见部分，一次撤销恢复全部
 // 全部覆盖时删除对象；局部覆盖使用OFD路径裁剪，保留原文字和资源，不用于敏感信息脱敏
@@ -61,7 +75,7 @@ func (e *Editor) EraseCompositeObjects(page int, path ObjectPath, indexes []int,
 	if err := validateCreationBox(box); err != nil {
 		return err
 	}
-	return e.eraseCompositeObjects(page, path, indexes, GeometryPath(basegeom.Rectangle(box)))
+	return e.eraseCompositeObjects(page, path, indexes, geometryRectangle(box))
 }
 
 // EraseCompositeObjectsPath 按闭合折线擦除内部成员，末点自动连接起点
@@ -116,7 +130,7 @@ func (e *Editor) eraseCompositeObjects(page int, path ObjectPath, indexes []int,
 			if box.W <= 0 || box.H <= 0 {
 				continue
 			}
-			bounds := GeometryPath(basegeom.Rectangle(box))
+			bounds := geometryRectangle(box)
 			intersection, err := geometry.Combine(bounds, region, GeometryIntersect)
 			if err != nil {
 				return err
@@ -140,7 +154,7 @@ func (e *Editor) eraseCompositeObjects(page int, path ObjectPath, indexes []int,
 			if !ok {
 				return fmt.Errorf("composite clip transform is not invertible")
 			}
-			outer := GeometryPath(basegeom.Rectangle(Box{X: box.X - 1, Y: box.Y - 1, W: box.W + 2, H: box.H + 2}))
+			outer := geometryRectangle(Box{X: box.X - 1, Y: box.Y - 1, W: box.W + 2, H: box.H + 2})
 			remainder, err = geometry.Combine(outer, region, GeometrySubtract)
 			if err != nil {
 				return err
@@ -181,7 +195,7 @@ func (e *Editor) eraseObjects(page int, ids []string, box Box, points []Point, r
 		}
 		covered := x == bounds.X && y == bounds.Y && right == bounds.X+bounds.W && bottom == bounds.Y+bounds.H
 		if region != nil {
-			path := GeometryPath(basegeom.Rectangle(bounds))
+			path := geometryRectangle(bounds)
 			intersection, err := e.backends.Geometry.Combine(path, region, GeometryIntersect)
 			if err != nil {
 				return err
@@ -196,7 +210,11 @@ func (e *Editor) eraseObjects(page int, ids []string, box Box, points []Point, r
 			covered = len(remainder) == 0
 		}
 		if covered {
-			removed[ids[i]] = true
+			key := editorResourceID(ids[i])
+			if key == "" {
+				key = ids[i]
+			}
+			removed[key] = true
 			changed = true
 			continue
 		}
@@ -214,7 +232,7 @@ func (e *Editor) eraseObjects(page int, ids []string, box Box, points []Point, r
 		if *clips == nil {
 			*clips = &Clips{}
 		}
-		matrix := IdentityMatrix
+		matrix := IdentityMatrix()
 		if (*clips).usesObjectMatrix() {
 			if object.Type == "ImageObject" && ctm == "" {
 				ctm = Matrix{a: frame.W, d: frame.H}.String()
@@ -254,7 +272,12 @@ func (e *Editor) eraseObjects(page int, ids []string, box Box, points []Point, r
 					if i == 0 {
 						command = "M"
 					}
-					fmt.Fprintf(&data, " %s %g %g", command, point.X-frame.X-area.X, point.Y-frame.Y-area.Y)
+					data.WriteByte(' ')
+					data.WriteString(command)
+					data.WriteByte(' ')
+					data.WriteString(ofdNumber(point.X - frame.X - area.X))
+					data.WriteByte(' ')
+					data.WriteString(ofdNumber(point.Y - frame.Y - area.Y))
 				}
 				data.WriteString(" C")
 				path.AbbreviatedData, path.Rule = data.String(), "Even-Odd"
@@ -270,16 +293,23 @@ func (e *Editor) eraseObjects(page int, ids []string, box Box, points []Point, r
 		layers[position.layer].Objects[position.index] = object
 	}
 	if changed {
+		var removedIDs []string
 		for i := range layers {
 			objects := layers[i].Objects[:0]
 			for _, object := range layers[i].Objects {
-				if !removed[editorObjectID(object)] {
+				rawID := editorObjectID(object)
+				key := editorResourceID(rawID)
+				if key == "" {
+					key = rawID
+				}
+				if !removed[key] {
 					objects = append(objects, object)
+				} else {
+					removedIDs = append(removedIDs, rawID)
 				}
 			}
 			layers[i].Objects = objects
 		}
-		removedIDs := slices.Collect(maps.Keys(removed))
 		if e.hasRichTextMetadata(page, removedIDs) {
 			return e.Transaction(func(e *Editor) error {
 				if err := e.cleanupRichTextMetadata(page, removedIDs); err != nil {
@@ -290,23 +320,6 @@ func (e *Editor) eraseObjects(page int, ids []string, box Box, points []Point, r
 			})
 		}
 		e.replaceLayers(page, layers)
-	}
-	return nil
-}
-
-// editorObjectClips 获取基本对象的裁剪字段
-// 入参: object 文字、路径、图片或复合对象
-// 返回: **Clips 裁剪字段地址，不支持的对象返回nil
-func editorObjectClips(object *GraphicObject) **Clips {
-	switch object.Type {
-	case "TextObject":
-		return &object.TextObject.Clips
-	case "PathObject":
-		return &object.PathObject.Clips
-	case "ImageObject":
-		return &object.ImageObject.Clips
-	case "CompositeObject", "CompositeGraphicUnit":
-		return &object.CompositeGraphicUnit.Clips
 	}
 	return nil
 }

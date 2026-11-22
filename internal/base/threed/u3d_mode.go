@@ -19,9 +19,7 @@ import (
 	"math"
 )
 
-// U3DRenderMode 定义静态几何的呈现方式，边线和顶点使用单像素覆盖
-type U3DRenderMode uint8
-
+// U3DRenderMode 支持的静态几何绘制模式
 const (
 	U3DRenderSolid              U3DRenderMode = iota // 实体
 	U3DRenderSolidWireframe                          // 实体线框
@@ -37,6 +35,9 @@ const (
 	U3DRenderSolidOutline                            // 实体轮廓
 	U3DRenderShadedIllustration                      // 着色插图
 )
+
+// U3DRenderMode 定义静态几何的呈现方式，边线和顶点使用单像素覆盖
+type U3DRenderMode uint8
 
 // u3dPrimitiveKey 区分共享点线的颜色及混合状态，避免透明边点重复叠加
 type u3dPrimitiveKey struct {

@@ -43,10 +43,75 @@ type VersionFile struct {
 	Location string
 }
 
+// parseVersionEntries 校验一个文档的版本列表，复用已解析的主入口节点
+// 入参: ctx 取消上下文, body 文档入口节点
+// 返回: []DocumentVersionInfo 版本入口属性, error 结构或取消错误
+func parseVersionEntries(ctx context.Context, body *editorXML) ([]DocumentVersionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	versions := body.child("Versions")
+	if versions == nil {
+		return nil, nil
+	}
+	if body.childAt("Versions", 1) != nil {
+		return nil, fmt.Errorf("multiple version lists")
+	}
+	var result []DocumentVersionInfo
+	ids := make(map[string]bool)
+	for _, node := range versions.children {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if !node.matchesOFD("Version") {
+			continue
+		}
+		id := strings.TrimSpace(node.attr("ID"))
+		if !ofdXMLIDValid(id) || ids[id] {
+			return nil, fmt.Errorf("invalid or duplicate version ID %q", id)
+		}
+		ids[id] = true
+		index, err := strconv.ParseInt(strings.TrimSpace(node.attr("Index")), 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid version Index for %s: %w", id, err)
+		}
+		current := false
+		if node.hasAttr("Current") {
+			switch strings.TrimSpace(node.attr("Current")) {
+			case "true", "1":
+				current = true
+			case "false", "0":
+			default:
+				return nil, fmt.Errorf("invalid version Current for %s", id)
+			}
+		}
+		location, err := versionFileLocation("OFD.xml", node.attr("BaseLoc"))
+		if err != nil {
+			return nil, fmt.Errorf("version %s: %w", id, err)
+		}
+		result = append(result, DocumentVersionInfo{ID: id, Index: int32(index), Current: current, Location: location})
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("empty version list")
+	}
+	return result, nil
+}
+
+// versionFileLocation 解析版本描述中的ST_Loc，拒绝空路径和包外路径
+// 入参: owner 所在XML路径, value 引用路径
+// 返回: string 包内路径, error 路径错误
+func versionFileLocation(owner, value string) (string, error) {
+	name := resolveResourcePath(owner, "", value)
+	if name == "" || !validPackagePath(name) {
+		return "", fmt.Errorf("invalid version file location %q", value)
+	}
+	return name, nil
+}
+
 // DocumentVersionCount 获取当前文档的版本数量，不读取版本描述文件
 // 返回: int 版本数量, error 入口读取或结构错误
 func (r *Reader) DocumentVersionCount() (int, error) {
-	if r.documentIndex >= 0 && r.documentIndex < r.DocumentCount() && !r.OFD.DocBody[r.documentIndex].versioned {
+	if r.documentIndex >= 0 && r.documentIndex < r.DocumentCount() && !r.ofd.DocBody[r.documentIndex].versioned {
 		return 0, nil
 	}
 	entries, err := r.documentVersionEntries()
@@ -112,60 +177,6 @@ func (r *Reader) documentVersionEntriesContext(ctx context.Context) ([]DocumentV
 		return nil, fmt.Errorf("document body not found: %d", r.documentIndex)
 	}
 	return parseVersionEntries(ctx, body)
-}
-
-// parseVersionEntries 校验一个文档的版本列表，复用已解析的主入口节点
-// 入参: ctx 取消上下文, body 文档入口节点
-// 返回: []DocumentVersionInfo 版本入口属性, error 结构或取消错误
-func parseVersionEntries(ctx context.Context, body *editorXML) ([]DocumentVersionInfo, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	versions := body.child("Versions")
-	if versions == nil {
-		return nil, nil
-	}
-	if body.childAt("Versions", 1) != nil {
-		return nil, fmt.Errorf("multiple version lists")
-	}
-	var result []DocumentVersionInfo
-	ids := make(map[string]bool)
-	for _, node := range versions.children {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if !node.matchesOFD("Version") {
-			continue
-		}
-		id := strings.TrimSpace(node.attr("ID"))
-		if !ofdXMLIDValid(id) || ids[id] {
-			return nil, fmt.Errorf("invalid or duplicate version ID %q", id)
-		}
-		ids[id] = true
-		index, err := strconv.ParseInt(strings.TrimSpace(node.attr("Index")), 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("invalid version Index for %s: %w", id, err)
-		}
-		current := false
-		if node.hasAttr("Current") {
-			switch strings.TrimSpace(node.attr("Current")) {
-			case "true", "1":
-				current = true
-			case "false", "0":
-			default:
-				return nil, fmt.Errorf("invalid version Current for %s", id)
-			}
-		}
-		location, err := versionFileLocation("OFD.xml", node.attr("BaseLoc"))
-		if err != nil {
-			return nil, fmt.Errorf("version %s: %w", id, err)
-		}
-		result = append(result, DocumentVersionInfo{ID: id, Index: int32(index), Current: current, Location: location})
-	}
-	if len(result) == 0 {
-		return nil, fmt.Errorf("empty version list")
-	}
-	return result, nil
 }
 
 // readDocumentVersionContext 流式读取版本描述，按描述文件位置解析清单和文档入口
@@ -262,15 +273,4 @@ func (r *Reader) readDocumentVersionContext(ctx context.Context, id, location st
 		}
 	}
 	return DocumentVersionInfo{}, fmt.Errorf("version DocRoot absent from FileList: %s", info.DocRoot)
-}
-
-// versionFileLocation 解析版本描述中的ST_Loc，拒绝空路径和包外路径
-// 入参: owner 所在XML路径, value 引用路径
-// 返回: string 包内路径, error 路径错误
-func versionFileLocation(owner, value string) (string, error) {
-	name := resolveResourcePath(owner, "", value)
-	if name == "" || !validPackagePath(name) {
-		return "", fmt.Errorf("invalid version file location %q", value)
-	}
-	return name, nil
 }

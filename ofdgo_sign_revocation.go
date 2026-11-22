@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/x509/pkix"
 	"encoding/asn1"
@@ -47,7 +48,7 @@ type SignatureRevocationRequest struct {
 type SignatureRevocationOptions struct {
 	SignatureRevocationEvidence
 	Certificates [][]byte
-	Fetch        func(SignatureRevocationRequest) (SignatureRevocationEvidence, error)
+	Fetch        func(context.Context, SignatureRevocationRequest) (SignatureRevocationEvidence, error)
 	Required     bool
 	VerifyTime   *time.Time
 	MaxAge       time.Duration
@@ -71,7 +72,21 @@ type SignatureRevocationReport struct {
 // 入参: cert 证书DER, issuer 直接颁发者DER, options 吊销选项
 // 返回: SignatureRevocationReport 验证结果
 func VerifySignatureRevocation(cert, issuer []byte, options SignatureRevocationOptions) SignatureRevocationReport {
+	return VerifySignatureRevocationContext(context.Background(), cert, issuer, options)
+}
+
+// VerifySignatureRevocationContext 按取消上下文验证单张证书的离线吊销证据
+// 入参: ctx 取消上下文，nil使用后台上下文, cert 证书DER, issuer 直接颁发者DER, options 吊销选项
+// 返回: SignatureRevocationReport 验证结果
+func VerifySignatureRevocationContext(ctx context.Context, cert, issuer []byte, options SignatureRevocationOptions) SignatureRevocationReport {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	result := SignatureRevocationReport{Certificate: signatureCertInfo(cert), Status: "unknown"}
+	if err := ctx.Err(); err != nil {
+		result.Error = err.Error()
+		return result
+	}
 	c, err := parseSignatureCertificate(cert)
 	if err != nil {
 		result.Error = err.Error()
@@ -97,7 +112,7 @@ func VerifySignatureRevocation(cert, issuer []byte, options SignatureRevocationO
 	}
 	evidence := options.SignatureRevocationEvidence
 	if options.Fetch != nil {
-		fetched, err := options.Fetch(SignatureRevocationRequest{Certificate: bytes.Clone(cert), Issuer: bytes.Clone(issuer), VerifyTime: at})
+		fetched, err := options.Fetch(ctx, SignatureRevocationRequest{Certificate: bytes.Clone(cert), Issuer: bytes.Clone(issuer), VerifyTime: at})
 		if err != nil {
 			result.Error = err.Error()
 			return result
@@ -483,8 +498,11 @@ func ocspIssuerHashes(method string, rawSubject, keyBytes []byte) ([]byte, []byt
 }
 
 // applySignatureRevocation 检查签署者及制章者的离线吊销证据
-// 入参: o 验签选项, certs 目标证书, extra 辅助证书
-func (report *SignatureVerifyReport) applySignatureRevocation(o *signatureVerifyOptions, certs, extra [][]byte) {
+// 入参: ctx 取消上下文, o 验签选项, certs 目标证书, extra 辅助证书
+func (report *SignatureVerifyReport) applySignatureRevocation(ctx context.Context, o *signatureVerifyOptions, certs, extra [][]byte) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var options SignatureRevocationOptions
 	if o.Revocation != nil {
 		options = *o.Revocation
@@ -509,6 +527,10 @@ func (report *SignatureVerifyReport) applySignatureRevocation(o *signatureVerify
 	pool = append(pool, o.TrustCerts...)
 	pool = compactSignatureCerts(pool)
 	for _, raw := range compactSignatureCerts(certs) {
+		if err := ctx.Err(); err != nil {
+			report.Revocations = append(report.Revocations, SignatureRevocationReport{Certificate: signatureCertInfo(raw), Status: "unknown", Error: err.Error()})
+			break
+		}
 		result := SignatureRevocationReport{Certificate: signatureCertInfo(raw), Status: "unknown", Error: "revocation issuer not found"}
 		cert, err := parseSignatureCertificate(raw)
 		if err == nil {
@@ -521,7 +543,7 @@ func (report *SignatureVerifyReport) applySignatureRevocation(o *signatureVerify
 				if err != nil || !ok {
 					continue
 				}
-				result = VerifySignatureRevocation(raw, issuerRaw, options)
+				result = VerifySignatureRevocationContext(ctx, raw, issuerRaw, options)
 				break
 			}
 		}

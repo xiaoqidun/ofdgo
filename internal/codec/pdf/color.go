@@ -39,30 +39,11 @@ type TransferCache struct {
 	functions map[transferKey]*pdfgo.TransferFunction
 }
 
-// Resolve 在页面内复用输出设备的有效函数，不修改原始图形状态
-// 入参: reader 原始阅读器, style 原始图形状态, model 原生设备颜色空间
-// 返回: *pdfgo.TransferFunction 有效函数, error 网屏传递函数错误
-func (c *TransferCache) Resolve(reader *pdfgo.Reader, style pdfgo.Style, model pdfgo.Name) (*pdfgo.TransferFunction, error) {
-	if style.Halftone == nil && style.Transfer == nil {
-		return nil, nil
-	}
-	if model == "" {
-		model = "DeviceRGB"
-	}
-	if c.functions == nil {
-		c.functions = make(map[transferKey]*pdfgo.TransferFunction)
-	}
-	key := transferKey{style.Transfer, style.Halftone, model}
-	transfer, found := c.functions[key]
-	if !found {
-		var err error
-		transfer, err = reader.DeviceTransfer(style.Transfer, style.Halftone, model)
-		if err != nil {
-			return nil, err
-		}
-		c.functions[key] = transfer
-	}
-	return transfer, nil
+// transferKey 区分图形状态、网屏覆盖函数及输出设备
+type transferKey struct {
+	transfer *pdfgo.TransferFunction
+	halftone *pdfgo.Halftone
+	model    pdfgo.Name
 }
 
 // OutputColor 将合成结果映射到OFD输出，与保留的设备四色对象使用相同显示换算
@@ -160,7 +141,7 @@ func CompositeColor(paint pdfgo.Paint, point pdfgo.Point, space *pdfgo.ColorSpac
 				return values, false, nil
 			}
 		}
-		t, visible := ShadingPosition(paint, point)
+		t, visible := shadingPosition(paint, point)
 		var err error
 		if !visible {
 			if background == nil {
@@ -285,7 +266,7 @@ func CompositeGroupRegion(ctx context.Context, pixels, initial, result []Composi
 // 返回: error 未支持的混合模式
 func CompositePaintOver(backdrop *CompositePixel, source [4]float64, alpha float64, space *pdfgo.ColorSpace, mode pdfgo.Name, compatible bool, marked *[4]bool) error {
 	if !compatible && marked == nil {
-		return CompositeOver(backdrop, source, alpha, space, mode)
+		return compositeOver(backdrop, source, alpha, space, mode)
 	}
 	if alpha == 0 {
 		return nil
@@ -301,10 +282,10 @@ func CompositePaintOver(backdrop *CompositePixel, source [4]float64, alpha float
 	return nil
 }
 
-// CompositeOver 按PDF透明模型合成源颜色，四色混合使用分量补色
+// compositeOver 按PDF透明模型合成源颜色，四色混合使用分量补色
 // 入参: backdrop 背景及输出, source 源分量, alpha 源透明度, space 混合空间, mode 混合模式
 // 返回: error 未支持的混合模式
-func CompositeOver(backdrop *CompositePixel, source [4]float64, alpha float64, space *pdfgo.ColorSpace, mode pdfgo.Name) error {
+func compositeOver(backdrop *CompositePixel, source [4]float64, alpha float64, space *pdfgo.ColorSpace, mode pdfgo.Name) error {
 	if alpha == 0 {
 		return nil
 	}
@@ -349,9 +330,28 @@ func OverprintNeedsSeparation(paint pdfgo.Paint) bool {
 	return (paint.CMYK != nil || process) && !OpaqueBlack(paint)
 }
 
-// transferKey 区分图形状态、网屏覆盖函数及输出设备
-type transferKey struct {
-	transfer *pdfgo.TransferFunction
-	halftone *pdfgo.Halftone
-	model    pdfgo.Name
+// Resolve 在页面内复用输出设备的有效函数，不修改原始图形状态
+// 入参: reader 原始阅读器, style 原始图形状态, model 原生设备颜色空间
+// 返回: *pdfgo.TransferFunction 有效函数, error 网屏传递函数错误
+func (c *TransferCache) Resolve(reader *pdfgo.Reader, style pdfgo.Style, model pdfgo.Name) (*pdfgo.TransferFunction, error) {
+	if style.Halftone == nil && style.Transfer == nil {
+		return nil, nil
+	}
+	if model == "" {
+		model = "DeviceRGB"
+	}
+	if c.functions == nil {
+		c.functions = make(map[transferKey]*pdfgo.TransferFunction)
+	}
+	key := transferKey{style.Transfer, style.Halftone, model}
+	transfer, found := c.functions[key]
+	if !found {
+		var err error
+		transfer, err = reader.DeviceTransfer(style.Transfer, style.Halftone, model)
+		if err != nil {
+			return nil, err
+		}
+		c.functions[key] = transfer
+	}
+	return transfer, nil
 }

@@ -36,6 +36,33 @@ type applicationTheme struct {
 	Material string `json:"material"`
 }
 
+// themeColors 返回应用对应外观的原生标题栏配色
+// 入参: dark 是否使用深色
+// 返回: guigo.TitleBarColors 标题栏配色
+func themeColors(dark bool) guigo.TitleBarColors {
+	if dark {
+		return guigo.TitleBarColors{Background: "#20272b", Foreground: "#e0e7eb", InactiveBackground: "#242b30", InactiveForeground: "#9aa8b1"}
+	}
+	return guigo.TitleBarColors{Background: "#e8edee", Foreground: "#263238", InactiveBackground: "#eef1f3", InactiveForeground: "#728087"}
+}
+
+// windowMaterial 将应用偏好转换为当前平台支持的原生材质
+// 入参: value 材质偏好
+// 返回: guigo.WindowMaterial 可用的窗口材质
+func windowMaterial(value string) guigo.WindowMaterial {
+	material := guigo.WindowSolid
+	switch value {
+	case "mica-alt":
+		material = guigo.WindowMicaAlt
+	case "acrylic":
+		material = guigo.WindowAcrylic
+	}
+	if !guigo.SupportsWindowMaterial(material) {
+		return guigo.WindowSolid
+	}
+	return material
+}
+
 // validate 检查应用主题及解析后的配色是否一致
 // 返回: error 偏好错误
 func (a applicationTheme) validate() error {
@@ -51,20 +78,10 @@ func (a applicationTheme) validate() error {
 	return nil
 }
 
-// themeColors 返回应用对应外观的原生标题栏配色
-// 入参: dark 是否使用深色
-// 返回: guigo.TitleBarColors 标题栏配色
-func themeColors(dark bool) guigo.TitleBarColors {
-	if dark {
-		return guigo.TitleBarColors{Background: "#20272b", Foreground: "#e0e7eb", InactiveBackground: "#242b30", InactiveForeground: "#9aa8b1"}
-	}
-	return guigo.TitleBarColors{Background: "#e8edee", Foreground: "#263238", InactiveBackground: "#eef1f3", InactiveForeground: "#728087"}
-}
-
 // loadTheme 在创建窗口前读取用户目录中的主题偏好
 // 返回: error 读取错误
-func (h *Host) loadTheme() error {
-	h.theme = applicationTheme{Mode: "system", Material: "solid"}
+func (h *host) loadTheme() error {
+	h.theme = applicationTheme{Mode: "system", Dark: guigo.SystemDark(), Material: "solid"}
 	data, err := os.ReadFile(h.themePath)
 	if os.IsNotExist(err) {
 		return nil
@@ -74,6 +91,9 @@ func (h *Host) loadTheme() error {
 	}
 	var theme applicationTheme
 	if json.Unmarshal(data, &theme) == nil && theme.validate() == nil {
+		if theme.Mode == "system" {
+			theme.Dark = guigo.SystemDark()
+		}
 		h.theme = theme
 	}
 	return nil
@@ -81,7 +101,7 @@ func (h *Host) loadTheme() error {
 
 // themeIndex 在页面首次绘制前提供当前主题偏好
 // 返回: []byte 页面内容, error 资源读取错误
-func (h *Host) themeIndex() ([]byte, error) {
+func (h *host) themeIndex() ([]byte, error) {
 	data, err := webuiassets.NativeFS.ReadFile("index.html")
 	if err != nil {
 		return nil, err
@@ -108,7 +128,7 @@ func (h *Host) themeIndex() ([]byte, error) {
 // setTheme 串行更新窗口配色及材质，成功保存后确认应用偏好
 // 入参: value 已解析的主题偏好
 // 返回: error 校验、持久化或窗口更新错误
-func (h *Host) setTheme(value applicationTheme) (err error) {
+func (h *host) setTheme(value applicationTheme) (err error) {
 	if err := value.validate(); err != nil {
 		return err
 	}
@@ -156,21 +176,4 @@ func (h *Host) setTheme(value applicationTheme) (err error) {
 		h.theme = value
 	}
 	return nil
-}
-
-// windowMaterial 将应用偏好转换为当前平台支持的原生材质
-// 入参: value 材质偏好
-// 返回: guigo.WindowMaterial 可用的窗口材质
-func windowMaterial(value string) guigo.WindowMaterial {
-	material := guigo.WindowSolid
-	switch value {
-	case "mica-alt":
-		material = guigo.WindowMicaAlt
-	case "acrylic":
-		material = guigo.WindowAcrylic
-	}
-	if !guigo.SupportsWindowMaterial(material) {
-		return guigo.WindowSolid
-	}
-	return material
 }

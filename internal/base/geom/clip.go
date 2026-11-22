@@ -16,6 +16,11 @@ package geom
 
 import "math"
 
+// polygonPoint 允许同结构的后端顶点直接参与裁剪，避免整片坐标转换
+type polygonPoint interface {
+	~struct{ X, Y float64 }
+}
+
 // ClipPolygon 按非退化凸窗口逐边裁剪多边形，保留原顶点绕向，不修改输入
 // 入参: a 绘制顶点, b 已通过ConvexPolygon检查的裁剪顶点，均不含重复闭合点
 // 返回: []P 交集顶点，少于三个顶点时不构成区域, bool 是否满足数值精度
@@ -108,11 +113,6 @@ func ConvexPolygon[P polygonPoint](points []P) ([]P, bool) {
 		}
 	}
 	return points, positive
-}
-
-// polygonPoint 允许同结构的后端顶点直接参与裁剪，避免整片坐标转换
-type polygonPoint interface {
-	~struct{ X, Y float64 }
 }
 
 // convexDistance 按浮点乘法误差界识别共线点，不使用固定坐标容差

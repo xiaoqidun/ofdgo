@@ -171,6 +171,9 @@ func (e *Editor) vectorInstance(renderer *Renderer, nodes []*editorCompositeNode
 		}
 	}
 	if resource == "" {
+		if e.maxID >= maxUnitID {
+			return nil, fmt.Errorf("ofdgo: MaxUnitID exceeds uint32 range")
+		}
 		data, err := editorXMLContainer("CompositeGraphicUnit", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: formatUnitID(e.maxID + 1)}, {Name: xml.Name{Local: "Width"}, Value: ofdNumber(extent.W)}, {Name: xml.Name{Local: "Height"}, Value: ofdNumber(extent.H)}}, bytes.TrimPrefix(content, []byte(xml.Header)))
 		if err != nil {
 			return nil, err
@@ -183,7 +186,11 @@ func (e *Editor) vectorInstance(renderer *Renderer, nodes []*editorCompositeNode
 		added.vectorKey, added.vectorStates = key, maps.Clone(states)
 		ids = added.objectIDs
 	}
-	data, err := editorXMLContainer("CompositeObject", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: e.nextID()}, {Name: xml.Name{Local: "Boundary"}, Value: editorBoxString(extent)}, {Name: xml.Name{Local: "ResourceID"}, Value: resource}}, nil)
+	compID, err := e.nextID()
+	if err != nil {
+		return nil, err
+	}
+	data, err := editorXMLContainer("CompositeObject", ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: compID}, {Name: xml.Name{Local: "Boundary"}, Value: editorBoxString(extent)}, {Name: xml.Name{Local: "ResourceID"}, Value: resource}}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -211,9 +218,9 @@ func (e *Editor) ungroupCompositeNode(renderer *Renderer, node *editorCompositeN
 			return err
 		}
 	}
-	copy.parent, copy.boundaryInCTM, copy.visible = IdentityMatrix, true, true
+	copy.parent, copy.boundaryInCTM, copy.visible = IdentityMatrix(), true, true
 	copy.defaults, copy.drawParams = node.defaults, node.drawParams
-	members, err := e.compositeMembers(copy, renderer.Reader, renderer, make(map[string]bool))
+	members, err := e.compositeMembers(copy, renderer.reader, renderer, make(map[string]bool))
 	if err != nil {
 		return err
 	}
@@ -263,7 +270,7 @@ func (e *Editor) ungroupCompositeNode(renderer *Renderer, node *editorCompositeN
 				states = remapCompositeStates(states, ids)
 			}
 			if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
-				if err := member.convertCoordinates(IdentityMatrix, true); err != nil {
+				if err := member.convertCoordinates(IdentityMatrix(), true); err != nil {
 					return err
 				}
 			}

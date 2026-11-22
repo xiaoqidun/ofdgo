@@ -27,8 +27,16 @@ import (
 
 	"github.com/tdewolff/canvas"
 	"github.com/tdewolff/canvas/renderers/rasterizer"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
+)
+
+// 光栅色彩空间枚举及Gamma查找表缓存上限
+const (
+	canvasColorSpaceDefault canvasColorSpaceKind = iota
+	canvasColorSpaceLinear
+	canvasColorSpaceSRGB
+	canvasColorSpaceGamma
+	canvasGammaCacheLimit = 64
 )
 
 // canvasSRGBTables 复用八位预乘sRGB的双向传递表，透明度参与索引以保留原运算精度
@@ -36,12 +44,44 @@ var canvasSRGBTables = sync.OnceValue(func() [2]*[256][256]uint8 {
 	return buildCanvasColorTables(canvas.SRGBColorSpace{})
 })
 
-// canvasGammaTables 缓存Gamma色彩空间的双向查表
-var canvasGammaTables sync.Map
+// canvasSRGBLinearLUT 复用八位sRGB通道转归一化线性亮度的查找表
+var canvasSRGBLinearLUT = sync.OnceValue(func() *[256]float64 {
+	lut := new([256]float64)
+	for i := range 256 {
+		c := float64(i) / 255.0
+		if c <= 0.04045 {
+			lut[i] = c / 12.92
+		} else {
+			lut[i] = math.Pow((c+0.055)/1.055, 2.4)
+		}
+	}
+	return lut
+})
+
+// canvasGammaTables 与线性查找表共用的有界Gamma缓存
+var canvasGammaCache = struct {
+	mu          sync.RWMutex
+	tables      map[uint64][2]*[256][256]uint8
+	tableOrder  []uint64
+	linear      map[uint64]*[256]float64
+	linearOrder []uint64
+}{
+	tables: make(map[uint64][2]*[256][256]uint8),
+	linear: make(map[uint64]*[256]float64),
+}
+
+// canvasColorSpaceKind 表示Canvas光栅输出的色彩空间类型
+type canvasColorSpaceKind uint8
+
+// CanvasColorSpace 指定Canvas光栅输出的色彩空间，零值采用默认色彩空间
+type CanvasColorSpace struct {
+	kind  canvasColorSpaceKind
+	gamma float64
+}
 
 // CanvasBackend canvas页面编译与绘制适配器，ColorSpace仅影响光栅输出
 type CanvasBackend struct {
-	ColorSpace canvas.ColorSpace
+	ColorSpace CanvasColorSpace
 }
 
 // rasterStrokeGradientCanvas 保留页面坐标描边的局部渐变定位
@@ -64,6 +104,28 @@ func init() {
 	}
 }
 
+// LinearColorSpace 返回线性光栅色彩空间
+// 返回: CanvasColorSpace 线性色彩空间
+func LinearColorSpace() CanvasColorSpace {
+	return CanvasColorSpace{kind: canvasColorSpaceLinear}
+}
+
+// SRGBColorSpace 返回sRGB光栅色彩空间
+// 返回: CanvasColorSpace sRGB色彩空间
+func SRGBColorSpace() CanvasColorSpace {
+	return CanvasColorSpace{kind: canvasColorSpaceSRGB}
+}
+
+// GammaColorSpace 返回指定Gamma值的光栅色彩空间，非正或非有限值回退默认色彩空间
+// 入参: gamma 伽马指数
+// 返回: CanvasColorSpace Gamma色彩空间
+func GammaColorSpace(gamma float64) CanvasColorSpace {
+	if !finite(gamma) || gamma <= 0 {
+		return CanvasColorSpace{}
+	}
+	return CanvasColorSpace{kind: canvasColorSpaceGamma, gamma: gamma}
+}
+
 // newRasterGradientCanvas 准备渐变适配器及独立网格采样器
 // 入参: gradient 公共渐变
 // 返回: rasterGradientCanvas Canvas渐变
@@ -73,6 +135,72 @@ func newRasterGradientCanvas(gradient *RasterGradient) rasterGradientCanvas {
 		result.mesh = gradient.Mesh.NewSampler()
 	}
 	return result
+}
+
+// canvasLinearLUT 返回支持单通道可分离转换的八位非线性转归一化线性查表
+// 入参: space 色彩空间
+// 返回: *[256]float64 线性查表，不支持时为nil
+func canvasLinearLUT(space canvas.ColorSpace) *[256]float64 {
+	switch cs := space.(type) {
+	case canvas.SRGBColorSpace:
+		return canvasSRGBLinearLUT()
+	case canvas.GammaColorSpace:
+		if finite(cs.Gamma) && cs.Gamma > 0 {
+			key := math.Float64bits(cs.Gamma)
+			canvasGammaCache.mu.RLock()
+			cached, ok := canvasGammaCache.linear[key]
+			canvasGammaCache.mu.RUnlock()
+			if ok {
+				return cached
+			}
+			lut := new([256]float64)
+			for i := range 256 {
+				lut[i] = math.Pow(float64(i)/255.0, cs.Gamma)
+			}
+			canvasGammaCache.mu.Lock()
+			if existing, exists := canvasGammaCache.linear[key]; exists {
+				canvasGammaCache.mu.Unlock()
+				return existing
+			}
+			if len(canvasGammaCache.linearOrder) >= canvasGammaCacheLimit {
+				evict := canvasGammaCache.linearOrder[0]
+				canvasGammaCache.linearOrder = canvasGammaCache.linearOrder[1:]
+				delete(canvasGammaCache.linear, evict)
+			}
+			canvasGammaCache.linear[key] = lut
+			canvasGammaCache.linearOrder = append(canvasGammaCache.linearOrder, key)
+			canvasGammaCache.mu.Unlock()
+			return lut
+		}
+	}
+	return nil
+}
+
+// transformRGBAContext 按取消上下文分带转换八位预乘颜色，及时响应取消信号
+// 入参: ctx 取消上下文, target 目标缓冲, source 同范围源图像, transform 单像素颜色变换
+// 返回: error 取消错误
+func transformRGBAContext(ctx context.Context, target *image.RGBA, source image.Image, transform func(color.RGBA) color.RGBA) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	rect := target.Rect
+	w, h := rect.Dx(), rect.Dy()
+	if w <= 0 || h <= 0 {
+		return nil
+	}
+	if int64(w)*int64(h) <= 262144 {
+		baseimage.TransformRGBA(target, source, transform)
+		return ctx.Err()
+	}
+	bandH := max(64, 262144/w)
+	for y := rect.Min.Y; y < rect.Max.Y; y += bandH {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		band := target.SubImage(image.Rect(rect.Min.X, y, rect.Max.X, min(rect.Max.Y, y+bandH))).(*image.RGBA)
+		baseimage.TransformRGBA(band, source, transform)
+	}
+	return ctx.Err()
 }
 
 // canvasColorTransfer 准备八位预乘颜色变换，任意自定义空间保留其原始计算
@@ -92,12 +220,24 @@ func canvasColorTransfer(space canvas.ColorSpace, linear bool) func(color.RGBA) 
 	case canvas.GammaColorSpace:
 		if finite(cs.Gamma) && cs.Gamma > 0 {
 			key := math.Float64bits(cs.Gamma)
-			var tables [2]*[256][256]uint8
-			if cached, ok := canvasGammaTables.Load(key); ok {
-				tables = cached.([2]*[256][256]uint8)
-			} else {
+			canvasGammaCache.mu.RLock()
+			tables, ok := canvasGammaCache.tables[key]
+			canvasGammaCache.mu.RUnlock()
+			if !ok {
 				tables = buildCanvasColorTables(cs)
-				canvasGammaTables.Store(key, tables)
+				canvasGammaCache.mu.Lock()
+				if existing, exists := canvasGammaCache.tables[key]; exists {
+					tables = existing
+				} else {
+					if len(canvasGammaCache.tableOrder) >= canvasGammaCacheLimit {
+						evict := canvasGammaCache.tableOrder[0]
+						canvasGammaCache.tableOrder = canvasGammaCache.tableOrder[1:]
+						delete(canvasGammaCache.tables, evict)
+					}
+					canvasGammaCache.tables[key] = tables
+					canvasGammaCache.tableOrder = append(canvasGammaCache.tableOrder, key)
+				}
+				canvasGammaCache.mu.Unlock()
 			}
 			table := tables[direction]
 			return func(value color.RGBA) color.RGBA {
@@ -252,16 +392,26 @@ func rasterSegmentsPixelBounds(segments []RasterSegment, m RasterMatrix, margin 
 	return image.Rect(x0, y0, x1, y1), true
 }
 
-// compositeGroupAlpha 按对象级透明度将离屏预乘缓冲合成到目标画布
-// 入参: dst 目标画布, dstRect 目标区域, src 离屏预乘缓冲, alpha 透明组系数
-func compositeGroupAlpha(dst *image.RGBA, dstRect image.Rectangle, src *image.RGBA, alpha uint8) {
+// compositeGroupAlpha 按对象级透明度将离屏预乘缓冲合成到目标画布并响应取消
+// 入参: ctx 取消上下文, dst 目标画布, dstRect 目标区域, src 离屏预乘缓冲, alpha 透明组系数
+// 返回: error 取消错误
+func compositeGroupAlpha(ctx context.Context, dst *image.RGBA, dstRect image.Rectangle, src *image.RGBA, alpha uint8) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if dstRect.Empty() || alpha == 0 {
-		return
+		return nil
 	}
 	w, h := dstRect.Dx(), dstRect.Dy()
 	a := uint32(alpha)
 	for y := range h {
-		dstRow := dst.Pix[dst.PixOffset(dstRect.Min.X, dstRect.Min.Y+y) : dst.PixOffset(dstRect.Min.X, dstRect.Min.Y+y)+w*4]
+		if y&63 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		dstOff := dst.PixOffset(dstRect.Min.X, dstRect.Min.Y+y)
+		dstRow := dst.Pix[dstOff : dstOff+w*4]
 		srcRow := src.Pix[y*src.Stride : y*src.Stride+w*4]
 		for x := range w {
 			off := x * 4
@@ -280,6 +430,7 @@ func compositeGroupAlpha(dst *image.RGBA, dstRect image.Rectangle, src *image.RG
 			dstRow[off+3] = uint8(min(255, sa+(uint32(dstRow[off+3])*inv+127)/255))
 		}
 	}
+	return ctx.Err()
 }
 
 // visibleRasterPath 排除填充区域外的完整子路径，保留曲线控制范围与抗锯齿边缘
@@ -392,21 +543,32 @@ func defaultRenderBackends() RenderBackends {
 	return RenderBackends{FontResources: SFNTBackend{}, Fonts: SFNTBackend{}, Geometry: backend, Compiler: backend, Raster: backend, SVG: backend, PDF: backend, EPS: backend}
 }
 
+// canvasSpace 转换为内部Canvas光栅色彩空间
+// 返回: canvas.ColorSpace 内部色彩空间
+func (s CanvasColorSpace) canvasSpace() canvas.ColorSpace {
+	switch s.kind {
+	case canvasColorSpaceDefault:
+		return canvas.DefaultColorSpace
+	case canvasColorSpaceLinear:
+		return canvas.LinearColorSpace{}
+	case canvasColorSpaceSRGB:
+		return canvas.SRGBColorSpace{}
+	case canvasColorSpaceGamma:
+		if finite(s.gamma) && s.gamma > 0 {
+			return canvas.GammaColorSpace{Gamma: s.gamma}
+		}
+	}
+	return canvas.DefaultColorSpace
+}
+
 // Name 返回后端标识
 // 返回: string 后端标识
 func (CanvasBackend) Name() string { return "canvas" }
 
-// Render 绘制已编译页面，不修改输入数据
-// 入参: page 只读页面
-// 返回: image.Image 图像, error 绘制错误
-func (b CanvasBackend) Render(page *RasterPage) (image.Image, error) {
-	return b.RenderContext(context.Background(), page)
-}
-
-// RenderContext 按取消上下文绘制已编译页面，不修改输入数据
+// Render 按取消上下文绘制已编译页面，不修改输入数据
 // 入参: ctx 取消上下文, page 只读页面
 // 返回: image.Image 图像, error 绘制或取消错误
-func (b CanvasBackend) RenderContext(ctx context.Context, page *RasterPage) (image.Image, error) {
+func (b CanvasBackend) Render(ctx context.Context, page *RasterPage) (image.Image, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -421,10 +583,16 @@ func (b CanvasBackend) RenderContext(ctx context.Context, page *RasterPage) (ima
 	return b.renderImageContext(ctx, page, img)
 }
 
-// RenderInto 在调用方独占的紧密RGBA缓冲中重新绘制，不修改页面或保留缓冲
-// 入参: page 只读页面, target 原点为零且尺寸匹配的目标，不与输入图像共享数据
-// 返回: error 参数或绘制错误，绘制失败时目标可能包含部分结果
-func (b CanvasBackend) RenderInto(page *RasterPage, target *image.RGBA) error {
+// RenderInto 按取消上下文在调用方独占的紧密RGBA缓冲中重新绘制，不修改页面或保留缓冲
+// 入参: ctx 取消上下文, page 只读页面, target 原点为零且尺寸匹配的目标，不与输入图像共享数据
+// 返回: error 参数、取消或绘制错误，绘制失败时目标可能包含部分结果
+func (b CanvasBackend) RenderInto(ctx context.Context, page *RasterPage, target *image.RGBA) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	w, h, err := page.PixelSize()
 	if err != nil {
 		return err
@@ -433,7 +601,7 @@ func (b CanvasBackend) RenderInto(page *RasterPage, target *image.RGBA) error {
 		return fmt.Errorf("invalid canvas target buffer")
 	}
 	clear(target.Pix[:4*w*h])
-	_, err = b.renderImageContext(context.Background(), page, target)
+	_, err = b.renderImageContext(ctx, page, target)
 	return err
 }
 
@@ -506,27 +674,28 @@ func (b CanvasBackend) renderImageContext(ctx context.Context, page *RasterPage,
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	space := b.ColorSpace
-	if space == nil {
-		space = canvas.DefaultColorSpace
-	}
+	space := b.ColorSpace.canvasSpace()
 	_, linear := space.(canvas.LinearColorSpace)
 	var toLinear func(color.RGBA) color.RGBA
+	var linearLUT *[256]float64
 	var linearImages map[image.Image]*image.RGBA
 	if !linear {
 		toLinear = canvasColorTransfer(space, true)
+		linearLUT = canvasLinearLUT(space)
 		linearImages = make(map[image.Image]*image.RGBA)
 	}
 	masks := renderCache[[32]byte, *image.Alpha]{limit: 16 << 20}
 	var scratch []byte
-	if err := b.renderCommands(ctx, page, page.Commands, img, image.Point{}, img.Rect.Dx(), img.Rect.Dy(), space, toLinear, linearImages, &masks, &scratch); err != nil {
+	if err := b.renderCommands(ctx, page, page.Commands, img, image.Point{}, img.Rect.Dx(), img.Rect.Dy(), space, toLinear, linearLUT, linearImages, &masks, &scratch); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if !linear {
-		baseimage.TransformRGBA(img, img, canvasColorTransfer(space, false))
+		if err := transformRGBAContext(ctx, img, img, canvasColorTransfer(space, false)); err != nil {
+			return nil, err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -535,9 +704,9 @@ func (b CanvasBackend) renderImageContext(ctx context.Context, page *RasterPage,
 }
 
 // renderCommands 在带页面像素偏移的目标缓冲上执行指令序列并支持嵌套离屏透明组合成
-// 入参: ctx 取消上下文, page 页面定义, commands 指令切片, img 当前目标缓冲, offset 目标左上角在整页中的像素偏移, pageW 整页像素宽, pageH 整页像素高, space 线性或目标色彩空间, toLinear 非线性转线性单像素函数, linearImages 页内线性图像缓存, masks 裁剪蒙版缓存, scratch 可复用离屏裁剪缓冲
+// 入参: ctx 取消上下文, page 页面定义, commands 指令切片, img 当前目标缓冲, offset 目标左上角在整页中的像素偏移, pageW 整页像素宽, pageH 整页像素高, space 线性或目标色彩空间, toLinear 非线性转线性单像素函数, linearLUT 八位非线性转线性查表, linearImages 页内线性图像缓存, masks 裁剪蒙版缓存, scratch 可复用离屏裁剪缓冲
 // 返回: error 绘制或取消错误
-func (b CanvasBackend) renderCommands(ctx context.Context, page *RasterPage, commands []RasterCommand, img *image.RGBA, offset image.Point, pageW, pageH int, space canvas.ColorSpace, toLinear func(color.RGBA) color.RGBA, linearImages map[image.Image]*image.RGBA, masks *renderCache[[32]byte, *image.Alpha], scratch *[]byte) error {
+func (b CanvasBackend) renderCommands(ctx context.Context, page *RasterPage, commands []RasterCommand, img *image.RGBA, offset image.Point, pageW, pageH int, space canvas.ColorSpace, toLinear func(color.RGBA) color.RGBA, linearLUT *[256]float64, linearImages map[image.Image]*image.RGBA, masks *renderCache[[32]byte, *image.Alpha], scratch *[]byte) error {
 	scale := page.DPI / 25.4
 	dstPageBounds := img.Rect.Add(offset)
 	r := rasterizer.FromImage(img, canvas.DPMM(scale), space)
@@ -564,10 +733,12 @@ func (b CanvasBackend) renderCommands(ctx context.Context, page *RasterPage, com
 				continue
 			}
 			offscreen := image.NewRGBA(image.Rect(0, 0, groupBounds.Dx(), groupBounds.Dy()))
-			if err := b.renderCommands(ctx, page, commands[i+1:end], offscreen, groupBounds.Min, pageW, pageH, space, toLinear, linearImages, masks, scratch); err != nil {
+			if err := b.renderCommands(ctx, page, commands[i+1:end], offscreen, groupBounds.Min, pageW, pageH, space, toLinear, linearLUT, linearImages, masks, scratch); err != nil {
 				return err
 			}
-			compositeGroupAlpha(img, groupBounds.Sub(offset), offscreen, cmd.GroupAlpha)
+			if err := compositeGroupAlpha(ctx, img, groupBounds.Sub(offset), offscreen, cmd.GroupAlpha); err != nil {
+				return err
+			}
 			i = end
 			continue
 		}
@@ -588,30 +759,44 @@ func (b CanvasBackend) renderCommands(ctx context.Context, page *RasterPage, com
 				if cacheable {
 					if converted, ok := linearImages[source]; ok {
 						source = converted
-					} else if down, scaledCmd, ok := downsampleRasterImage(source, drawCmd, page, pageH); ok {
-						baseimage.TransformRGBA(down, down, toLinear)
+					} else {
+						down, scaledCmd, ok, downErr := downsampleRasterImage(ctx, source, drawCmd, page, pageH, linearLUT)
+						if downErr != nil {
+							return downErr
+						}
+						if ok {
+							source = down
+							drawCmd = scaledCmd
+						} else {
+							converted = image.NewRGBA(source.Bounds())
+							if err := transformRGBAContext(ctx, converted, source, toLinear); err != nil {
+								return err
+							}
+							linearImages[source] = converted
+							source = converted
+						}
+					}
+				} else {
+					down, scaledCmd, ok, downErr := downsampleRasterImage(ctx, source, drawCmd, page, pageH, linearLUT)
+					if downErr != nil {
+						return downErr
+					}
+					if ok {
 						source = down
 						drawCmd = scaledCmd
 					} else {
-						converted = image.NewRGBA(source.Bounds())
-						baseimage.TransformRGBA(converted, source, toLinear)
-						linearImages[source] = converted
+						converted := image.NewRGBA(source.Bounds())
+						if err := transformRGBAContext(ctx, converted, source, toLinear); err != nil {
+							return err
+						}
 						source = converted
 					}
-				} else if down, scaledCmd, ok := downsampleRasterImage(source, drawCmd, page, pageH); ok {
-					baseimage.TransformRGBA(down, down, toLinear)
-					source = down
-					drawCmd = scaledCmd
-				} else {
-					converted := image.NewRGBA(source.Bounds())
-					baseimage.TransformRGBA(converted, source, toLinear)
-					source = converted
 				}
 			}
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if err := drawRasterImageCommandOffset(b, page, img, offset, pageH, source, drawCmd, masks); err != nil {
+			if err := drawRasterImageCommandOffset(ctx, b, page, img, offset, pageH, source, drawCmd, masks); err != nil {
 				return err
 			}
 			continue
@@ -657,7 +842,7 @@ func (b CanvasBackend) renderCommands(ctx context.Context, page *RasterPage, com
 		m := cmd.Transform
 		if cmd.Stroke != nil {
 			options := *cmd.Stroke
-			if err := basegeom.ValidateStroke(options); err != nil {
+			if err := validateStrokeOptions(options); err != nil {
 				return err
 			}
 			p = p.Transform(canvas.Matrix{{m[0], m[2], m[4]}, {m[1], m[3], m[5]}})
@@ -721,7 +906,7 @@ func (b CanvasBackend) renderCommands(ctx context.Context, page *RasterPage, com
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		mask, err := rasterClipMask(b, page, cmd.Clip, masks)
+		mask, err := rasterClipMask(ctx, b, page, cmd.Clip, masks)
 		if err != nil {
 			return err
 		}

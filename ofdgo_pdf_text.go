@@ -63,6 +63,99 @@ type pdfTextReplacements struct {
 	widget   bool
 }
 
+// pdfTextGlyphItem 保存单字形的基线坐标、转义原文及字形索引，用于同行合并
+type pdfTextGlyphItem struct {
+	x            float64
+	y            float64
+	text         string
+	runes        int
+	hasTransform bool
+	gid          uint16
+}
+
+// pdfApplyReplacement 将整段原文映射到全部字形，字形位移遵循GB/T 33190的文字定位规则
+// 入参: object 文字对象, text 整段原文, positions 原始字形位置
+func pdfApplyReplacement(object *TextObject, text string, positions []pdfgo.Point) {
+	const unit = 25.4 / 72
+	glyphs := make([]string, len(object.CGTransform))
+	for i, transform := range object.CGTransform {
+		glyphs[i] = transform.Glyphs
+	}
+	dx, dy := make([]float64, len(positions)-1), make([]float64, len(positions)-1)
+	for i := 1; i < len(positions); i++ {
+		dx[i-1] = (positions[i].X - positions[i-1].X) * unit
+		dy[i-1] = -(positions[i].Y - positions[i-1].Y) * unit
+	}
+	object.TextCode = []TextCode{{X: pdfNumbers(positions[0].X * unit), Y: pdfNumbers(-positions[0].Y * unit), DeltaX: pdfNumbers(dx...), DeltaY: pdfNumbers(dy...), Value: escapeOFDText(text)}}
+	object.CGTransform = []CGTransform{{CodeCount: utf8.RuneCountInString(text), GlyphCount: len(glyphs), Glyphs: strings.Join(glyphs, " ")}}
+}
+
+// pdfCompactTextRuns 将同基线连续字形合并为单条TextCode与DeltaX，并合并连续一对一CGTransform
+// 入参: object 目标文字对象, items 字形项序列
+func pdfCompactTextRuns(object *TextObject, items []pdfTextGlyphItem) {
+	if len(items) == 0 {
+		return
+	}
+	object.TextCode = make([]TextCode, 0, 1)
+	var textBuf strings.Builder
+	var glyphBuf strings.Builder
+	var deltas []float64
+	pos := 0
+	for start := 0; start < len(items); {
+		first := items[start]
+		end := start + 1
+		if first.hasTransform || first.runes == 1 {
+			for end < len(items) && math.Abs(items[end].y-first.y) <= 1e-9 && (items[end].hasTransform || items[end].runes == 1) {
+				end++
+			}
+		}
+		textBuf.Reset()
+		deltas = deltas[:0]
+		curX := first.x
+		runStart, runCount := -1, 0
+		glyphBuf.Reset()
+		flushTransform := func() {
+			if runCount == 0 {
+				return
+			}
+			object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: runStart, CodeCount: runCount, GlyphCount: runCount, Glyphs: glyphBuf.String()})
+			runStart, runCount = -1, 0
+			glyphBuf.Reset()
+		}
+		for i := start; i < end; i++ {
+			item := items[i]
+			textBuf.WriteString(item.text)
+			if i > start {
+				dx := item.x - curX
+				deltas = append(deltas, dx)
+				curX += dx
+			}
+			if !item.hasTransform {
+				flushTransform()
+			} else if item.runes == 1 {
+				if runCount == 0 {
+					runStart = pos
+				} else {
+					glyphBuf.WriteByte(' ')
+				}
+				glyphBuf.WriteString(strconv.Itoa(int(item.gid)))
+				runCount++
+			} else {
+				flushTransform()
+				object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: pos, CodeCount: item.runes, GlyphCount: 1, Glyphs: strconv.Itoa(int(item.gid))})
+			}
+			pos += item.runes
+		}
+		flushTransform()
+		code := TextCode{X: pdfNumbers(first.x), Y: pdfNumbers(first.y), Value: textBuf.String()}
+		if len(deltas) > 0 {
+			code.DeltaX = pdfNumbers(deltas...)
+		}
+		object.TextCode = append(object.TextCode, code)
+		start = end
+	}
+}
+
 // span 查找最外层替换区段，相邻区段即使原文相同也分别保留
 // 入参: text 替换文本
 // 返回: *pdfTextReplacement 区段状态，未声明时为空
@@ -109,7 +202,7 @@ func (r *pdfTextReplacements) markedContent(mark pdfgo.MarkedContentMark) error 
 		if err := r.importer.prepareSourceStructure(r.importer.ctx, mark.Reader); err != nil {
 			return err
 		}
-		r.importer.structureBindings.observe(mark.Sequence)
+		r.importer.structureBindings.observe(r.importer.ctx, mark.Sequence)
 		if mark.Sequence != nil && r.importer.structureBindings.marked != nil {
 			key, ok, err := pdfStructureContentKey(mark.Sequence)
 			if err != nil {
@@ -321,16 +414,6 @@ func (r *pdfTextReplacements) clear(nodes []pdfCompositeNode) {
 	}
 }
 
-// pdfTextGlyphItem 保存单字形的基线坐标、转义原文及字形索引，用于同行合并
-type pdfTextGlyphItem struct {
-	x            float64
-	y            float64
-	text         string
-	runes        int
-	hasTransform bool
-	gid          uint16
-}
-
 // text 保留字形及逐字基线，外部字体优先复用同名内嵌资源
 // 入参: mark PDF文字绘制信息
 // 返回: error 错误信息
@@ -445,7 +528,11 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 					return err
 				}
 			}
-			id, err = p.editor.AddExternalFont(font.Name)
+			family, bold, italic, descErr := p.externalFontDescriptor(font)
+			if descErr != nil {
+				return descErr
+			}
+			id, err = p.editor.addExternalFont(font.Name, family, "", bold, italic)
 		}
 		if err != nil {
 			return fmt.Errorf("PDF font %s resource: %w", font.Name, err)
@@ -1054,85 +1141,104 @@ func (p *pdfImporter) textOrigin(mark pdfgo.TextMark) pdfObjectOrigin {
 	return pdfObjectOrigin{sequence: mark.Sequence}
 }
 
-// pdfApplyReplacement 将整段原文映射到全部字形，字形位移遵循GB/T 33190的文字定位规则
-// 入参: object 文字对象, text 整段原文, positions 原始字形位置
-func pdfApplyReplacement(object *TextObject, text string, positions []pdfgo.Point) {
-	const unit = 25.4 / 72
-	glyphs := make([]string, len(object.CGTransform))
-	for i, transform := range object.CGTransform {
-		glyphs[i] = transform.Glyphs
+// externalFontDescriptor 从PDF字体名称与字体描述符提取家族名称及粗斜体样式
+// 入参: font PDF字体定义
+// 返回: string 字体家族名称, bool 是否粗体, bool 是否斜体, error 取消错误
+func (p *pdfImporter) externalFontDescriptor(font *pdfgo.Font) (string, bool, bool, error) {
+	if err := p.ctx.Err(); err != nil {
+		return "", false, false, err
 	}
-	dx, dy := make([]float64, len(positions)-1), make([]float64, len(positions)-1)
-	for i := 1; i < len(positions); i++ {
-		dx[i-1] = (positions[i].X - positions[i-1].X) * unit
-		dy[i-1] = -(positions[i].Y - positions[i-1].Y) * unit
+	cleanName := codecpdf.EmbeddedFontName(strings.TrimSpace(font.Name))
+	family, bold, italic := basefont.SplitNameStyle(cleanName)
+	if p.reader == nil || font.Dictionary == nil {
+		return family, bold, italic, nil
 	}
-	object.TextCode = []TextCode{{X: pdfNumbers(positions[0].X * unit), Y: pdfNumbers(-positions[0].Y * unit), DeltaX: pdfNumbers(dx...), DeltaY: pdfNumbers(dy...), Value: escapeOFDText(text)}}
-	object.CGTransform = []CGTransform{{CodeCount: utf8.RuneCountInString(text), GlyphCount: len(glyphs), Glyphs: strings.Join(glyphs, " ")}}
-}
-
-// pdfCompactTextRuns 将同基线连续字形合并为单条TextCode与DeltaX，并合并连续一对一CGTransform
-// 入参: object 目标文字对象, items 字形项序列
-func pdfCompactTextRuns(object *TextObject, items []pdfTextGlyphItem) {
-	if len(items) == 0 {
-		return
-	}
-	object.TextCode = make([]TextCode, 0, 1)
-	var textBuf strings.Builder
-	var glyphBuf strings.Builder
-	var deltas []float64
-	pos := 0
-	for start := 0; start < len(items); {
-		first := items[start]
-		end := start + 1
-		if first.hasTransform || first.runes == 1 {
-			for end < len(items) && math.Abs(items[end].y-first.y) <= 1e-9 && (items[end].hasTransform || items[end].runes == 1) {
-				end++
-			}
-		}
-		textBuf.Reset()
-		deltas = deltas[:0]
-		curX := first.x
-		runStart, runCount := -1, 0
-		glyphBuf.Reset()
-		flushTransform := func() {
-			if runCount == 0 {
-				return
-			}
-			object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: runStart, CodeCount: runCount, GlyphCount: runCount, Glyphs: glyphBuf.String()})
-			runStart, runCount = -1, 0
-			glyphBuf.Reset()
-		}
-		for i := start; i < end; i++ {
-			item := items[i]
-			textBuf.WriteString(item.text)
-			if i > start {
-				dx := item.x - curX
-				deltas = append(deltas, dx)
-				curX += dx
-			}
-			if !item.hasTransform {
-				flushTransform()
-			} else if item.runes == 1 {
-				if runCount == 0 {
-					runStart = pos
-				} else {
-					glyphBuf.WriteByte(' ')
+	dict := font.Dictionary
+	if font.Subtype == "Type0" {
+		if resolved, err := p.reader.Resolve(dict["DescendantFonts"]); err == nil {
+			if list, ok := resolved.(pdfgo.Array); ok && len(list) > 0 {
+				if descendant, err := p.reader.Resolve(list[0]); err == nil {
+					if descendantDict, ok := descendant.(pdfgo.Dictionary); ok {
+						dict = descendantDict
+					}
 				}
-				glyphBuf.WriteString(strconv.Itoa(int(item.gid)))
-				runCount++
-			} else {
-				flushTransform()
-				object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: pos, CodeCount: item.runes, GlyphCount: 1, Glyphs: strconv.Itoa(int(item.gid))})
 			}
-			pos += item.runes
 		}
-		flushTransform()
-		code := TextCode{X: pdfNumbers(first.x), Y: pdfNumbers(first.y), Value: textBuf.String()}
-		if len(deltas) > 0 {
-			code.DeltaX = pdfNumbers(deltas...)
-		}
-		object.TextCode = append(object.TextCode, code)
-		start = end
 	}
+	resolved, err := p.reader.Resolve(dict["FontDescriptor"])
+	if err != nil {
+		if err := p.ctx.Err(); err != nil {
+			return "", false, false, err
+		}
+		return family, bold, italic, nil
+	}
+	descriptor, ok := resolved.(pdfgo.Dictionary)
+	if !ok {
+		return family, bold, italic, nil
+	}
+	if descriptor["FontName"] != nil {
+		if value, err := p.reader.Resolve(descriptor["FontName"]); err == nil {
+			if name, ok := value.(pdfgo.Name); ok {
+				descFamily, descBold, descItalic := basefont.SplitNameStyle(codecpdf.EmbeddedFontName(strings.TrimSpace(string(name))))
+				bold = bold || descBold
+				italic = italic || descItalic
+				if family == "" {
+					family = descFamily
+				}
+			}
+		}
+	}
+	if descriptor["FontFamily"] != nil {
+		if text, err := p.reader.ReadAnnotationTextContext(p.ctx, pdfgo.Annotation{Dictionary: descriptor}, "FontFamily", nil); err == nil {
+			if trimmed := strings.TrimSpace(text); trimmed != "" {
+				family = trimmed
+			}
+		} else if err := p.ctx.Err(); err != nil {
+			return "", false, false, err
+		}
+	}
+	if descriptor["FontWeight"] != nil {
+		if value, err := p.reader.Resolve(descriptor["FontWeight"]); err == nil {
+			switch weight := value.(type) {
+			case pdfgo.Integer:
+				if weight >= 700 {
+					bold = true
+				}
+			case pdfgo.Real:
+				if finite(float64(weight)) && float64(weight) >= 700 {
+					bold = true
+				}
+			}
+		}
+	}
+	if descriptor["Flags"] != nil {
+		if value, err := p.reader.Resolve(descriptor["Flags"]); err == nil {
+			if flags, ok := value.(pdfgo.Integer); ok {
+				if flags&(1<<6) != 0 {
+					italic = true
+				}
+				if flags&(1<<18) != 0 {
+					bold = true
+				}
+			}
+		}
+	}
+	if descriptor["ItalicAngle"] != nil {
+		if value, err := p.reader.Resolve(descriptor["ItalicAngle"]); err == nil {
+			switch angle := value.(type) {
+			case pdfgo.Integer:
+				if angle != 0 {
+					italic = true
+				}
+			case pdfgo.Real:
+				if finite(float64(angle)) && float64(angle) != 0 {
+					italic = true
+				}
+			}
+		}
+	}
+	if err := p.ctx.Err(); err != nil {
+		return "", false, false, err
+	}
+	return family, bold, italic, nil
 }

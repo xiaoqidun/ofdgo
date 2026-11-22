@@ -61,6 +61,123 @@ type ObjectAppearance struct {
 	StrokePattern *PatternStyle
 }
 
+// editorDrawParamScope 描述编辑器绘制参数继承解析的单个资源层级
+type editorDrawParamScope struct {
+	key    string
+	parsed *parsedRes
+}
+
+// editorStyleColor 替换色值时保留未指定的颜色透明度
+// 入参: color 新颜色, before 原有效颜色
+// 返回: *FillColor 独立颜色
+func editorStyleColor(color, before *FillColor) *FillColor {
+	result := cloneEditorData(color)
+	if result != nil && result.Alpha == nil && before != nil {
+		result.Alpha = cloneEditorData(before.Alpha)
+	}
+	return result
+}
+
+// copyEditorPathStyle 按页面描边倍率复制路径外观，保留目标几何和行为
+// 入参: to 目标路径, from 来源路径, scale 来源与目标的描边倍率比
+// 返回: PathObject 独立路径副本, error 缩放编码错误
+func copyEditorPathStyle(to, from PathObject, scale float64) (PathObject, error) {
+	from = cloneEditorData(from)
+	to.Fill, to.Stroke, to.Alpha = from.Fill, from.Stroke, from.Alpha
+	to.FillColor, to.StrokeColor = from.FillColor, from.StrokeColor
+	to.LineWidth, to.Cap, to.Join, to.MiterLimit = from.LineWidth, from.Cap, from.Join, from.MiterLimit
+	to.LineWidthSet = from.LineWidthSet
+	to.MiterLimitSet = from.MiterLimitSet
+	to.DashPattern, to.DashOffset, to.DashPatternSet = from.DashPattern, from.DashOffset, true
+	if to.LineWidth == 0 && !to.LineWidthSet {
+		to.LineWidth = defaultPathLineWidth
+	}
+	if to.Cap == "" {
+		to.Cap = "Butt"
+	}
+	if to.Join == "" {
+		to.Join = "Miter"
+	}
+	if to.MiterLimit == 0 && !to.MiterLimitSet {
+		to.MiterLimit = defaultMiterLimit
+	}
+	if to.DashOffset == nil {
+		zero := 0.0
+		to.DashOffset = &zero
+	}
+	if scale != 1 {
+		to.LineWidth *= scale
+		var err error
+		to.DashPattern, err = scaleTextNumbers(to.DashPattern, scale)
+		if err != nil {
+			return PathObject{}, err
+		}
+		value := *to.DashOffset * scale
+		to.DashOffset = &value
+	}
+	return to, nil
+}
+
+// safeStrokeScale 将奇异或非有限描边倍率归一化为1，避免样式换算除零
+// 入参: scale 原始描边倍率
+// 返回: float64 安全的正有限描边倍率
+func safeStrokeScale(scale float64) float64 {
+	if scale > 0 && finite(scale) {
+		return scale
+	}
+	return 1
+}
+
+// editorStrokeScale 获取路径在页面坐标中的描边倍率，与渲染器保持一致
+// 入参: ctm 对象变换
+// 返回: float64 描边倍率
+func editorStrokeScale(ctm string) float64 {
+	m := NewMatrix(ctm)
+	return safeStrokeScale(math.Sqrt(math.Abs(m.a*m.d - m.b*m.c)))
+}
+
+// validateEditorStroke 校验路径描边尺寸、端点和虚线
+// 入参: path 路径对象
+// 返回: error 错误信息
+func validateEditorStroke(path PathObject) error {
+	if path.Join != "" && path.Join != "Miter" && path.Join != "Round" && path.Join != "Bevel" {
+		return fmt.Errorf("invalid line join %q", path.Join)
+	}
+	if !finite(path.LineWidth) || path.LineWidth < 0 || !finite(path.MiterLimit) || path.MiterLimit < 0 {
+		return fmt.Errorf("invalid path stroke dimensions")
+	}
+	if path.Cap != "" && path.Cap != "Butt" && path.Cap != "Round" && path.Cap != "Square" {
+		return fmt.Errorf("invalid line cap %q", path.Cap)
+	}
+	if path.DashOffset != nil && !finite(*path.DashOffset) {
+		return fmt.Errorf("invalid dash offset")
+	}
+	if path.DashPattern == "" {
+		return nil
+	}
+	values, err := creationNumbers(path.DashPattern, len(strings.Fields(path.DashPattern)))
+	if err != nil {
+		return err
+	}
+	if len(values) < 2 {
+		return fmt.Errorf("dash pattern requires at least two lengths")
+	}
+	total := 0.0
+	for _, value := range values {
+		if value < 0 {
+			return fmt.Errorf("dash lengths must not be negative")
+		}
+		total += value
+	}
+	if total == 0 {
+		return fmt.Errorf("dash pattern must have a positive length")
+	}
+	if !finite(total) || len(values)%2 != 0 && !finite(total*2) {
+		return fmt.Errorf("dash period overflow")
+	}
+	return nil
+}
+
 // ApplyAppearance 原子更新外观、链接、图片边框及图案布局，支持一次撤销
 // 入参: page 页面索引, ids 对象标识, appearance 外观增量
 // 返回: error 错误信息
@@ -399,12 +516,6 @@ func (e *Editor) SetImageBorders(page int, ids []string, border *ImageBorder) er
 	return e.updateObjects(page, objects, true)
 }
 
-// editorDrawParamScope 描述编辑器绘制参数继承解析的单个资源层级
-type editorDrawParamScope struct {
-	key    string
-	parsed *parsedRes
-}
-
 // addDrawParam 校验并注册绘制参数，资源操作可传递取消上下文
 // 入参: ctx 取消上下文, draw 绘制参数
 // 返回: string 资源标识, error 校验、编码或取消错误
@@ -653,20 +764,20 @@ func (e *Editor) resolveEditorStyleDefaults(object GraphicObject, base *DrawPara
 	if object.Type == "PathObject" {
 		obj := &object.PathObject
 		style = mergeDrawParam(*style, &DrawParam{LineWidth: obj.LineWidth, LineWidthSet: obj.LineWidthSet, Join: obj.Join, Cap: obj.Cap,
-			MiterLimit: obj.MiterLimit, MiterLimitSet: obj.MiterLimitSet, DashPattern: obj.DashPattern, dashPatternSet: obj.dashPatternSet, DashOffset: obj.DashOffset,
+			MiterLimit: obj.MiterLimit, MiterLimitSet: obj.MiterLimitSet, DashPattern: obj.DashPattern, DashPatternSet: obj.DashPatternSet, DashOffset: obj.DashOffset,
 			FillColor: obj.FillColor, StrokeColor: obj.StrokeColor})
 		obj.DrawParam = ""
 		obj.LineWidth, obj.Join, obj.Cap = style.LineWidth, style.Join, style.Cap
 		obj.LineWidthSet = style.LineWidthSet
 		obj.MiterLimit, obj.DashPattern, obj.DashOffset = style.MiterLimit, style.DashPattern, style.DashOffset
 		obj.MiterLimitSet = style.MiterLimitSet
-		obj.dashPatternSet = style.dashPatternSet
+		obj.DashPatternSet = style.DashPatternSet
 		obj.FillColor, obj.StrokeColor = style.FillColor, style.StrokeColor
 	} else {
 		obj := &object.TextObject
 		style = mergeDrawParam(*style, &DrawParam{LineWidth: obj.LineWidth, LineWidthSet: obj.LineWidthSet, Join: obj.Join,
 			MiterLimit: obj.MiterLimit, MiterLimitSet: obj.MiterLimitSet, FillColor: obj.FillColor, StrokeColor: obj.StrokeColor, Cap: obj.Cap,
-			DashPattern: obj.DashPattern, dashPatternSet: obj.dashPatternSet, DashOffset: obj.DashOffset})
+			DashPattern: obj.DashPattern, DashPatternSet: obj.DashPatternSet, DashOffset: obj.DashOffset})
 		text := mergeDrawParam(*dp, &DrawParam{Font: obj.Font, Size: obj.Size, Weight: obj.Weight, Italic: obj.Italic})
 		obj.DrawParam = ""
 		obj.Font, obj.Size, obj.Weight, obj.Italic = text.Font, text.Size, text.Weight, text.Italic
@@ -674,7 +785,7 @@ func (e *Editor) resolveEditorStyleDefaults(object GraphicObject, base *DrawPara
 		obj.MiterLimitSet = style.MiterLimitSet
 		obj.LineWidthSet = style.LineWidthSet
 		obj.Cap, obj.DashPattern, obj.DashOffset = style.Cap, style.DashPattern, style.DashOffset
-		obj.dashPatternSet = style.dashPatternSet
+		obj.DashPatternSet = style.DashPatternSet
 		obj.FillColor, obj.StrokeColor = style.FillColor, style.StrokeColor
 	}
 	for _, color := range []*FillColor{style.FillColor, (*FillColor)(style.StrokeColor)} {
@@ -745,7 +856,7 @@ func (e *Editor) styleObject(object GraphicObject, style ObjectStyle) (GraphicOb
 		}
 		if style.DashPattern != nil {
 			path.DashPattern = *style.DashPattern
-			path.dashPatternSet = path.DashPattern == ""
+			path.DashPatternSet = path.DashPattern == ""
 		}
 		if style.DashOffset != nil {
 			path.DashOffset = style.DashOffset
@@ -774,17 +885,6 @@ func (e *Editor) styleObject(object GraphicObject, style ObjectStyle) (GraphicOb
 		return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
 	}
 	return cloneEditorData(object), nil
-}
-
-// editorStyleColor 替换色值时保留未指定的颜色透明度
-// 入参: color 新颜色, before 原有效颜色
-// 返回: *FillColor 独立颜色
-func editorStyleColor(color, before *FillColor) *FillColor {
-	result := cloneEditorData(color)
-	if result != nil && result.Alpha == nil && before != nil {
-		result.Alpha = cloneEditorData(before.Alpha)
-	}
-	return result
 }
 
 // validateCopyStyle 校验样式来源，不分配资源或改写对象
@@ -821,57 +921,6 @@ func (e *Editor) validateCopyStyle(source GraphicObject) error {
 	return nil
 }
 
-// copyEditorPathStyle 按页面描边倍率复制路径外观，保留目标几何和行为
-// 入参: to 目标路径, from 来源路径, scale 来源与目标的描边倍率比
-// 返回: PathObject 独立路径副本, error 缩放编码错误
-func copyEditorPathStyle(to, from PathObject, scale float64) (PathObject, error) {
-	from = cloneEditorData(from)
-	to.Fill, to.Stroke, to.Alpha = from.Fill, from.Stroke, from.Alpha
-	to.FillColor, to.StrokeColor = from.FillColor, from.StrokeColor
-	to.LineWidth, to.Cap, to.Join, to.MiterLimit = from.LineWidth, from.Cap, from.Join, from.MiterLimit
-	to.LineWidthSet = from.LineWidthSet
-	to.MiterLimitSet = from.MiterLimitSet
-	to.DashPattern, to.DashOffset, to.dashPatternSet = from.DashPattern, from.DashOffset, true
-	if to.LineWidth == 0 && !to.LineWidthSet {
-		to.LineWidth = defaultPathLineWidth
-	}
-	if to.Cap == "" {
-		to.Cap = "Butt"
-	}
-	if to.Join == "" {
-		to.Join = "Miter"
-	}
-	if to.MiterLimit == 0 && !to.MiterLimitSet {
-		to.MiterLimit = defaultMiterLimit
-	}
-	if to.DashOffset == nil {
-		zero := 0.0
-		to.DashOffset = &zero
-	}
-	if scale != 1 {
-		to.LineWidth *= scale
-		var err error
-		to.DashPattern, err = scaleTextNumbers(to.DashPattern, scale)
-		if err != nil {
-			return PathObject{}, err
-		}
-		value := *to.DashOffset * scale
-		to.DashOffset = &value
-	}
-	return to, nil
-}
-
-// editorStrokeScale 获取路径在页面坐标中的描边倍率，与渲染器保持一致
-// 入参: ctm 对象变换
-// 返回: float64 描边倍率
-func editorStrokeScale(ctm string) float64 {
-	m := NewMatrix(ctm)
-	if scale := math.Sqrt(math.Abs(m.a*m.d - m.b*m.c)); scale > 0 {
-		return scale
-	}
-	return 1
-}
-
 // validateImageBorder 校验图片边框的线型、圆角和绘制颜色
 // 入参: border 边框
 // 返回: error 错误信息
@@ -899,46 +948,4 @@ func (v *editorValidation) validateImageBorder(border *ImageBorder) error {
 		return err
 	}
 	return v.editorColor((*FillColor)(border.BorderColor))
-}
-
-// validateEditorStroke 校验路径描边尺寸、端点和虚线
-// 入参: path 路径对象
-// 返回: error 错误信息
-func validateEditorStroke(path PathObject) error {
-	if path.Join != "" && path.Join != "Miter" && path.Join != "Round" && path.Join != "Bevel" {
-		return fmt.Errorf("invalid line join %q", path.Join)
-	}
-	if !finite(path.LineWidth) || path.LineWidth < 0 || !finite(path.MiterLimit) || path.MiterLimit < 0 {
-		return fmt.Errorf("invalid path stroke dimensions")
-	}
-	if path.Cap != "" && path.Cap != "Butt" && path.Cap != "Round" && path.Cap != "Square" {
-		return fmt.Errorf("invalid line cap %q", path.Cap)
-	}
-	if path.DashOffset != nil && !finite(*path.DashOffset) {
-		return fmt.Errorf("invalid dash offset")
-	}
-	if path.DashPattern == "" {
-		return nil
-	}
-	values, err := creationNumbers(path.DashPattern, len(strings.Fields(path.DashPattern)))
-	if err != nil {
-		return err
-	}
-	if len(values) < 2 {
-		return fmt.Errorf("dash pattern requires at least two lengths")
-	}
-	total := 0.0
-	for _, value := range values {
-		if value < 0 {
-			return fmt.Errorf("dash lengths must not be negative")
-		}
-		total += value
-	}
-	if total == 0 {
-		return fmt.Errorf("dash pattern must have a positive length")
-	}
-	if !finite(total) || len(values)%2 != 0 && !finite(total*2) {
-		return fmt.Errorf("dash period overflow")
-	}
-	return nil
 }

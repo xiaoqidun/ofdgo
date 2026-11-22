@@ -19,6 +19,74 @@ import (
 	"math"
 )
 
+// u3dPlaneDistance 计算未归一化的平面有符号距离
+// 入参: plane 平面方程, point 点坐标
+// 返回: float64 有符号距离
+func u3dPlaneDistance(plane [4]float64, point u3dVector) float64 {
+	return plane[0]*point[0] + plane[1]*point[1] + plane[2]*point[2] + plane[3]
+}
+
+// u3dClipFraction 计算异侧有限距离的交点比例，避免绝对值求和溢出
+// 入参: a 起点距离, b 终点距离
+// 返回: float64 插值比例
+func u3dClipFraction(a, b float64) float64 {
+	a, b = math.Abs(a), math.Abs(b)
+	scale := max(a, b)
+	if scale == 0 {
+		return 0
+	}
+	a, b = a/scale, b/scale
+	return a / (a + b)
+}
+
+// u3dInterpolate 在相机空间插值位置、颜色与纹理输入
+// 入参: a 起点, b 终点, t 比例
+// 返回: u3dVertex 插值顶点
+func u3dInterpolate(a, b u3dVertex, t float64) u3dVertex {
+	var result u3dVertex
+	for i := range result.point {
+		result.point[i] = a.point[i]*(1-t) + b.point[i]*t
+	}
+	for i := range result.color {
+		result.color[i] = a.color[i]*(1-t) + b.color[i]*t
+	}
+	result.textureMask = a.textureMask | b.textureMask
+	result.opacityOverride = a.opacityOverride
+	if result.textureMask != 0 {
+		for layer := range result.texture {
+			if result.textureMask&(1<<layer) == 0 {
+				continue
+			}
+			for c := range result.texture[layer] {
+				result.texture[layer][c] = a.texture[layer][c]*(1-t) + b.texture[layer][c]*t
+			}
+		}
+	}
+	return result
+}
+
+// u3dClipLine 将线段裁至平面正侧
+// 入参: a 起点, b 终点, plane 平面方程
+// 返回: bool 是否保留, error 数值错误
+func u3dClipLine(a, b *u3dVertex, plane [4]float64) (bool, error) {
+	da, db := u3dPlaneDistance(plane, a.point), u3dPlaneDistance(plane, b.point)
+	if !finite(da) || !finite(db) {
+		return false, fmt.Errorf("invalid U3D line clip distance")
+	}
+	if da < 0 && db < 0 {
+		return false, nil
+	}
+	if (da < 0) != (db < 0) {
+		intersection := u3dInterpolate(*a, *b, u3dClipFraction(da, db))
+		if da < 0 {
+			*a = intersection
+		} else {
+			*b = intersection
+		}
+	}
+	return true, nil
+}
+
 // drawPrimitives 绘制作者点集及线集，独立着色且不参与面的背向剔除
 // 入参: instance 场景实例, node 模型节点, mesh 属性数组, positions 世界位置, normals 世界法线, pass 绘制轮次, passIndex 轮次索引
 // 返回: error 几何、资源或取消错误
@@ -212,52 +280,6 @@ func (r *Renderer) frustumPlanes() [6][4]float64 {
 	return planes
 }
 
-// u3dPlaneDistance 计算未归一化的平面有符号距离
-// 入参: plane 平面方程, point 点坐标
-// 返回: float64 有符号距离
-func u3dPlaneDistance(plane [4]float64, point u3dVector) float64 {
-	return plane[0]*point[0] + plane[1]*point[1] + plane[2]*point[2] + plane[3]
-}
-
-// u3dClipFraction 计算异侧有限距离的交点比例，避免绝对值求和溢出
-// 入参: a 起点距离, b 终点距离
-// 返回: float64 插值比例
-func u3dClipFraction(a, b float64) float64 {
-	a, b = math.Abs(a), math.Abs(b)
-	scale := max(a, b)
-	if scale == 0 {
-		return 0
-	}
-	a, b = a/scale, b/scale
-	return a / (a + b)
-}
-
-// u3dInterpolate 在相机空间插值位置、颜色与纹理输入
-// 入参: a 起点, b 终点, t 比例
-// 返回: u3dVertex 插值顶点
-func u3dInterpolate(a, b u3dVertex, t float64) u3dVertex {
-	var result u3dVertex
-	for i := range result.point {
-		result.point[i] = a.point[i]*(1-t) + b.point[i]*t
-	}
-	for i := range result.color {
-		result.color[i] = a.color[i]*(1-t) + b.color[i]*t
-	}
-	result.textureMask = a.textureMask | b.textureMask
-	result.opacityOverride = a.opacityOverride
-	if result.textureMask != 0 {
-		for layer := range result.texture {
-			if result.textureMask&(1<<layer) == 0 {
-				continue
-			}
-			for c := range result.texture[layer] {
-				result.texture[layer][c] = a.texture[layer][c]*(1-t) + b.texture[layer][c]*t
-			}
-		}
-	}
-	return result
-}
-
 // sectionIntersection 绘制原三角面与指定剖切面的交线，其他剖切面仍参与裁剪
 // 入参: triangle 原三角面, index 剖切面索引
 // 返回: error 数值、资源或取消错误
@@ -325,28 +347,6 @@ func (r *Renderer) sectionIntersection(triangle [3]u3dVertex, index int) error {
 	}
 	normal := u3dTriangleNormal([3]u3dVector{triangle[0].point, triangle[1].point, triangle[2].point})
 	return r.rasterSectionLine(a, b, *section.intersection, normal, triangle[0].point)
-}
-
-// u3dClipLine 将线段裁至平面正侧
-// 入参: a 起点, b 终点, plane 平面方程
-// 返回: bool 是否保留, error 数值错误
-func u3dClipLine(a, b *u3dVertex, plane [4]float64) (bool, error) {
-	da, db := u3dPlaneDistance(plane, a.point), u3dPlaneDistance(plane, b.point)
-	if !finite(da) || !finite(db) {
-		return false, fmt.Errorf("invalid U3D line clip distance")
-	}
-	if da < 0 && db < 0 {
-		return false, nil
-	}
-	if (da < 0) != (db < 0) {
-		intersection := u3dInterpolate(*a, *b, u3dClipFraction(da, db))
-		if da < 0 {
-			*a = intersection
-		} else {
-			*b = intersection
-		}
-	}
-	return true, nil
 }
 
 // rasterSectionLine 绘制单像素不透明交线，透视深度使用倒数插值

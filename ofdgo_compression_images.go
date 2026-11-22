@@ -48,397 +48,10 @@ type compressionImages struct {
 	patternVisits map[compressionPatternKey]bool
 }
 
-// DrawObject 汇总图片、替换图及文字、路径和图像边框底纹的尺寸，不使用裁剪后的局部面积
-// 入参: object 图形对象, state 继承状态
-// 返回: error 取消或几何错误
-func (v *compressionImages) DrawObject(object *GraphicObject, state RenderState) error {
-	if err := v.ctx.Err(); err != nil {
-		return err
-	}
-	switch object.Type {
-	case "PathObject":
-		return v.objectPatterns(object.PathObject, state)
-	case "TextObject":
-		text := object.TextObject
-		return v.objectPatterns(PathObject{Boundary: text.Boundary, CTM: text.CTM, DrawParam: text.DrawParam, FillColor: text.FillColor, StrokeColor: text.StrokeColor}, state)
-	case "ImageObject":
-	default:
-		return nil
-	}
-	img := object.ImageObject
-	ids := [2]string{editorResourceID(img.ResourceID), editorResourceID(img.Substitution)}
-	if ids[0] == "" || img.Substitution != "" && ids[1] == "" {
-		return fmt.Errorf("invalid image resource")
-	}
-	box, err := ParseBox(img.Boundary)
-	if err != nil {
-		return err
-	}
-	if border := img.Border; border != nil && border.BorderColor != nil && border.BorderColor.Pattern != nil {
-		matrix, _ := renderObjectMatrix(img.Boundary, IdentityMatrix, state)
-		if err := v.patternImages((*FillColor)(border.BorderColor), matrix); err != nil {
-			return err
-		}
-	}
-	local := NewMatrix(img.CTM)
-	if img.CTM == "" {
-		local = Matrix{a: box.W, d: box.H}
-	}
-	matrix, _ := renderObjectMatrix(img.Boundary, local, state)
-	size := compressionImageSize(math.Hypot(matrix.a, matrix.b), math.Hypot(matrix.c, matrix.d), v.dpi)
-	return v.recordSize(ids, size)
-}
-
-// VisitComposite 按矢量资源的完整变换统计缩略图和替换图，不以裁剪区域缩减尺寸
-// 入参: object 矢量资源或复合图元, state 已包含当前图元变换的状态
-// 返回: error 取消、资源标识或几何错误
-func (v *compressionImages) VisitComposite(object *CompositeGraphicUnit, state RenderState) error {
-	if err := v.ctx.Err(); err != nil {
-		return err
-	}
-	if object.Thumbnail == "" && object.Substitution == "" {
-		return nil
-	}
-	ids := [2]string{editorResourceID(object.Thumbnail), editorResourceID(object.Substitution)}
-	if object.Thumbnail != "" && ids[0] == "" || object.Substitution != "" && ids[1] == "" {
-		return fmt.Errorf("invalid composite image resource")
-	}
-	matrix := IdentityMatrix
-	if state.Parent != nil {
-		matrix = *state.Parent
-	}
-	size := compressionImageSize(object.Width*math.Hypot(matrix.a, matrix.b), object.Height*math.Hypot(matrix.c, matrix.d), v.dpi)
-	return v.recordSize(ids, size)
-}
-
-// DrawStamp 保留签章内容，不参与图片降采样
-// 入参: stamp 印章
-// 返回: error 始终为空
-func (v *compressionImages) DrawStamp(stamp Stamp) error { return nil }
-
-// IncludeHidden 将隐藏内容纳入尺寸分析，保留图片在所有使用位置的精度
-// 返回: bool 始终为真
-func (v *compressionImages) IncludeHidden() bool { return true }
-
-// SkipClips 按完整图片尺寸分析，不加载裁剪几何或文字轮廓
-// 返回: bool 始终为真
-func (v *compressionImages) SkipClips() bool { return true }
-
-// recordSize 按当前资源作用域解析包内媒体路径并合并同一文件的最大像素需求
-// 入参: ids 图像标识，空值不统计, size 当前像素需求
-// 返回: error 尺寸无效时返回错误
-func (v *compressionImages) recordSize(ids [2]string, size image.Point) error {
-	if size.X == 0 || size.Y == 0 {
-		return fmt.Errorf("invalid image placement")
-	}
-	r := v.renderer.Reader
-	for _, id := range ids {
-		if id == "" {
-			continue
-		}
-		rel, ok := r.resolveResPathScoped(v.renderer.pageResources, id)
-		if !ok {
-			continue
-		}
-		name := r.ResPath(rel)
-		if name == "" || name == "." {
-			continue
-		}
-		old := v.sizes[name]
-		v.sizes[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
-	}
-	return nil
-}
-
-// objectPatterns 统计文字和路径的填充及描边底纹，保留绘制参数继承关系
-// 入参: object 对象样式及坐标, state 继承状态
-// 返回: error 底纹分析错误
-func (v *compressionImages) objectPatterns(object PathObject, state RenderState) error {
-	fill, stroke := object.FillColor, (*FillColor)(object.StrokeColor)
-	if defaults := v.renderer.drawParamDefaults(object.DrawParam, state.Defaults); defaults != nil {
-		if fill == nil {
-			fill = defaults.FillColor
-		}
-		if stroke == nil {
-			stroke = (*FillColor)(defaults.StrokeColor)
-		}
-	}
-	if (fill == nil || fill.Pattern == nil) && (stroke == nil || stroke.Pattern == nil) {
-		return nil
-	}
-	matrix, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
-	for _, color := range [2]*FillColor{fill, stroke} {
-		if color != nil && color.Pattern != nil {
-			if err := v.patternImages(color, matrix); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// patternImages 按独立单元坐标汇总底纹图片及缩略图，不展开重复铺排的单元
-// 入参: color 底纹颜色, object 对象到页面矩阵
-// 返回: error 取消、循环引用或变换错误
-func (v *compressionImages) patternImages(color *FillColor, object Matrix) error {
-	if err := v.ctx.Err(); err != nil {
-		return err
-	}
-	pattern := color.Pattern
-	if v.patterns[pattern] {
-		return fmt.Errorf("cyclic pattern image reference")
-	}
-	if !finite(pattern.Width) || !finite(pattern.Height) || pattern.Width <= 0 || pattern.Height <= 0 {
-		return fmt.Errorf("invalid pattern cell size")
-	}
-	matrix := NewMatrix(pattern.CTM)
-	switch pattern.RelativeTo {
-	case "", "Object":
-		matrix = object.Multiply(matrix)
-	case "Page":
-		if v.patternPage != nil {
-			matrix = v.patternPage.Multiply(matrix)
-		}
-	default:
-		return fmt.Errorf("invalid pattern coordinate system")
-	}
-	if !finite(matrix.a) || !finite(matrix.b) || !finite(matrix.c) || !finite(matrix.d) {
-		return fmt.Errorf("invalid pattern transform")
-	}
-	matrix.e, matrix.f = 0, 0
-	key := compressionPatternKey{pattern: pattern, linear: [4]float64{matrix.a, matrix.b, matrix.c, matrix.d}}
-	if v.patternVisits[key] {
-		return nil
-	}
-	if len(v.patternVisits) >= compressionPatternImageLimit {
-		return fmt.Errorf("pattern image analysis limit exceeded")
-	}
-	if v.patterns == nil {
-		v.patterns = make(map[*Pattern]bool)
-		v.patternVisits = make(map[compressionPatternKey]bool)
-	}
-	v.patternVisits[key] = true
-	v.patterns[pattern] = true
-	defer delete(v.patterns, pattern)
-	if pattern.CellContent.Thumbnail != "" {
-		id := editorResourceID(pattern.CellContent.Thumbnail)
-		if id == "" {
-			return fmt.Errorf("invalid pattern thumbnail resource")
-		}
-		size := compressionImageSize(pattern.Width*math.Hypot(matrix.a, matrix.b), pattern.Height*math.Hypot(matrix.c, matrix.d), v.dpi)
-		if err := v.recordSize([2]string{id}, size); err != nil {
-			return err
-		}
-	}
-	columns, rows := 1, 1
-	switch pattern.ReflectMethod {
-	case "", "Normal":
-	case "Column":
-		columns = 2
-	case "Row":
-		rows = 2
-	case "RowAndColumn":
-		columns, rows = 2, 2
-	default:
-		return fmt.Errorf("invalid pattern reflection")
-	}
-	parent := v.patternPage
-	defer func() { v.patternPage = parent }()
-	solid := FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace}
-	defaults := &DrawParam{FillColor: &solid, StrokeColor: (*StrokeColor)(&solid)}
-	for column := range columns {
-		for row := range rows {
-			cell := matrix.Multiply(Matrix{a: float64(1 - 2*column), d: float64(1 - 2*row)})
-			v.patternPage = &cell
-			for member := range pattern.CellContent.objects() {
-				if err := v.ctx.Err(); err != nil {
-					return err
-				}
-				if err := v.renderer.WalkObject(&member, RenderState{Defaults: defaults, Parent: &cell, BoundaryInCTM: true}, v); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
 // compressionPatternKey 复用相同底纹的尺寸分析，平移不影响像素需求
 type compressionPatternKey struct {
 	pattern *Pattern
 	linear  [4]float64
-}
-
-// compressionImagePlan 分文档合并图片需求，版本文件的当前入口独立于其他文档处理
-// 入参: ctx 取消上下文, options 压缩配置
-// 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
-func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOptions) (map[string]bool, map[string]image.Point, error) {
-	return r.compressionImagePlanProtected(ctx, options, nil, nil)
-}
-
-// compressionImagePlanProtected 按签名与全包历史版本保护边界分文档合并图片需求，受保护文档和文件不参与有损降采样
-// 入参: ctx 取消上下文, options 压缩配置, protectedDocs 受签名保护的文档索引, protectedFiles 受签名保护的文件路径
-// 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
-func (r *Reader) compressionImagePlanProtected(ctx context.Context, options CompressionOptions, protectedDocs map[int]bool, protectedFiles map[string]bool) (map[string]bool, map[string]image.Point, error) {
-	if options.Mode != CompressionLossy {
-		return nil, nil, ctx.Err()
-	}
-	images := make(map[string]bool)
-	sizes := make(map[string]image.Point)
-	blocked := make(map[string]bool)
-	currentVersioned := r.currentVersioned()
-	var versionBlocked map[string]bool
-	if r.packageVersioned() {
-		versionBlocked = make(map[string]bool)
-		for index := range r.DocumentCount() {
-			if err := ctx.Err(); err != nil {
-				return nil, nil, err
-			}
-			if !r.OFD.DocBody[index].versioned {
-				continue
-			}
-			files, err := r.documentNonCurrentVersionFiles(ctx, index)
-			if err != nil {
-				return nil, nil, err
-			}
-			maps.Copy(versionBlocked, files)
-		}
-	}
-	current := make(map[string]bool)
-	for offset := 0; offset < r.DocumentCount(); offset++ {
-		if err := ctx.Err(); err != nil {
-			return nil, nil, err
-		}
-		index := offset
-		if currentVersioned {
-			index = (r.documentIndex + offset) % r.DocumentCount()
-		}
-		if protectedDocs[index] {
-			continue
-		}
-		document := r
-		if index != r.DocumentIndex() {
-			var err error
-			document, err = r.DocumentContext(ctx, index)
-			if err != nil {
-				return nil, nil, err
-			}
-		}
-		catalog, err := document.Images(ctx)
-		if err != nil {
-			if document != r {
-				document.Close()
-			}
-			return nil, nil, err
-		}
-		if len(catalog) == 0 {
-			if document != r {
-				document.Close()
-			}
-			continue
-		}
-		var demands map[string]image.Point
-		masks, geometry, err := document.compressionImageSafety(ctx, catalog)
-		if err == nil && geometry {
-			demands, err = document.compressionImageSizes(ctx, catalog, options.ImageDPI())
-		}
-		if document != r {
-			document.Close()
-		}
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, img := range catalog {
-			name := cleanPackagePath(img.Location)
-			if protectedFiles[name] || versionBlocked[name] && (!currentVersioned || index != r.documentIndex) {
-				images[name] = false
-				blocked[name] = true
-				delete(sizes, name)
-				continue
-			}
-			if currentVersioned {
-				if index == r.documentIndex {
-					current[name] = true
-				} else if current[name] {
-					continue
-				}
-			}
-			if old, ok := images[name]; !ok || old {
-				images[name] = !masks[name]
-			}
-			size := demands[name]
-			if size.X <= 0 || size.Y <= 0 || masks[name] {
-				blocked[name] = true
-				delete(sizes, name)
-				continue
-			}
-			if !blocked[name] {
-				old := sizes[name]
-				sizes[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
-			}
-		}
-	}
-	return images, sizes, ctx.Err()
-}
-
-// compressionImageSizes 按正文、模板、注解及底纹的实际变换汇总图片尺寸，包括隐藏内容
-// 模板使用独立页面坐标，统一分析一次，避免随引用页数重复展开
-// 入参: ctx 取消上下文, images 图片资源, dpi 分辨率上限
-// 返回: map[string]image.Point 资源像素需求, error 取消错误
-func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, dpi int) (map[string]image.Point, error) {
-	if dpi == 0 {
-		return nil, nil
-	}
-	doc, err := r.DocContext(ctx)
-	if err != nil {
-		return nil, ctx.Err()
-	}
-	renderer := NewRenderer(r, WithRenderBackends(RenderBackends{}))
-	renderer.pageContext = ctx
-	defer renderer.ClearCache()
-	visitor := &compressionImages{ctx: ctx, dpi: dpi, sizes: make(map[string]image.Point), renderer: renderer}
-	for _, ref := range doc.Pages.Page {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		page, err := r.PageContentContext(ctx, ref)
-		if err != nil {
-			return nil, ctx.Err()
-		}
-		content := *page
-		content.Template = nil
-		if err := renderer.WalkPage(&content, visitor); err != nil {
-			return nil, ctx.Err()
-		}
-	}
-	for _, ref := range r.doc.CommonData.TemplatePage {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		template := renderer.loadTemplate(ref.ID)
-		if template == nil {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		unbind := renderer.bindPageResources(template)
-		for order := range 3 {
-			if err := renderer.walkLayers(template.Content.Layer, order, nil, visitor); err != nil {
-				unbind()
-				return nil, ctx.Err()
-			}
-		}
-		unbind()
-	}
-	result := make(map[string]image.Point)
-	for _, img := range images {
-		name := cleanPackagePath(img.Location)
-		size := visitor.sizes[name]
-		old := result[name]
-		result[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
-	}
-	return result, ctx.Err()
 }
 
 // compressionImageSize 将毫米显示尺寸换算为像素，非法尺寸不降采样
@@ -686,4 +299,391 @@ func optimizeTIFFResource(ctx context.Context, data []byte, options CompressionO
 		return data, ctx.Err()
 	}
 	return optimizeRasterResource(ctx, data, pixels, options, size, density)
+}
+
+// DrawObject 汇总图片、替换图及文字、路径和图像边框底纹的尺寸，不使用裁剪后的局部面积
+// 入参: object 图形对象, state 继承状态
+// 返回: error 取消或几何错误
+func (v *compressionImages) DrawObject(object *GraphicObject, state RenderState) error {
+	if err := v.ctx.Err(); err != nil {
+		return err
+	}
+	switch object.Type {
+	case "PathObject":
+		return v.objectPatterns(object.PathObject, state)
+	case "TextObject":
+		text := object.TextObject
+		return v.objectPatterns(PathObject{Boundary: text.Boundary, CTM: text.CTM, DrawParam: text.DrawParam, FillColor: text.FillColor, StrokeColor: text.StrokeColor}, state)
+	case "ImageObject":
+	default:
+		return nil
+	}
+	img := object.ImageObject
+	ids := [2]string{editorResourceID(img.ResourceID), editorResourceID(img.Substitution)}
+	if ids[0] == "" || img.Substitution != "" && ids[1] == "" {
+		return fmt.Errorf("invalid image resource")
+	}
+	box, err := ParseBox(img.Boundary)
+	if err != nil {
+		return err
+	}
+	if border := img.Border; border != nil && border.BorderColor != nil && border.BorderColor.Pattern != nil {
+		matrix, _ := renderObjectMatrix(img.Boundary, IdentityMatrix(), state)
+		if err := v.patternImages((*FillColor)(border.BorderColor), matrix); err != nil {
+			return err
+		}
+	}
+	local := NewMatrix(img.CTM)
+	if img.CTM == "" {
+		local = Matrix{a: box.W, d: box.H}
+	}
+	matrix, _ := renderObjectMatrix(img.Boundary, local, state)
+	size := compressionImageSize(math.Hypot(matrix.a, matrix.b), math.Hypot(matrix.c, matrix.d), v.dpi)
+	return v.recordSize(ids, size)
+}
+
+// VisitComposite 按矢量资源的完整变换统计缩略图和替换图，不以裁剪区域缩减尺寸
+// 入参: object 矢量资源或复合图元, state 已包含当前图元变换的状态
+// 返回: error 取消、资源标识或几何错误
+func (v *compressionImages) VisitComposite(object *CompositeGraphicUnit, state RenderState) error {
+	if err := v.ctx.Err(); err != nil {
+		return err
+	}
+	if object.Thumbnail == "" && object.Substitution == "" {
+		return nil
+	}
+	ids := [2]string{editorResourceID(object.Thumbnail), editorResourceID(object.Substitution)}
+	if object.Thumbnail != "" && ids[0] == "" || object.Substitution != "" && ids[1] == "" {
+		return fmt.Errorf("invalid composite image resource")
+	}
+	matrix := IdentityMatrix()
+	if state.Parent != nil {
+		matrix = *state.Parent
+	}
+	size := compressionImageSize(object.Width*math.Hypot(matrix.a, matrix.b), object.Height*math.Hypot(matrix.c, matrix.d), v.dpi)
+	return v.recordSize(ids, size)
+}
+
+// DrawStamp 保留签章内容，不参与图片降采样
+// 入参: stamp 印章
+// 返回: error 始终为空
+func (v *compressionImages) DrawStamp(stamp Stamp) error { return nil }
+
+// IncludeHidden 将隐藏内容纳入尺寸分析，保留图片在所有使用位置的精度
+// 返回: bool 始终为真
+func (v *compressionImages) IncludeHidden() bool { return true }
+
+// SkipClips 按完整图片尺寸分析，不加载裁剪几何或文字轮廓
+// 返回: bool 始终为真
+func (v *compressionImages) SkipClips() bool { return true }
+
+// recordSize 按当前资源作用域解析包内媒体路径并合并同一文件的最大像素需求
+// 入参: ids 图像标识，空值不统计, size 当前像素需求
+// 返回: error 尺寸无效时返回错误
+func (v *compressionImages) recordSize(ids [2]string, size image.Point) error {
+	if size.X == 0 || size.Y == 0 {
+		return fmt.Errorf("invalid image placement")
+	}
+	r := v.renderer.reader
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		rel, ok := r.resolveResPathScoped(v.renderer.pageResources, id)
+		if !ok {
+			continue
+		}
+		name := r.ResPath(rel)
+		if name == "" || name == "." {
+			continue
+		}
+		old := v.sizes[name]
+		v.sizes[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
+	}
+	return nil
+}
+
+// objectPatterns 统计文字和路径的填充及描边底纹，保留绘制参数继承关系
+// 入参: object 对象样式及坐标, state 继承状态
+// 返回: error 底纹分析错误
+func (v *compressionImages) objectPatterns(object PathObject, state RenderState) error {
+	fill, stroke := object.FillColor, (*FillColor)(object.StrokeColor)
+	if defaults := v.renderer.drawParamDefaults(object.DrawParam, state.Defaults); defaults != nil {
+		if fill == nil {
+			fill = defaults.FillColor
+		}
+		if stroke == nil {
+			stroke = (*FillColor)(defaults.StrokeColor)
+		}
+	}
+	if (fill == nil || fill.Pattern == nil) && (stroke == nil || stroke.Pattern == nil) {
+		return nil
+	}
+	matrix, _ := renderObjectMatrix(object.Boundary, IdentityMatrix(), state)
+	for _, color := range [2]*FillColor{fill, stroke} {
+		if color != nil && color.Pattern != nil {
+			if err := v.patternImages(color, matrix); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// patternImages 按独立单元坐标汇总底纹图片及缩略图，不展开重复铺排的单元
+// 入参: color 底纹颜色, object 对象到页面矩阵
+// 返回: error 取消、循环引用或变换错误
+func (v *compressionImages) patternImages(color *FillColor, object Matrix) error {
+	if err := v.ctx.Err(); err != nil {
+		return err
+	}
+	pattern := color.Pattern
+	if v.patterns[pattern] {
+		return fmt.Errorf("cyclic pattern image reference")
+	}
+	if !finite(pattern.Width) || !finite(pattern.Height) || pattern.Width <= 0 || pattern.Height <= 0 {
+		return fmt.Errorf("invalid pattern cell size")
+	}
+	matrix := NewMatrix(pattern.CTM)
+	switch pattern.RelativeTo {
+	case "", "Object":
+		matrix = object.Multiply(matrix)
+	case "Page":
+		if v.patternPage != nil {
+			matrix = v.patternPage.Multiply(matrix)
+		}
+	default:
+		return fmt.Errorf("invalid pattern coordinate system")
+	}
+	if !finite(matrix.a) || !finite(matrix.b) || !finite(matrix.c) || !finite(matrix.d) {
+		return fmt.Errorf("invalid pattern transform")
+	}
+	matrix.e, matrix.f = 0, 0
+	key := compressionPatternKey{pattern: pattern, linear: [4]float64{matrix.a, matrix.b, matrix.c, matrix.d}}
+	if v.patternVisits[key] {
+		return nil
+	}
+	if len(v.patternVisits) >= compressionPatternImageLimit {
+		return fmt.Errorf("pattern image analysis limit exceeded")
+	}
+	if v.patterns == nil {
+		v.patterns = make(map[*Pattern]bool)
+		v.patternVisits = make(map[compressionPatternKey]bool)
+	}
+	v.patternVisits[key] = true
+	v.patterns[pattern] = true
+	defer delete(v.patterns, pattern)
+	if pattern.CellContent.Thumbnail != "" {
+		id := editorResourceID(pattern.CellContent.Thumbnail)
+		if id == "" {
+			return fmt.Errorf("invalid pattern thumbnail resource")
+		}
+		size := compressionImageSize(pattern.Width*math.Hypot(matrix.a, matrix.b), pattern.Height*math.Hypot(matrix.c, matrix.d), v.dpi)
+		if err := v.recordSize([2]string{id}, size); err != nil {
+			return err
+		}
+	}
+	columns, rows := 1, 1
+	switch pattern.ReflectMethod {
+	case "", "Normal":
+	case "Column":
+		columns = 2
+	case "Row":
+		rows = 2
+	case "RowAndColumn":
+		columns, rows = 2, 2
+	default:
+		return fmt.Errorf("invalid pattern reflection")
+	}
+	parent := v.patternPage
+	defer func() { v.patternPage = parent }()
+	solid := FillColor{Value: color.Value, Index: color.Index, ColorSpace: color.ColorSpace}
+	defaults := &DrawParam{FillColor: &solid, StrokeColor: (*StrokeColor)(&solid)}
+	for column := range columns {
+		for row := range rows {
+			cell := matrix.Multiply(Matrix{a: float64(1 - 2*column), d: float64(1 - 2*row)})
+			v.patternPage = &cell
+			for member := range pattern.CellContent.objects() {
+				if err := v.ctx.Err(); err != nil {
+					return err
+				}
+				if err := v.renderer.WalkObject(&member, RenderState{Defaults: defaults, Parent: &cell, BoundaryInCTM: true}, v); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// compressionImagePlan 分文档合并图片需求，版本文件的当前入口独立于其他文档处理
+// 入参: ctx 取消上下文, options 压缩配置
+// 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
+func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOptions) (map[string]bool, map[string]image.Point, error) {
+	return r.compressionImagePlanProtected(ctx, options, nil, nil)
+}
+
+// compressionImagePlanProtected 按签名与全包历史版本保护边界分文档合并图片需求，受保护文档和文件不参与有损降采样
+// 入参: ctx 取消上下文, options 压缩配置, protectedDocs 受签名保护的文档索引, protectedFiles 受签名保护的文件路径
+// 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
+func (r *Reader) compressionImagePlanProtected(ctx context.Context, options CompressionOptions, protectedDocs map[int]bool, protectedFiles map[string]bool) (map[string]bool, map[string]image.Point, error) {
+	if options.Mode != CompressionLossy {
+		return nil, nil, ctx.Err()
+	}
+	images := make(map[string]bool)
+	sizes := make(map[string]image.Point)
+	blocked := make(map[string]bool)
+	currentVersioned := r.currentVersioned()
+	var versionBlocked map[string]bool
+	if r.packageVersioned() {
+		versionBlocked = make(map[string]bool)
+		for index := range r.DocumentCount() {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
+			if !r.ofd.DocBody[index].versioned {
+				continue
+			}
+			files, err := r.documentNonCurrentVersionFiles(ctx, index)
+			if err != nil {
+				return nil, nil, err
+			}
+			maps.Copy(versionBlocked, files)
+		}
+	}
+	current := make(map[string]bool)
+	for offset := 0; offset < r.DocumentCount(); offset++ {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		index := offset
+		if currentVersioned {
+			index = (r.documentIndex + offset) % r.DocumentCount()
+		}
+		if protectedDocs[index] {
+			continue
+		}
+		document := r
+		if index != r.DocumentIndex() {
+			var err error
+			document, err = r.DocumentContext(ctx, index)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		catalog, err := document.Images(ctx)
+		if err != nil {
+			if document != r {
+				document.Close()
+			}
+			return nil, nil, err
+		}
+		if len(catalog) == 0 {
+			if document != r {
+				document.Close()
+			}
+			continue
+		}
+		var demands map[string]image.Point
+		masks, geometry, err := document.compressionImageSafety(ctx, catalog)
+		if err == nil && geometry {
+			demands, err = document.compressionImageSizes(ctx, catalog, options.ImageDPI())
+		}
+		if document != r {
+			document.Close()
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, img := range catalog {
+			name := cleanPackagePath(img.Location)
+			if protectedFiles[name] || versionBlocked[name] && (!currentVersioned || index != r.documentIndex) {
+				images[name] = false
+				blocked[name] = true
+				delete(sizes, name)
+				continue
+			}
+			if currentVersioned {
+				if index == r.documentIndex {
+					current[name] = true
+				} else if current[name] {
+					continue
+				}
+			}
+			if old, ok := images[name]; !ok || old {
+				images[name] = !masks[name]
+			}
+			size := demands[name]
+			if size.X <= 0 || size.Y <= 0 || masks[name] {
+				blocked[name] = true
+				delete(sizes, name)
+				continue
+			}
+			if !blocked[name] {
+				old := sizes[name]
+				sizes[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
+			}
+		}
+	}
+	return images, sizes, ctx.Err()
+}
+
+// compressionImageSizes 按正文、模板、注解及底纹的实际变换汇总图片尺寸，包括隐藏内容
+// 模板使用独立页面坐标，统一分析一次，避免随引用页数重复展开
+// 入参: ctx 取消上下文, images 图片资源, dpi 分辨率上限
+// 返回: map[string]image.Point 资源像素需求, error 取消错误
+func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, dpi int) (map[string]image.Point, error) {
+	if dpi == 0 {
+		return nil, nil
+	}
+	doc, err := r.DocContext(ctx)
+	if err != nil {
+		return nil, ctx.Err()
+	}
+	renderer := NewRenderer(r, WithRenderBackends(RenderBackends{}))
+	renderer.pageContext = ctx
+	defer renderer.ClearCache()
+	visitor := &compressionImages{ctx: ctx, dpi: dpi, sizes: make(map[string]image.Point), renderer: renderer}
+	for _, ref := range doc.Pages.Page {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		page, err := r.PageContentContext(ctx, ref)
+		if err != nil {
+			return nil, ctx.Err()
+		}
+		content := *page
+		content.Template = nil
+		if err := renderer.WalkPage(&content, visitor); err != nil {
+			return nil, ctx.Err()
+		}
+	}
+	for _, ref := range r.doc.CommonData.TemplatePage {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		template := renderer.loadTemplate(ref.ID)
+		if template == nil {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		unbind := renderer.bindPageResources(template)
+		for order := range 3 {
+			if err := renderer.walkLayers(template.Content.Layer, order, nil, visitor); err != nil {
+				unbind()
+				return nil, ctx.Err()
+			}
+		}
+		unbind()
+	}
+	result := make(map[string]image.Point)
+	for _, img := range images {
+		name := cleanPackagePath(img.Location)
+		size := visitor.sizes[name]
+		old := result[name]
+		result[name] = image.Pt(max(old.X, size.X), max(old.Y, size.Y))
+	}
+	return result, ctx.Err()
 }

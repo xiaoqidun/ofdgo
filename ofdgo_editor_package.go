@@ -36,16 +36,23 @@ type editorStagedPage struct {
 	checksum uint32
 }
 
-// open 流式读取暂存页面，仅用于无法完整收集编码引用的分支
-// 返回: io.ReadCloser 页面解压流
-func (p *editorStagedPage) open() io.ReadCloser {
-	return flate.NewReader(bytes.NewReader(p.data))
-}
-
 // editorPageStager 复用单次保存的页面压缩器，不跨文档共享状态
 type editorPageStager struct {
 	compressor *flate.Writer
 	pooled     bool
+}
+
+// editorPageEncoding 同步统计编码字节及CRC，保留实际写入错误
+type editorPageEncoding struct {
+	writer   io.Writer
+	size     uint64
+	checksum uint32
+}
+
+// open 流式读取暂存页面，仅用于无法完整收集编码引用的分支
+// 返回: io.ReadCloser 页面解压流
+func (p *editorStagedPage) open() io.ReadCloser {
+	return flate.NewReader(bytes.NewReader(p.data))
 }
 
 // release 释放输出引用并按需归还对象池中的压缩器
@@ -95,13 +102,6 @@ func (s *editorPageStager) encode(editor *Editor, page PageContent, references *
 		return nil, x.err
 	}
 	return &editorStagedPage{data: data.Bytes(), size: output.size, checksum: output.checksum}, nil
-}
-
-// editorPageEncoding 同步统计编码字节及CRC，保留实际写入错误
-type editorPageEncoding struct {
-	writer   io.Writer
-	size     uint64
-	checksum uint32
 }
 
 // Write 写入页面字节并统计实际接收的部分
@@ -244,7 +244,7 @@ func (e *Editor) sourcePartsWithRemaps(ctx context.Context, progress editorProgr
 		}
 	}
 	pagesChanged := !slices.Equal(pageRefs, source.document.Pages.Page)
-	if pagesChanged || len(resourceFiles) != 0 || e.maxID != uint64(source.document.CommonData.MaxUnitID) {
+	if pagesChanged || len(resourceFiles) != 0 || e.maxID != source.document.CommonData.MaxUnitID {
 		name := reader.documentRoot
 		data, err := reader.readFileViewContext(ctx, name)
 		if err != nil {
@@ -259,7 +259,7 @@ func (e *Editor) sourcePartsWithRemaps(ctx context.Context, progress editorProgr
 			return nil, nil, nil, fmt.Errorf("document has no CommonData")
 		}
 		var patches []editorXMLPatch
-		if e.maxID != uint64(source.document.CommonData.MaxUnitID) {
+		if e.maxID != source.document.CommonData.MaxUnitID {
 			value := common.textXML("MaxUnitID", formatUnitID(e.maxID))
 			if maxID := common.child("MaxUnitID"); maxID != nil {
 				value = maxID.textXML("MaxUnitID", formatUnitID(e.maxID))
@@ -1053,13 +1053,13 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 	}
 	pipeline := newZipParallelWriter(e, archive, ctx)
 	defer pipeline.close()
-	if reader.Zip != nil {
-		_ = archive.SetComment(reader.Zip.Comment)
+	if reader.zip != nil {
+		_ = archive.SetComment(reader.zip.Comment)
 		var buffer []byte
 		if pipeline == nil {
 			buffer = make([]byte, 32*1024)
 		}
-		for _, file := range reader.Zip.File {
+		for _, file := range reader.zip.File {
 			if file.FileInfo().IsDir() {
 				header := file.FileHeader
 				if pipeline != nil {
@@ -1117,7 +1117,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 			}
 		}
 	}
-	if reader.Zip == nil {
+	if reader.zip == nil {
 		if src := reader.encryptedSource(); src != nil {
 			buffer := make([]byte, 32*1024)
 			compress := e.output != nil && e.output.options.Mode != CompressionUnchanged
@@ -1271,7 +1271,7 @@ func (e *Editor) sourceReader(ctx context.Context, progress editorProgress, sync
 		files = make(map[string][]byte)
 	}
 	maps.Copy(files, parts)
-	zipArchive := e.source.reader.Zip
+	zipArchive := e.source.reader.zip
 	var encSource *encryptedPackageSource
 	if src := e.source.reader.encryptedSource(); src != nil {
 		if syncText {
@@ -1287,7 +1287,7 @@ func (e *Editor) sourceReader(ctx context.Context, progress editorProgress, sync
 			encSource = src
 		}
 	}
-	reader := &Reader{Zip: zipArchive, encrypted: encSource, sourceFile: e.source.reader.sourceFile, files: files, encryption: e.encryption, documentIndex: e.source.reader.documentIndex, selectedVersion: e.source.reader.selectedVersion, pageContents: e.source.reader.pageContents, resources: e.runtimeResources}
+	reader := &Reader{zip: zipArchive, encrypted: encSource, sourceFile: e.source.reader.sourceFile, files: files, encryption: e.encryption, documentIndex: e.source.reader.documentIndex, selectedVersion: e.source.reader.selectedVersion, pageContents: e.source.reader.pageContents, resources: e.runtimeResources}
 	if err := reader.initRootContext(ctx); err != nil {
 		return nil, nil, err
 	}

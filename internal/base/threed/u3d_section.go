@@ -29,6 +29,28 @@ type U3DCrossSection struct {
 	Intersection         *[3]float64
 }
 
+// u3dSection 保存相机空间裁剪方程、平面四角与交线颜色
+type u3dSection struct {
+	plane        [4]float64
+	corners      [4]u3dVertex
+	intersection *[3]float64
+	opacity      float64
+}
+
+// u3dAppendSectionVertex 合并连续重复交点，维持凸多边形缓存上限
+// 入参: buffer 固定缓存, count 已有顶点数, vertex 新顶点
+// 返回: int 顶点数, error 缓存越界错误
+func u3dAppendSectionVertex(buffer []u3dVertex, count int, vertex u3dVertex) (int, error) {
+	if count > 0 && buffer[count-1].point == vertex.point {
+		return count, nil
+	}
+	if count >= len(buffer) {
+		return count, fmt.Errorf("invalid U3D section polygon")
+	}
+	buffer[count] = vertex
+	return count + 1, nil
+}
+
 // PrepareSections 准备剖切缓存，不复制网格或修改调用方参数
 // 入参: sections 世界坐标剖切面
 // 返回: error 参数、场景、预算或取消错误
@@ -120,14 +142,6 @@ func (r *Renderer) PrepareSections(sections []U3DCrossSection) error {
 		}
 	}
 	return nil
-}
-
-// u3dSection 保存相机空间裁剪方程、平面四角与交线颜色
-type u3dSection struct {
-	plane        [4]float64
-	corners      [4]u3dVertex
-	intersection *[3]float64
-	opacity      float64
 }
 
 // sceneDiagonal 计算静态场景世界包围盒的对角线，包含隐藏节点的几何
@@ -246,20 +260,6 @@ func (r *Renderer) sectionTriangle(triangle [3]u3dVertex, shader U3DShader, pass
 		}
 	}
 	return nil
-}
-
-// u3dAppendSectionVertex 合并连续重复交点，维持凸多边形缓存上限
-// 入参: buffer 固定缓存, count 已有顶点数, vertex 新顶点
-// 返回: int 顶点数, error 缓存越界错误
-func u3dAppendSectionVertex(buffer []u3dVertex, count int, vertex u3dVertex) (int, error) {
-	if count > 0 && buffer[count-1].point == vertex.point {
-		return count, nil
-	}
-	if count >= len(buffer) {
-		return count, fmt.Errorf("invalid U3D section polygon")
-	}
-	buffer[count] = vertex
-	return count + 1, nil
 }
 
 // drawSectionPlanes 在最后一轮绘制平面方形，不把平面本身当作待剖切几何

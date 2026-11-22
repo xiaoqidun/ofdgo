@@ -39,6 +39,7 @@ var activeFiles sync.Map
 type Target struct {
 	mu   sync.Mutex
 	name string
+	key  string
 	info os.FileInfo
 }
 
@@ -70,7 +71,33 @@ func NewTarget(name string) (*Target, error) {
 	if info != nil && !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("save target is not a regular file")
 	}
-	return &Target{name: name, info: info}, nil
+	return &Target{name: name, key: lockKey(name), info: info}, nil
+}
+
+// NewTemp 创建私有输入缓存文件，调用方负责关闭和删除
+// 入参: directory 缓存目录，空值使用系统临时目录
+// 返回: *os.File 缓存文件, error 创建错误
+func NewTemp(directory string) (*os.File, error) {
+	if directory == "" {
+		directory = os.TempDir()
+	}
+	directory, err := nativePath(directory)
+	if err != nil {
+		return nil, err
+	}
+	for range 100 {
+		n, err := rand.Int(rand.Reader, big.NewInt(10000000))
+		if err != nil {
+			return nil, err
+		}
+		name := filepath.Join(directory, fmt.Sprintf("ofdgo-%07d.tmp", n.Int64()))
+		file, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return file, err
+	}
+	return nil, os.ErrExist
 }
 
 // Begin 创建独占写入事务，调用方必须提交或终止
@@ -82,11 +109,11 @@ func (t *Target) Begin(ctx context.Context) (*Writer, error) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if _, loaded := activeFiles.LoadOrStore(t.name, true); loaded {
+	if _, loaded := activeFiles.LoadOrStore(t.key, true); loaded {
 		return nil, ErrBusy
 	}
 	if err := t.check(); err != nil {
-		activeFiles.Delete(t.name)
+		activeFiles.Delete(t.key)
 		return nil, err
 	}
 	perm := os.FileMode(0600)
@@ -96,7 +123,7 @@ func (t *Target) Begin(ctx context.Context) (*Writer, error) {
 	for range 100 {
 		n, err := rand.Int(rand.Reader, big.NewInt(10000000))
 		if err != nil {
-			activeFiles.Delete(t.name)
+			activeFiles.Delete(t.key)
 			return nil, err
 		}
 		name := fmt.Sprintf("%s.%07d.tmp", t.name, n.Int64())
@@ -105,12 +132,12 @@ func (t *Target) Begin(ctx context.Context) (*Writer, error) {
 			continue
 		}
 		if err != nil {
-			activeFiles.Delete(t.name)
+			activeFiles.Delete(t.key)
 			return nil, err
 		}
 		return &Writer{target: t, file: f, ctx: ctx}, nil
 	}
-	activeFiles.Delete(t.name)
+	activeFiles.Delete(t.key)
 	return nil, os.ErrExist
 }
 
@@ -146,7 +173,7 @@ func (w *Writer) Commit() error {
 		return os.ErrClosed
 	}
 	w.closed = true
-	defer activeFiles.Delete(w.target.name)
+	defer activeFiles.Delete(w.target.key)
 	defer os.Remove(w.file.Name())
 	w.target.mu.Lock()
 	defer w.target.mu.Unlock()
@@ -168,7 +195,7 @@ func (w *Writer) Commit() error {
 	if err := w.target.check(); err != nil {
 		return err
 	}
-	if err := Replace(w.file.Name(), w.target.name); err != nil {
+	if err := replace(w.file.Name(), w.target.name); err != nil {
 		return err
 	}
 	w.target.info = info
@@ -187,34 +214,8 @@ func (w *Writer) Abort() error {
 		return nil
 	}
 	w.closed = true
-	defer activeFiles.Delete(w.target.name)
+	defer activeFiles.Delete(w.target.key)
 	return errors.Join(w.file.Close(), os.Remove(w.file.Name()))
-}
-
-// NewTemp 创建私有输入缓存文件，调用方负责关闭和删除
-// 入参: directory 缓存目录，空值使用系统临时目录
-// 返回: *os.File 缓存文件, error 创建错误
-func NewTemp(directory string) (*os.File, error) {
-	if directory == "" {
-		directory = os.TempDir()
-	}
-	directory, err := nativePath(directory)
-	if err != nil {
-		return nil, err
-	}
-	for range 100 {
-		n, err := rand.Int(rand.Reader, big.NewInt(10000000))
-		if err != nil {
-			return nil, err
-		}
-		name := filepath.Join(directory, fmt.Sprintf("ofdgo-%07d.tmp", n.Int64()))
-		file, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
-		if errors.Is(err, os.ErrExist) {
-			continue
-		}
-		return file, err
-	}
-	return nil, os.ErrExist
 }
 
 // check 检查目标是否保持最近确认的状态

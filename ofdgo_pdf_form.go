@@ -93,6 +93,597 @@ type pdfFormCache struct {
 	buffer  bytes.Buffer
 }
 
+// formIdentity 生成表单唯一标识，优先采用间接引用以跨工作视图共享
+// 入参: ref 表单间接引用, stream 表单流指针
+// 返回: pdfFormIdentity 表单标识
+func formIdentity(ref pdfgo.Reference, stream *pdfgo.Stream) pdfFormIdentity {
+	if ref != (pdfgo.Reference{}) {
+		return pdfFormIdentity{ref: ref}
+	}
+	return pdfFormIdentity{stream: stream}
+}
+
+// countLocalForms 统计当前页所有普通表单及透明组表单的引用次数
+// 入参: nodes 页面原始图元切片
+// 返回: map[pdfFormIdentity]int 页内表单出现频次
+func countLocalForms(nodes []pdfCompositeNode) map[pdfFormIdentity]int {
+	var counts map[pdfFormIdentity]int
+	add := func(ref pdfgo.Reference, stream *pdfgo.Stream) {
+		if ref == (pdfgo.Reference{}) && stream == nil {
+			return
+		}
+		if counts == nil {
+			counts = make(map[pdfFormIdentity]int)
+		}
+		counts[formIdentity(ref, stream)]++
+	}
+	var visit func([]pdfCompositeNode)
+	visit = func(list []pdfCompositeNode) {
+		for i := 0; i < len(list); i++ {
+			node := list[i]
+			for _, span := range node.forms {
+				if span.count > 0 && span.mark != nil {
+					add(span.mark.Ref, span.mark.Stream)
+				}
+			}
+			if node.group != nil && !node.group.Page {
+				add(node.group.Ref, node.group.Stream)
+			}
+			if len(node.children) != 0 {
+				visit(node.children)
+			}
+		}
+	}
+	visit(nodes)
+	return counts
+}
+
+// stripFormOuterClips 提取调用表单前的外层裁剪并剥离表单自身BBox冗余裁剪，不修改原节点
+// 入参: nodes 表单内图元, outerCount 外层裁剪数量
+// 返回: []pdfgo.Path 外层裁剪, []pdfCompositeNode 剥离后的浅拷贝图元, bool 是否可安全剥离
+func stripFormOuterClips(nodes []pdfCompositeNode, outerCount int) ([]pdfgo.Path, []pdfCompositeNode, bool) {
+	var outer []pdfgo.Path
+	outerSet := false
+	ok := true
+	var cloneList func([]pdfCompositeNode) []pdfCompositeNode
+	cloneList = func(list []pdfCompositeNode) []pdfCompositeNode {
+		if len(list) == 0 || !ok {
+			return nil
+		}
+		result := make([]pdfCompositeNode, len(list))
+		for i, node := range list {
+			copyNode := node
+			stripStyle := func(style *pdfgo.Style) {
+				if len(style.Clips) < outerCount {
+					ok = false
+					return
+				}
+				if outerCount > 0 {
+					prefix := style.Clips[:outerCount]
+					if !outerSet {
+						outer, outerSet = prefix, true
+					} else if len(outer) != len(prefix) || (len(prefix) > 0 && &outer[0] != &prefix[0] && !sameClipPrefix(outer, prefix)) {
+						ok = false
+						return
+					}
+				}
+				strip := outerCount
+				if len(style.Clips) > outerCount && len(style.Clips[outerCount].Text) == 0 {
+					strip = outerCount + 1
+				}
+				if strip == len(style.Clips) {
+					style.Clips = nil
+				} else if strip > 0 {
+					style.Clips = style.Clips[strip:]
+				}
+			}
+			if node.path != nil {
+				copyMark := *node.path
+				stripStyle(&copyMark.Style)
+				copyNode.path = &copyMark
+			} else if node.text != nil {
+				copyMark := *node.text
+				stripStyle(&copyMark.Style)
+				copyNode.text = &copyMark
+			} else if node.image != nil {
+				copyMark := *node.image
+				stripStyle(&copyMark.Style)
+				copyNode.image = &copyMark
+			} else if node.glyph != nil {
+				copyMark := *node.glyph
+				stripStyle(&copyMark.Style)
+				copyNode.glyph = &copyMark
+			}
+			if len(node.children) != 0 {
+				copyNode.children = cloneList(node.children)
+			}
+			result[i] = copyNode
+		}
+		return result
+	}
+	stripped := cloneList(nodes)
+	if !ok {
+		return nil, nil, false
+	}
+	return outer, stripped, true
+}
+
+// sameClipPrefix 比较两段外层裁剪路径是否结构完全一致
+// 入参: a 第一组路径, b 第二组路径
+// 返回: bool 是否一致
+func sameClipPrefix(a, b []pdfgo.Path) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].EvenOdd != b[i].EvenOdd || len(a[i].Segments) != len(b[i].Segments) || len(a[i].Text) != len(b[i].Text) {
+			return false
+		}
+		if len(a[i].Segments) > 0 && &a[i].Segments[0] == &b[i].Segments[0] && (len(a[i].Text) == 0 || &a[i].Text[0] == &b[i].Text[0]) {
+			continue
+		}
+		for j := range a[i].Segments {
+			if a[i].Segments[j].Operator != b[i].Segments[j].Operator || !slices.Equal(a[i].Segments[j].Points, b[i].Segments[j].Points) {
+				return false
+			}
+		}
+		if !slices.Equal(a[i].Text, b[i].Text) {
+			return false
+		}
+	}
+	return true
+}
+
+// pdfIdentityTransform 判断局部到页面矩阵在扣除边界偏移后是否为单位变换
+// 入参: m 仿射矩阵, box 目标边界
+// 返回: bool 是否可省略CTM属性
+func pdfIdentityTransform(m pdfgo.Matrix, box Box) bool {
+	return math.Abs(m[0]-1) <= 1e-9 && math.Abs(m[1]) <= 1e-9 && math.Abs(m[2]) <= 1e-9 && math.Abs(m[3]-1) <= 1e-9 && math.Abs(m[4]-box.X) <= 1e-9 && math.Abs(m[5]-box.Y) <= 1e-9
+}
+
+// templateCandidateKey 为固定位置复合对象构造模板提升匹配键
+// 入参: ctx 取消上下文, unit 复合对象, area 页面区域, zOrder 目标模板层次
+// 返回: pdfTemplateCandidateKey 模板签名, bool 是否允许提升, error 编码错误
+func templateCandidateKey(ctx context.Context, unit CompositeGraphicUnit, area PageArea, zOrder string) (pdfTemplateCandidateKey, bool, error) {
+	if area.PhysicalBox == "" {
+		return pdfTemplateCandidateKey{}, false, nil
+	}
+	alpha := -1
+	if unit.Alpha != nil {
+		alpha = *unit.Alpha
+	}
+	key := pdfTemplateCandidateKey{
+		resourceID: unit.ResourceID,
+		boundary:   unit.Boundary,
+		ctm:        unit.CTM,
+		pageArea:   area,
+		zOrder:     zOrder,
+		alpha:      alpha,
+	}
+	if unit.Clips != nil {
+		data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) {
+			x.root("ClipsWrap", nil)
+			x.clips(unit.Clips, unit.CTM)
+			x.end("ClipsWrap")
+		})
+		if err != nil {
+			return pdfTemplateCandidateKey{}, false, err
+		}
+		key.hasClips = true
+		key.clipsDigest = sha256.Sum256(data)
+	}
+	return key, true, nil
+}
+
+// canonicalFormFloat 将毫米浮点坐标量化到1e-5精度，消除矩阵求逆产生的末位舍入噪声
+// 入参: v 浮点数值
+// 返回: string 规范化文本
+func canonicalFormFloat(v float64) string {
+	rounded := math.Round(v*1e5) / 1e5
+	if rounded == 0 {
+		rounded = 0
+	}
+	return strconv.FormatFloat(rounded, 'f', -1, 64)
+}
+
+// canonicalFormNumberValue 将浮点数值量化到1e-5精度
+// 入参: v 原始数值
+// 返回: float64 规范化数值
+func canonicalFormNumberValue(v float64) float64 {
+	rounded := math.Round(v*1e5) / 1e5
+	if rounded == 0 {
+		return 0
+	}
+	return rounded
+}
+
+// canonicalFormNumbers 量化空格分隔数值或路径指令串中的浮点数值，保留指令标记原样
+// 入参: raw 原始属性串
+// 返回: string 规范化属性串
+func canonicalFormNumbers(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return ""
+	}
+	var out strings.Builder
+	out.Grow(len(raw))
+	for i, field := range fields {
+		if i != 0 {
+			out.WriteByte(' ')
+		}
+		if v, err := strconv.ParseFloat(field, 64); err == nil && finite(v) {
+			out.WriteString(canonicalFormFloat(v))
+		} else {
+			out.WriteString(field)
+		}
+	}
+	return out.String()
+}
+
+// canonicalFormClips 复制并量化裁剪集合中的几何数值，不修改原裁剪数据
+// 入参: clips 原裁剪集合
+// 返回: *Clips 规范化裁剪集合
+func canonicalFormClips(clips *Clips) *Clips {
+	if clips == nil {
+		return nil
+	}
+	copyClips := *clips
+	copyClips.Clip = make([]Clip, len(clips.Clip))
+	for i, clip := range clips.Clip {
+		copyClip := Clip{Area: make([]ClipArea, len(clip.Area))}
+		for j, area := range clip.Area {
+			copyArea := area
+			copyArea.CTM = canonicalFormNumbers(area.CTM)
+			if len(area.Path) != 0 {
+				copyArea.Path = make([]PathObject, len(area.Path))
+				for k, p := range area.Path {
+					obj := canonicalFormObject(GraphicObject{Type: "Path", PathObject: p})
+					copyArea.Path[k] = obj.PathObject
+				}
+			}
+			if len(area.Text) != 0 {
+				copyArea.Text = make([]TextObject, len(area.Text))
+				for k, t := range area.Text {
+					obj := canonicalFormObject(GraphicObject{Type: "Text", TextObject: t})
+					copyArea.Text[k] = obj.TextObject
+				}
+			}
+			copyClip.Area[j] = copyArea
+		}
+		copyClips.Clip[i] = copyClip
+	}
+	return &copyClips
+}
+
+// canonicalFormColor 复制并量化渐变及图案坐标数值，不修改原颜色对象
+// 入参: color 原颜色对象
+// 返回: *FillColor 规范化颜色对象
+func canonicalFormColor(color *FillColor) *FillColor {
+	if color == nil {
+		return nil
+	}
+	copyColor := *color
+	if color.AxialShd != nil {
+		shd := *color.AxialShd
+		shd.StartPoint = canonicalFormNumbers(shd.StartPoint)
+		shd.EndPoint = canonicalFormNumbers(shd.EndPoint)
+		shd.MapUnit = canonicalFormNumberValue(shd.MapUnit)
+		copyColor.AxialShd = &shd
+	}
+	if color.RadialShd != nil {
+		shd := *color.RadialShd
+		shd.StartPoint = canonicalFormNumbers(shd.StartPoint)
+		shd.EndPoint = canonicalFormNumbers(shd.EndPoint)
+		shd.StartRadius = canonicalFormNumberValue(shd.StartRadius)
+		shd.EndRadius = canonicalFormNumberValue(shd.EndRadius)
+		shd.Angle = canonicalFormNumberValue(shd.Angle)
+		shd.Eccentricity = canonicalFormNumberValue(shd.Eccentricity)
+		shd.MapUnit = canonicalFormNumberValue(shd.MapUnit)
+		copyColor.RadialShd = &shd
+	}
+	if color.GouraudShd != nil {
+		shd := *color.GouraudShd
+		shd.Point = slices.Clone(shd.Point)
+		for i := range shd.Point {
+			shd.Point[i].X = canonicalFormNumberValue(shd.Point[i].X)
+			shd.Point[i].Y = canonicalFormNumberValue(shd.Point[i].Y)
+		}
+		copyColor.GouraudShd = &shd
+	}
+	if color.LaGouraudShd != nil {
+		shd := *color.LaGouraudShd
+		shd.Point = slices.Clone(shd.Point)
+		for i := range shd.Point {
+			shd.Point[i].X = canonicalFormNumberValue(shd.Point[i].X)
+			shd.Point[i].Y = canonicalFormNumberValue(shd.Point[i].Y)
+		}
+		copyColor.LaGouraudShd = &shd
+	}
+	if color.Pattern != nil {
+		pat := *color.Pattern
+		pat.Width = canonicalFormNumberValue(pat.Width)
+		pat.Height = canonicalFormNumberValue(pat.Height)
+		pat.XStep = canonicalFormNumberValue(pat.XStep)
+		pat.YStep = canonicalFormNumberValue(pat.YStep)
+		pat.CTM = canonicalFormNumbers(pat.CTM)
+		copyColor.Pattern = &pat
+	}
+	return &copyColor
+}
+
+// canonicalFormObject 生成用于去重哈希与比对的浮点规范化对象浅拷贝，不改动正文文字及原对象
+// 入参: object 原始图形对象
+// 返回: GraphicObject 规范化后的对象副本
+func canonicalFormObject(object GraphicObject) GraphicObject {
+	switch object.Type {
+	case "PathObject", "Path":
+		p := object.PathObject
+		p.Boundary = canonicalFormNumbers(p.Boundary)
+		p.CTM = canonicalFormNumbers(p.CTM)
+		p.AbbreviatedData = canonicalFormNumbers(p.AbbreviatedData)
+		p.LineWidth = canonicalFormNumberValue(p.LineWidth)
+		p.MiterLimit = canonicalFormNumberValue(p.MiterLimit)
+		p.DashPattern = canonicalFormNumbers(p.DashPattern)
+		if p.DashOffset != nil {
+			v := canonicalFormNumberValue(*p.DashOffset)
+			p.DashOffset = &v
+		}
+		p.Clips = canonicalFormClips(p.Clips)
+		p.FillColor = canonicalFormColor(p.FillColor)
+		p.StrokeColor = (*StrokeColor)(canonicalFormColor((*FillColor)(p.StrokeColor)))
+		object.PathObject = p
+	case "TextObject", "Text":
+		t := object.TextObject
+		t.Boundary = canonicalFormNumbers(t.Boundary)
+		t.CTM = canonicalFormNumbers(t.CTM)
+		t.Size = canonicalFormNumberValue(t.Size)
+		t.HScale = canonicalFormNumberValue(t.HScale)
+		t.LineWidth = canonicalFormNumberValue(t.LineWidth)
+		t.MiterLimit = canonicalFormNumberValue(t.MiterLimit)
+		t.DashPattern = canonicalFormNumbers(t.DashPattern)
+		if t.DashOffset != nil {
+			v := canonicalFormNumberValue(*t.DashOffset)
+			t.DashOffset = &v
+		}
+		if len(t.TextCode) != 0 {
+			codes := make([]TextCode, len(t.TextCode))
+			for i, code := range t.TextCode {
+				code.X = canonicalFormNumbers(code.X)
+				code.Y = canonicalFormNumbers(code.Y)
+				code.DeltaX = canonicalFormNumbers(code.DeltaX)
+				code.DeltaY = canonicalFormNumbers(code.DeltaY)
+				codes[i] = code
+			}
+			t.TextCode = codes
+		}
+		t.Clips = canonicalFormClips(t.Clips)
+		t.FillColor = canonicalFormColor(t.FillColor)
+		t.StrokeColor = (*StrokeColor)(canonicalFormColor((*FillColor)(t.StrokeColor)))
+		object.TextObject = t
+	case "ImageObject":
+		img := object.ImageObject
+		img.Boundary = canonicalFormNumbers(img.Boundary)
+		img.CTM = canonicalFormNumbers(img.CTM)
+		img.Clips = canonicalFormClips(img.Clips)
+		object.ImageObject = img
+	case "CompositeObject", "CompositeGraphicUnit":
+		c := object.CompositeGraphicUnit
+		c.Boundary = canonicalFormNumbers(c.Boundary)
+		c.CTM = canonicalFormNumbers(c.CTM)
+		c.Clips = canonicalFormClips(c.Clips)
+		object.CompositeGraphicUnit = c
+	}
+	return object
+}
+
+// isolatedGroupContentDigest 计算独立透明组子图元局部几何与继承图形状态的确定性摘要，避免跨状态光栅缓存误命中
+// 入参: nodes 剥离外层裁剪后的子图元切片, toLocal 页面到表单局部毫米坐标的变换矩阵, space 组混合颜色空间
+// 返回: [32]byte 内容与状态特征摘要
+func isolatedGroupContentDigest(nodes []pdfCompositeNode, toLocal pdfgo.Matrix, space *pdfgo.ColorSpace) [32]byte {
+	h := sha256.New()
+	var buf [8]byte
+	writeU64 := func(v uint64) {
+		binary.LittleEndian.PutUint64(buf[:], v)
+		h.Write(buf[:])
+	}
+	writeFloat := func(v float64) {
+		q := math.Round(v*1e4) / 1e4
+		if q == 0 {
+			q = 0
+		}
+		writeU64(math.Float64bits(q))
+	}
+	writeBool := func(v bool) {
+		if v {
+			h.Write([]byte{1})
+		} else {
+			h.Write([]byte{0})
+		}
+	}
+	writeString := func(s string) {
+		writeU64(uint64(len(s)))
+		h.Write([]byte(s))
+	}
+	writePtr := func(v any) {
+		if v == nil {
+			writeU64(0)
+			return
+		}
+		rv := reflect.ValueOf(v)
+		if rv.Kind() != reflect.Pointer || rv.IsNil() {
+			writeU64(0)
+			return
+		}
+		writeU64(uint64(rv.Pointer()))
+	}
+	writeMatrix := func(m pdfgo.Matrix) {
+		for _, v := range m {
+			writeFloat(v)
+		}
+	}
+	writeColorSpace := func(cs *pdfgo.ColorSpace) {
+		writePtr(cs)
+		if cs != nil {
+			writeString(string(cs.Model))
+		}
+	}
+	writePath := func(path pdfgo.Path, mat pdfgo.Matrix) {
+		writeBool(path.EvenOdd)
+		writeU64(uint64(len(path.Segments)))
+		for _, seg := range path.Segments {
+			writeString(seg.Operator)
+			writeU64(uint64(len(seg.Points)))
+			for _, pt := range seg.Points {
+				p := mat.Apply(pt)
+				writeFloat(p.X)
+				writeFloat(p.Y)
+			}
+		}
+		writeU64(uint64(len(path.Text)))
+		for _, tc := range path.Text {
+			writePtr(tc)
+		}
+	}
+	writePaint := func(paint pdfgo.Paint) {
+		writeBool(paint.None)
+		writeFloat(paint.Alpha)
+		for _, v := range paint.RGB {
+			writeFloat(v)
+		}
+		writeBool(paint.CMYK != nil)
+		if paint.CMYK != nil {
+			for _, v := range *paint.CMYK {
+				writeFloat(v)
+			}
+		}
+		writeColorSpace(paint.Space)
+		writeString(string(paint.SourceSpace))
+		for _, v := range paint.Values {
+			writeFloat(v)
+		}
+		writePtr(paint.Process)
+		writePtr(paint.Colorant)
+		writePtr(paint.Axial)
+		writePtr(paint.Radial)
+		writePtr(paint.Function)
+		writePtr(paint.Mesh)
+		writePtr(paint.Tiling)
+		writePtr(paint.Shading)
+	}
+	writeStyle := func(st pdfgo.Style) {
+		writePaint(st.Fill)
+		writePaint(st.Stroke)
+		writeFloat(st.LineWidth)
+		writeU64(uint64(st.Cap))
+		writeU64(uint64(st.Join))
+		writeFloat(st.MiterLimit)
+		writeU64(uint64(len(st.Dash)))
+		for _, d := range st.Dash {
+			writeFloat(d)
+		}
+		writeFloat(st.DashPhase)
+		writeBool(st.StrokeAdjust)
+		writeBool(st.FillOverprint)
+		writeBool(st.StrokeOverprint)
+		writeU64(uint64(st.OverprintMode))
+		writeString(string(st.RenderingIntent))
+		writeString(string(st.BlendMode))
+		writeBool(st.AlphaIsShape)
+		writePtr(st.SoftMask)
+		writeBool(st.Smoothness != nil)
+		if st.Smoothness != nil {
+			writeFloat(*st.Smoothness)
+		}
+		writeBool(st.Antialias != nil)
+		if st.Antialias != nil {
+			writeBool(*st.Antialias)
+		}
+		writePtr(st.Halftone)
+		writePtr(st.Transfer)
+		writeU64(uint64(len(st.Clips)))
+		for _, clip := range st.Clips {
+			writePath(clip, toLocal)
+		}
+	}
+	writeTextMark := func(tm *pdfgo.TextMark) {
+		writePtr(tm.Font)
+		if tm.Font != nil {
+			writeString(tm.Font.Name)
+		}
+		writeU64(uint64(tm.Mode))
+		writeFloat(tm.Size)
+		writeFloat(tm.HorizontalScale)
+		writeMatrix(toLocal.Mul(tm.Matrix))
+		if tm.StrokeMatrix != (pdfgo.Matrix{}) {
+			writeMatrix(toLocal.Mul(tm.StrokeMatrix))
+		}
+		writeStyle(tm.Style)
+		writeU64(uint64(len(tm.Glyphs)))
+		for _, g := range tm.Glyphs {
+			writeU64(uint64(g.Code))
+			writeU64(uint64(g.CID))
+			writeString(g.Name)
+			writeFloat(g.Width)
+		}
+		writeU64(uint64(len(tm.Positions)))
+		for _, pos := range tm.Positions {
+			writeFloat(pos.X)
+			writeFloat(pos.Y)
+		}
+	}
+	var hashNodes func(h hash.Hash, list []pdfCompositeNode)
+	hashNodes = func(h hash.Hash, list []pdfCompositeNode) {
+		writeU64(uint64(len(list)))
+		for _, node := range list {
+			if node.path != nil {
+				h.Write([]byte{'P'})
+				writeBool(node.path.Fill)
+				writeBool(node.path.Stroke)
+				if node.path.StrokeMatrix != (pdfgo.Matrix{}) {
+					writeMatrix(toLocal.Mul(node.path.StrokeMatrix))
+				}
+				writeStyle(node.path.Style)
+				writePath(node.path.Path, toLocal)
+			}
+			if node.text != nil {
+				h.Write([]byte{'T'})
+				writeTextMark(node.text)
+			}
+			if node.image != nil {
+				h.Write([]byte{'I'})
+				writePtr(node.image.Image)
+				writeMatrix(toLocal.Mul(node.image.Matrix))
+				writeStyle(node.image.Style)
+			}
+			if node.glyph != nil {
+				h.Write([]byte{'L'})
+				writeTextMark(node.glyph)
+			}
+			if node.group != nil {
+				h.Write([]byte{'G'})
+				writeFloat(node.group.Alpha)
+				writeBool(node.group.Isolated)
+				writeBool(node.group.Knockout)
+				writeString(string(node.group.BlendMode))
+				writeColorSpace(node.group.ColorSpace)
+				writePtr(node.group.SoftMask)
+			}
+			if len(node.children) != 0 {
+				h.Write([]byte{'C'})
+				hashNodes(h, node.children)
+			}
+		}
+	}
+	writeColorSpace(space)
+	hashNodes(h, nodes)
+	var sum [32]byte
+	h.Sum(sum[:0])
+	return sum
+}
+
 // encode 按原顺序编码对象分块并规范化浮点舍入噪声，不为缓存检查整理连续对象数组
 // 入参: ctx 取消上下文, objects 表单对象, width 资源宽度, height 资源高度
 // 返回: []byte 下次编码或重置前有效的内容, error 编码或取消错误
@@ -148,51 +739,6 @@ func (c *pdfFormCache) reset() {
 	}
 }
 
-// formIdentity 生成表单唯一标识，优先采用间接引用以跨工作视图共享
-// 入参: ref 表单间接引用, stream 表单流指针
-// 返回: pdfFormIdentity 表单标识
-func formIdentity(ref pdfgo.Reference, stream *pdfgo.Stream) pdfFormIdentity {
-	if ref != (pdfgo.Reference{}) {
-		return pdfFormIdentity{ref: ref}
-	}
-	return pdfFormIdentity{stream: stream}
-}
-
-// countLocalForms 统计当前页所有普通表单及透明组表单的引用次数
-// 入参: nodes 页面原始图元切片
-// 返回: map[pdfFormIdentity]int 页内表单出现频次
-func countLocalForms(nodes []pdfCompositeNode) map[pdfFormIdentity]int {
-	var counts map[pdfFormIdentity]int
-	add := func(ref pdfgo.Reference, stream *pdfgo.Stream) {
-		if ref == (pdfgo.Reference{}) && stream == nil {
-			return
-		}
-		if counts == nil {
-			counts = make(map[pdfFormIdentity]int)
-		}
-		counts[formIdentity(ref, stream)]++
-	}
-	var visit func([]pdfCompositeNode)
-	visit = func(list []pdfCompositeNode) {
-		for i := 0; i < len(list); i++ {
-			node := list[i]
-			for _, span := range node.forms {
-				if span.count > 0 && span.mark != nil {
-					add(span.mark.Ref, span.mark.Stream)
-				}
-			}
-			if node.group != nil && !node.group.Page {
-				add(node.group.Ref, node.group.Stream)
-			}
-			if len(node.children) != 0 {
-				visit(node.children)
-			}
-		}
-	}
-	visit(nodes)
-	return counts
-}
-
 // formUseCount 汇总表单的跨页与当前页引用总频次
 // 入参: ref 表单间接引用, stream 表单流指针
 // 返回: int 估算总引用次数
@@ -206,6 +752,9 @@ func (p *pdfImporter) formUseCount(ref pdfgo.Reference, stream *pdfgo.Stream) in
 			if first, ok := p.seenFormPages[ref]; ok && first != p.page {
 				total = 2
 			}
+		}
+		if total < 2 && p.neighborFormRefs[ref] {
+			total = 2
 		}
 	}
 	if p.localFormCounts != nil {
@@ -276,11 +825,83 @@ func (p *pdfImporter) shouldReuseGroupForm(mark *pdfgo.GroupMark, childCount int
 	return childCount >= 16 && !mark.Knockout && codecpdf.NormalBlend(mark.BlendMode) && mark.SoftMask == nil && (mark.ColorSpace == nil || mark.ColorSpace.SRGBEquivalent()) && (mark.Alpha == 1 || mark.Isolated)
 }
 
+// probeNeighborFormRefs 在单页首屏转换时探测邻页XObject字典，提前识别跨页小表单
+// 入参: local 当前页表单引用频次
+// 返回: map[pdfgo.Reference]bool 邻页复用的表单引用集合
+func (p *pdfImporter) probeNeighborFormRefs(local map[pdfFormIdentity]int) map[pdfgo.Reference]bool {
+	if p.reader == nil || p.formRefCounts != nil || len(p.pageOrder) < 2 || len(local) == 0 || p.ctx.Err() != nil {
+		return nil
+	}
+	var targets map[pdfgo.Reference]bool
+	for id, count := range local {
+		if id.ref == (pdfgo.Reference{}) || count >= 2 {
+			continue
+		}
+		if p.seenFormPages != nil {
+			if first, ok := p.seenFormPages[id.ref]; ok && first != p.page {
+				continue
+			}
+		}
+		if targets == nil {
+			targets = make(map[pdfgo.Reference]bool)
+		}
+		targets[id.ref] = true
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	var neighbors [2]int
+	neighborCount := 0
+	addNeighbor := func(idx int) {
+		if neighborCount < len(neighbors) && idx >= 0 && idx < len(p.pageOrder) && idx != p.page {
+			neighbors[neighborCount] = idx
+			neighborCount++
+		}
+	}
+	addNeighbor(p.page + 1)
+	addNeighbor(p.page + 2)
+	addNeighbor(p.page - 1)
+	addNeighbor(p.page - 2)
+	var found map[pdfgo.Reference]bool
+	for _, idx := range neighbors[:neighborCount] {
+		if p.ctx.Err() != nil {
+			return nil
+		}
+		res := p.pageOrder[idx].Resources
+		if res == nil || res["XObject"] == nil {
+			continue
+		}
+		xobjVal, err := p.reader.Resolve(res["XObject"])
+		if err != nil {
+			continue
+		}
+		xobjs, ok := xobjVal.(pdfgo.Dictionary)
+		if !ok {
+			continue
+		}
+		for _, entry := range xobjs {
+			ref, ok := entry.(pdfgo.Reference)
+			if !ok || !targets[ref] {
+				continue
+			}
+			if found == nil {
+				found = make(map[pdfgo.Reference]bool)
+			}
+			found[ref] = true
+			delete(targets, ref)
+			if len(targets) == 0 {
+				return found
+			}
+		}
+	}
+	return found
+}
+
 // scanFormRefCounts 轻量扫描各页资源字典，统计跨页共享表单的间接引用频次
 // 入参: ctx 取消上下文
 // 返回: map[pdfgo.Reference]int 表单引用出现页数及嵌套计数
 func (p *pdfImporter) scanFormRefCounts(ctx context.Context) map[pdfgo.Reference]int {
-	if p.reader == nil || len(p.pageOrder) == 0 {
+	if p.reader == nil || len(p.pageOrder) == 0 || ctx.Err() != nil {
 		return nil
 	}
 	counts := make(map[pdfgo.Reference]int)
@@ -325,9 +946,12 @@ func (p *pdfImporter) scanFormRefCounts(ctx context.Context) map[pdfgo.Reference
 	}
 	for _, page := range p.pageOrder {
 		if ctx.Err() != nil {
-			break
+			return nil
 		}
 		scanDict(page.Resources, make(map[pdfgo.Reference]bool), 0)
+	}
+	if ctx.Err() != nil {
+		return nil
 	}
 	return counts
 }
@@ -796,109 +1420,6 @@ func (p *pdfImporter) effectiveStructureSequence(sequence *pdfgo.ContentSequence
 	return nil
 }
 
-// stripFormOuterClips 提取调用表单前的外层裁剪并剥离表单自身BBox冗余裁剪，不修改原节点
-// 入参: nodes 表单内图元, outerCount 外层裁剪数量
-// 返回: []pdfgo.Path 外层裁剪, []pdfCompositeNode 剥离后的浅拷贝图元, bool 是否可安全剥离
-func stripFormOuterClips(nodes []pdfCompositeNode, outerCount int) ([]pdfgo.Path, []pdfCompositeNode, bool) {
-	var outer []pdfgo.Path
-	outerSet := false
-	ok := true
-	var cloneList func([]pdfCompositeNode) []pdfCompositeNode
-	cloneList = func(list []pdfCompositeNode) []pdfCompositeNode {
-		if len(list) == 0 || !ok {
-			return nil
-		}
-		result := make([]pdfCompositeNode, len(list))
-		for i, node := range list {
-			copyNode := node
-			stripStyle := func(style *pdfgo.Style) {
-				if len(style.Clips) < outerCount {
-					ok = false
-					return
-				}
-				if outerCount > 0 {
-					prefix := style.Clips[:outerCount]
-					if !outerSet {
-						outer, outerSet = prefix, true
-					} else if len(outer) != len(prefix) || (len(prefix) > 0 && &outer[0] != &prefix[0] && !sameClipPrefix(outer, prefix)) {
-						ok = false
-						return
-					}
-				}
-				strip := outerCount
-				if len(style.Clips) > outerCount && len(style.Clips[outerCount].Text) == 0 {
-					strip = outerCount + 1
-				}
-				if strip == len(style.Clips) {
-					style.Clips = nil
-				} else if strip > 0 {
-					style.Clips = style.Clips[strip:]
-				}
-			}
-			if node.path != nil {
-				copyMark := *node.path
-				stripStyle(&copyMark.Style)
-				copyNode.path = &copyMark
-			} else if node.text != nil {
-				copyMark := *node.text
-				stripStyle(&copyMark.Style)
-				copyNode.text = &copyMark
-			} else if node.image != nil {
-				copyMark := *node.image
-				stripStyle(&copyMark.Style)
-				copyNode.image = &copyMark
-			} else if node.glyph != nil {
-				copyMark := *node.glyph
-				stripStyle(&copyMark.Style)
-				copyNode.glyph = &copyMark
-			}
-			if len(node.children) != 0 {
-				copyNode.children = cloneList(node.children)
-			}
-			result[i] = copyNode
-		}
-		return result
-	}
-	stripped := cloneList(nodes)
-	if !ok {
-		return nil, nil, false
-	}
-	return outer, stripped, true
-}
-
-// sameClipPrefix 比较两段外层裁剪路径是否结构完全一致
-// 入参: a 第一组路径, b 第二组路径
-// 返回: bool 是否一致
-func sameClipPrefix(a, b []pdfgo.Path) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].EvenOdd != b[i].EvenOdd || len(a[i].Segments) != len(b[i].Segments) || len(a[i].Text) != len(b[i].Text) {
-			return false
-		}
-		if len(a[i].Segments) > 0 && &a[i].Segments[0] == &b[i].Segments[0] && (len(a[i].Text) == 0 || &a[i].Text[0] == &b[i].Text[0]) {
-			continue
-		}
-		for j := range a[i].Segments {
-			if a[i].Segments[j].Operator != b[i].Segments[j].Operator || !slices.Equal(a[i].Segments[j].Points, b[i].Segments[j].Points) {
-				return false
-			}
-		}
-		if !slices.Equal(a[i].Text, b[i].Text) {
-			return false
-		}
-	}
-	return true
-}
-
-// pdfIdentityTransform 判断局部到页面矩阵在扣除边界偏移后是否为单位变换
-// 入参: m 仿射矩阵, box 目标边界
-// 返回: bool 是否可省略CTM属性
-func pdfIdentityTransform(m pdfgo.Matrix, box Box) bool {
-	return math.Abs(m[0]-1) <= 1e-9 && math.Abs(m[1]) <= 1e-9 && math.Abs(m[2]) <= 1e-9 && math.Abs(m[3]-1) <= 1e-9 && math.Abs(m[4]-box.X) <= 1e-9 && math.Abs(m[5]-box.Y) <= 1e-9
-}
-
 // promoteTemplatePages 将多页固定位置处于底层或顶层且无穿插遮挡的高频表单自动提升为OFD模板页
 // 入参: ctx 取消上下文
 // 返回: error 模板页编码或注册错误
@@ -1019,447 +1540,4 @@ func (p *pdfImporter) structureBoundObjectIDs() map[string]bool {
 		}
 	}
 	return bound
-}
-
-// templateCandidateKey 为固定位置复合对象构造模板提升匹配键
-// 入参: ctx 取消上下文, unit 复合对象, area 页面区域, zOrder 目标模板层次
-// 返回: pdfTemplateCandidateKey 模板签名, bool 是否允许提升, error 编码错误
-func templateCandidateKey(ctx context.Context, unit CompositeGraphicUnit, area PageArea, zOrder string) (pdfTemplateCandidateKey, bool, error) {
-	if area.PhysicalBox == "" {
-		return pdfTemplateCandidateKey{}, false, nil
-	}
-	alpha := -1
-	if unit.Alpha != nil {
-		alpha = *unit.Alpha
-	}
-	key := pdfTemplateCandidateKey{
-		resourceID: unit.ResourceID,
-		boundary:   unit.Boundary,
-		ctm:        unit.CTM,
-		pageArea:   area,
-		zOrder:     zOrder,
-		alpha:      alpha,
-	}
-	if unit.Clips != nil {
-		data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) {
-			x.root("ClipsWrap", nil)
-			x.clips(unit.Clips, unit.CTM)
-			x.end("ClipsWrap")
-		})
-		if err != nil {
-			return pdfTemplateCandidateKey{}, false, err
-		}
-		key.hasClips = true
-		key.clipsDigest = sha256.Sum256(data)
-	}
-	return key, true, nil
-}
-
-// canonicalFormFloat 将毫米浮点坐标量化到1e-5精度，消除矩阵求逆产生的末位舍入噪声
-// 入参: v 浮点数值
-// 返回: string 规范化文本
-func canonicalFormFloat(v float64) string {
-	rounded := math.Round(v*1e5) / 1e5
-	if rounded == 0 {
-		rounded = 0
-	}
-	return strconv.FormatFloat(rounded, 'f', -1, 64)
-}
-
-// canonicalFormNumberValue 将浮点数值量化到1e-5精度
-// 入参: v 原始数值
-// 返回: float64 规范化数值
-func canonicalFormNumberValue(v float64) float64 {
-	rounded := math.Round(v*1e5) / 1e5
-	if rounded == 0 {
-		return 0
-	}
-	return rounded
-}
-
-// canonicalFormNumbers 量化空格分隔数值或路径指令串中的浮点数值，保留指令标记原样
-// 入参: raw 原始属性串
-// 返回: string 规范化属性串
-func canonicalFormNumbers(raw string) string {
-	if raw == "" {
-		return ""
-	}
-	fields := strings.Fields(raw)
-	if len(fields) == 0 {
-		return ""
-	}
-	var out strings.Builder
-	out.Grow(len(raw))
-	for i, field := range fields {
-		if i != 0 {
-			out.WriteByte(' ')
-		}
-		if v, err := strconv.ParseFloat(field, 64); err == nil && finite(v) {
-			out.WriteString(canonicalFormFloat(v))
-		} else {
-			out.WriteString(field)
-		}
-	}
-	return out.String()
-}
-
-// canonicalFormClips 复制并量化裁剪集合中的几何数值，不修改原裁剪数据
-// 入参: clips 原裁剪集合
-// 返回: *Clips 规范化裁剪集合
-func canonicalFormClips(clips *Clips) *Clips {
-	if clips == nil {
-		return nil
-	}
-	copyClips := *clips
-	copyClips.Clip = make([]Clip, len(clips.Clip))
-	for i, clip := range clips.Clip {
-		copyClip := Clip{Area: make([]ClipArea, len(clip.Area))}
-		for j, area := range clip.Area {
-			copyArea := area
-			copyArea.CTM = canonicalFormNumbers(area.CTM)
-			if len(area.Path) != 0 {
-				copyArea.Path = make([]PathObject, len(area.Path))
-				for k, p := range area.Path {
-					obj := canonicalFormObject(GraphicObject{Type: "Path", PathObject: p})
-					copyArea.Path[k] = obj.PathObject
-				}
-			}
-			if len(area.Text) != 0 {
-				copyArea.Text = make([]TextObject, len(area.Text))
-				for k, t := range area.Text {
-					obj := canonicalFormObject(GraphicObject{Type: "Text", TextObject: t})
-					copyArea.Text[k] = obj.TextObject
-				}
-			}
-			copyClip.Area[j] = copyArea
-		}
-		copyClips.Clip[i] = copyClip
-	}
-	return &copyClips
-}
-
-// canonicalFormColor 复制并量化渐变及图案坐标数值，不修改原颜色对象
-// 入参: color 原颜色对象
-// 返回: *FillColor 规范化颜色对象
-func canonicalFormColor(color *FillColor) *FillColor {
-	if color == nil {
-		return nil
-	}
-	copyColor := *color
-	if color.AxialShd != nil {
-		shd := *color.AxialShd
-		shd.StartPoint = canonicalFormNumbers(shd.StartPoint)
-		shd.EndPoint = canonicalFormNumbers(shd.EndPoint)
-		shd.MapUnit = canonicalFormNumberValue(shd.MapUnit)
-		copyColor.AxialShd = &shd
-	}
-	if color.RadialShd != nil {
-		shd := *color.RadialShd
-		shd.StartPoint = canonicalFormNumbers(shd.StartPoint)
-		shd.EndPoint = canonicalFormNumbers(shd.EndPoint)
-		shd.StartRadius = canonicalFormNumberValue(shd.StartRadius)
-		shd.EndRadius = canonicalFormNumberValue(shd.EndRadius)
-		shd.Angle = canonicalFormNumberValue(shd.Angle)
-		shd.Eccentricity = canonicalFormNumberValue(shd.Eccentricity)
-		shd.MapUnit = canonicalFormNumberValue(shd.MapUnit)
-		copyColor.RadialShd = &shd
-	}
-	if color.GouraudShd != nil {
-		shd := *color.GouraudShd
-		shd.Point = slices.Clone(shd.Point)
-		for i := range shd.Point {
-			shd.Point[i].X = canonicalFormNumberValue(shd.Point[i].X)
-			shd.Point[i].Y = canonicalFormNumberValue(shd.Point[i].Y)
-		}
-		copyColor.GouraudShd = &shd
-	}
-	if color.LaGouraudShd != nil {
-		shd := *color.LaGouraudShd
-		shd.Point = slices.Clone(shd.Point)
-		for i := range shd.Point {
-			shd.Point[i].X = canonicalFormNumberValue(shd.Point[i].X)
-			shd.Point[i].Y = canonicalFormNumberValue(shd.Point[i].Y)
-		}
-		copyColor.LaGouraudShd = &shd
-	}
-	if color.Pattern != nil {
-		pat := *color.Pattern
-		pat.Width = canonicalFormNumberValue(pat.Width)
-		pat.Height = canonicalFormNumberValue(pat.Height)
-		pat.XStep = canonicalFormNumberValue(pat.XStep)
-		pat.YStep = canonicalFormNumberValue(pat.YStep)
-		pat.CTM = canonicalFormNumbers(pat.CTM)
-		copyColor.Pattern = &pat
-	}
-	return &copyColor
-}
-
-// canonicalFormObject 生成用于去重哈希与比对的浮点规范化对象浅拷贝，不改动正文文字及原对象
-// 入参: object 原始图形对象
-// 返回: GraphicObject 规范化后的对象副本
-func canonicalFormObject(object GraphicObject) GraphicObject {
-	switch object.Type {
-	case "PathObject", "Path":
-		p := object.PathObject
-		p.Boundary = canonicalFormNumbers(p.Boundary)
-		p.CTM = canonicalFormNumbers(p.CTM)
-		p.AbbreviatedData = canonicalFormNumbers(p.AbbreviatedData)
-		p.LineWidth = canonicalFormNumberValue(p.LineWidth)
-		p.MiterLimit = canonicalFormNumberValue(p.MiterLimit)
-		p.DashPattern = canonicalFormNumbers(p.DashPattern)
-		if p.DashOffset != nil {
-			v := canonicalFormNumberValue(*p.DashOffset)
-			p.DashOffset = &v
-		}
-		p.Clips = canonicalFormClips(p.Clips)
-		p.FillColor = canonicalFormColor(p.FillColor)
-		p.StrokeColor = (*StrokeColor)(canonicalFormColor((*FillColor)(p.StrokeColor)))
-		object.PathObject = p
-	case "TextObject", "Text":
-		t := object.TextObject
-		t.Boundary = canonicalFormNumbers(t.Boundary)
-		t.CTM = canonicalFormNumbers(t.CTM)
-		t.Size = canonicalFormNumberValue(t.Size)
-		t.HScale = canonicalFormNumberValue(t.HScale)
-		t.LineWidth = canonicalFormNumberValue(t.LineWidth)
-		t.MiterLimit = canonicalFormNumberValue(t.MiterLimit)
-		t.DashPattern = canonicalFormNumbers(t.DashPattern)
-		if t.DashOffset != nil {
-			v := canonicalFormNumberValue(*t.DashOffset)
-			t.DashOffset = &v
-		}
-		if len(t.TextCode) != 0 {
-			codes := make([]TextCode, len(t.TextCode))
-			for i, code := range t.TextCode {
-				code.X = canonicalFormNumbers(code.X)
-				code.Y = canonicalFormNumbers(code.Y)
-				code.DeltaX = canonicalFormNumbers(code.DeltaX)
-				code.DeltaY = canonicalFormNumbers(code.DeltaY)
-				codes[i] = code
-			}
-			t.TextCode = codes
-		}
-		t.Clips = canonicalFormClips(t.Clips)
-		t.FillColor = canonicalFormColor(t.FillColor)
-		t.StrokeColor = (*StrokeColor)(canonicalFormColor((*FillColor)(t.StrokeColor)))
-		object.TextObject = t
-	case "ImageObject":
-		img := object.ImageObject
-		img.Boundary = canonicalFormNumbers(img.Boundary)
-		img.CTM = canonicalFormNumbers(img.CTM)
-		img.Clips = canonicalFormClips(img.Clips)
-		object.ImageObject = img
-	case "CompositeObject", "CompositeGraphicUnit":
-		c := object.CompositeGraphicUnit
-		c.Boundary = canonicalFormNumbers(c.Boundary)
-		c.CTM = canonicalFormNumbers(c.CTM)
-		c.Clips = canonicalFormClips(c.Clips)
-		object.CompositeGraphicUnit = c
-	}
-	return object
-}
-
-// isolatedGroupContentDigest 计算独立透明组子图元局部几何与继承图形状态的确定性摘要，避免跨状态光栅缓存误命中
-// 入参: nodes 剥离外层裁剪后的子图元切片, toLocal 页面到表单局部毫米坐标的变换矩阵, space 组混合颜色空间
-// 返回: [32]byte 内容与状态特征摘要
-func isolatedGroupContentDigest(nodes []pdfCompositeNode, toLocal pdfgo.Matrix, space *pdfgo.ColorSpace) [32]byte {
-	h := sha256.New()
-	var buf [8]byte
-	writeU64 := func(v uint64) {
-		binary.LittleEndian.PutUint64(buf[:], v)
-		h.Write(buf[:])
-	}
-	writeFloat := func(v float64) {
-		q := math.Round(v*1e4) / 1e4
-		if q == 0 {
-			q = 0
-		}
-		writeU64(math.Float64bits(q))
-	}
-	writeBool := func(v bool) {
-		if v {
-			h.Write([]byte{1})
-		} else {
-			h.Write([]byte{0})
-		}
-	}
-	writeString := func(s string) {
-		writeU64(uint64(len(s)))
-		h.Write([]byte(s))
-	}
-	writePtr := func(v any) {
-		if v == nil {
-			writeU64(0)
-			return
-		}
-		rv := reflect.ValueOf(v)
-		if rv.Kind() != reflect.Pointer || rv.IsNil() {
-			writeU64(0)
-			return
-		}
-		writeU64(uint64(rv.Pointer()))
-	}
-	writeMatrix := func(m pdfgo.Matrix) {
-		for _, v := range m {
-			writeFloat(v)
-		}
-	}
-	writeColorSpace := func(cs *pdfgo.ColorSpace) {
-		writePtr(cs)
-		if cs != nil {
-			writeString(string(cs.Model))
-		}
-	}
-	writePath := func(path pdfgo.Path, mat pdfgo.Matrix) {
-		writeBool(path.EvenOdd)
-		writeU64(uint64(len(path.Segments)))
-		for _, seg := range path.Segments {
-			writeString(seg.Operator)
-			writeU64(uint64(len(seg.Points)))
-			for _, pt := range seg.Points {
-				p := mat.Apply(pt)
-				writeFloat(p.X)
-				writeFloat(p.Y)
-			}
-		}
-		writeU64(uint64(len(path.Text)))
-		for _, tc := range path.Text {
-			writePtr(tc)
-		}
-	}
-	writePaint := func(paint pdfgo.Paint) {
-		writeBool(paint.None)
-		writeFloat(paint.Alpha)
-		for _, v := range paint.RGB {
-			writeFloat(v)
-		}
-		writeBool(paint.CMYK != nil)
-		if paint.CMYK != nil {
-			for _, v := range *paint.CMYK {
-				writeFloat(v)
-			}
-		}
-		writeColorSpace(paint.Space)
-		writeString(string(paint.SourceSpace))
-		for _, v := range paint.Values {
-			writeFloat(v)
-		}
-		writePtr(paint.Process)
-		writePtr(paint.Colorant)
-		writePtr(paint.Axial)
-		writePtr(paint.Radial)
-		writePtr(paint.Function)
-		writePtr(paint.Mesh)
-		writePtr(paint.Tiling)
-		writePtr(paint.Shading)
-	}
-	writeStyle := func(st pdfgo.Style) {
-		writePaint(st.Fill)
-		writePaint(st.Stroke)
-		writeFloat(st.LineWidth)
-		writeU64(uint64(st.Cap))
-		writeU64(uint64(st.Join))
-		writeFloat(st.MiterLimit)
-		writeU64(uint64(len(st.Dash)))
-		for _, d := range st.Dash {
-			writeFloat(d)
-		}
-		writeFloat(st.DashPhase)
-		writeBool(st.StrokeAdjust)
-		writeBool(st.FillOverprint)
-		writeBool(st.StrokeOverprint)
-		writeU64(uint64(st.OverprintMode))
-		writeString(string(st.RenderingIntent))
-		writeString(string(st.BlendMode))
-		writeBool(st.AlphaIsShape)
-		writePtr(st.SoftMask)
-		writeBool(st.Smoothness != nil)
-		if st.Smoothness != nil {
-			writeFloat(*st.Smoothness)
-		}
-		writeBool(st.Antialias != nil)
-		if st.Antialias != nil {
-			writeBool(*st.Antialias)
-		}
-		writePtr(st.Halftone)
-		writePtr(st.Transfer)
-		writeU64(uint64(len(st.Clips)))
-		for _, clip := range st.Clips {
-			writePath(clip, toLocal)
-		}
-	}
-	writeTextMark := func(tm *pdfgo.TextMark) {
-		writePtr(tm.Font)
-		if tm.Font != nil {
-			writeString(tm.Font.Name)
-		}
-		writeU64(uint64(tm.Mode))
-		writeFloat(tm.Size)
-		writeFloat(tm.HorizontalScale)
-		writeMatrix(toLocal.Mul(tm.Matrix))
-		if tm.StrokeMatrix != (pdfgo.Matrix{}) {
-			writeMatrix(toLocal.Mul(tm.StrokeMatrix))
-		}
-		writeStyle(tm.Style)
-		writeU64(uint64(len(tm.Glyphs)))
-		for _, g := range tm.Glyphs {
-			writeU64(uint64(g.Code))
-			writeU64(uint64(g.CID))
-			writeString(g.Name)
-			writeFloat(g.Width)
-		}
-		writeU64(uint64(len(tm.Positions)))
-		for _, pos := range tm.Positions {
-			writeFloat(pos.X)
-			writeFloat(pos.Y)
-		}
-	}
-	var hashNodes func(h hash.Hash, list []pdfCompositeNode)
-	hashNodes = func(h hash.Hash, list []pdfCompositeNode) {
-		writeU64(uint64(len(list)))
-		for _, node := range list {
-			if node.path != nil {
-				h.Write([]byte{'P'})
-				writeBool(node.path.Fill)
-				writeBool(node.path.Stroke)
-				if node.path.StrokeMatrix != (pdfgo.Matrix{}) {
-					writeMatrix(toLocal.Mul(node.path.StrokeMatrix))
-				}
-				writeStyle(node.path.Style)
-				writePath(node.path.Path, toLocal)
-			}
-			if node.text != nil {
-				h.Write([]byte{'T'})
-				writeTextMark(node.text)
-			}
-			if node.image != nil {
-				h.Write([]byte{'I'})
-				writePtr(node.image.Image)
-				writeMatrix(toLocal.Mul(node.image.Matrix))
-				writeStyle(node.image.Style)
-			}
-			if node.glyph != nil {
-				h.Write([]byte{'L'})
-				writeTextMark(node.glyph)
-			}
-			if node.group != nil {
-				h.Write([]byte{'G'})
-				writeFloat(node.group.Alpha)
-				writeBool(node.group.Isolated)
-				writeBool(node.group.Knockout)
-				writeString(string(node.group.BlendMode))
-				writeColorSpace(node.group.ColorSpace)
-				writePtr(node.group.SoftMask)
-			}
-			if len(node.children) != 0 {
-				h.Write([]byte{'C'})
-				hashNodes(h, node.children)
-			}
-		}
-	}
-	writeColorSpace(space)
-	hashNodes(h, nodes)
-	var sum [32]byte
-	h.Sum(sum[:0])
-	return sum
 }

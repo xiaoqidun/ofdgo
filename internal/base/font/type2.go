@@ -60,6 +60,171 @@ type type2State struct {
 	globalUsage      []bool
 }
 
+// readType2Index 读取并校验CFF索引的全部偏移，不复制程序字节
+// 入参: data 字体数据, offset 索引偏移
+// 返回: [][]byte 索引项, int 索引结束位置, error 错误信息
+func readType2Index(data []byte, offset int) ([][]byte, int, error) {
+	count, base, end, err := scanCFFIndex(data, offset)
+	if err != nil || count == 0 {
+		return nil, end, err
+	}
+	width := int(data[offset+2])
+	items := make([][]byte, count)
+	previous := 1
+	for index := 0; index <= count; index++ {
+		value := uint64(0)
+		for _, b := range data[offset+3+index*width : offset+3+(index+1)*width] {
+			value = value<<8 | uint64(b)
+		}
+		if index != 0 {
+			items[index-1] = data[base+previous-1 : base+int(value)-1]
+		}
+		previous = int(value)
+	}
+	return items, end, nil
+}
+
+// readType2Font 读取单FD字体的Type2执行资源，CID字体先经字体规范化
+// 入参: data CFF字体数据
+// 返回: *type2Font 执行资源, error 错误信息
+func readType2Font(data []byte) (*type2Font, error) {
+	if !isBareCFFData(data) {
+		return nil, fmt.Errorf("invalid CFF header")
+	}
+	names, end, err := readType2Index(data, int(data[2]))
+	if err != nil {
+		return nil, fmt.Errorf("invalid CFF name index: %w", err)
+	}
+	if len(names) != 1 {
+		return nil, fmt.Errorf("invalid CFF font count")
+	}
+	tops, end, err := readType2Index(data, end)
+	if err != nil {
+		return nil, fmt.Errorf("invalid CFF top index: %w", err)
+	}
+	if len(tops) != 1 {
+		return nil, fmt.Errorf("invalid CFF top dictionary count")
+	}
+	_, end, err = readType2Index(data, end)
+	if err != nil {
+		return nil, err
+	}
+	globals, _, err := readType2Index(data, end)
+	if err != nil {
+		return nil, err
+	}
+	dict, err := readCFFDict(tops[0])
+	if err != nil {
+		return nil, err
+	}
+	if value, ok := dict[1206]; ok && (len(value) != 1 || value[0] != 2) {
+		return nil, fmt.Errorf("unsupported CFF charstring type")
+	}
+	if _, cid := dict[1230]; cid {
+		return nil, fmt.Errorf("CID CFF requires FD normalization")
+	}
+	offset := dict[17]
+	if len(offset) != 1 || !finite(offset[0]) || offset[0] < 0 || offset[0] > float64(len(data)) || offset[0] != math.Trunc(offset[0]) {
+		return nil, fmt.Errorf("invalid CFF charstrings offset")
+	}
+	chars, _, err := readType2Index(data, int(offset[0]))
+	if err != nil {
+		return nil, fmt.Errorf("invalid CFF charstrings: %w", err)
+	}
+	if len(chars) == 0 {
+		return nil, fmt.Errorf("empty CFF charstrings")
+	}
+	font := &type2Font{data: data, chars: chars, globals: globals, seed: 1}
+	if _, err := readType2Private(data, dict[18], font); err != nil {
+		return nil, err
+	}
+	return font, nil
+}
+
+// readType2Private 读取FD私有字宽、随机种子和局部子程序
+// 入参: data 字体数据, values Private范围, font 执行资源
+// 返回: cffDict 私有字典, error 范围或字段错误
+func readType2Private(data []byte, values []float64, font *type2Font) (cffDict, error) {
+	private := cffDict{}
+	var err error
+	if values != nil {
+		if len(values) != 2 || !finite(values[0]) || !finite(values[1]) || values[0] < 0 || values[1] < 0 || values[0] > float64(len(data)) || values[1] > float64(len(data))-values[0] || values[0] != math.Trunc(values[0]) || values[1] != math.Trunc(values[1]) {
+			return nil, fmt.Errorf("invalid CFF private range")
+		}
+		start := int(values[1])
+		private, err = readCFFDict(data[start : start+int(values[0])])
+		if err != nil {
+			return nil, err
+		}
+		for op, target := range map[int]*float64{20: &font.def, 21: &font.nominal} {
+			if value, ok := private[op]; ok {
+				if len(value) != 1 || !finite(value[0]) {
+					return nil, fmt.Errorf("invalid CFF private width")
+				}
+				*target = value[0]
+			}
+		}
+		if value, ok := private[1219]; ok {
+			if len(value) != 1 || !finite(value[0]) || value[0] < math.MinInt32 || value[0] > math.MaxInt32 || value[0] != math.Trunc(value[0]) {
+				return nil, fmt.Errorf("invalid CFF random seed")
+			}
+			font.seed = uint64(int64(value[0])) | 1
+		}
+		if value, ok := private[19]; ok {
+			if len(value) != 1 || !finite(value[0]) || value[0] < 0 || value[0] > float64(len(data)-start) || value[0] != math.Trunc(value[0]) {
+				return nil, fmt.Errorf("invalid CFF local subroutine offset")
+			}
+			font.locals, _, err = readType2Index(data, start+int(value[0]))
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return private, nil
+}
+
+// normalizeType2ProgramsMatrix 规范化字形指令并按需变换轮廓与字宽
+// 入参: data CFF字体数据, matrix 设计坐标变换，nil时保留原坐标
+// 返回: [][]byte 字形程序, bool 是否变更, error 错误信息
+func normalizeType2ProgramsMatrix(data []byte, matrix *[6]float64) ([][]byte, bool, error) {
+	font, err := readType2Font(data)
+	if err != nil {
+		return nil, false, err
+	}
+	result := slices.Clone(font.chars)
+	changed := false
+	var stack [48]float64
+	for gid, program := range font.chars {
+		if len(program) == 0 {
+			if matrix == nil {
+				continue
+			}
+			program = []byte{14}
+		}
+		steps := 0
+		state := type2State{font: font, args: stack[:0], width: font.def, seed: font.seed + uint64(gid), steps: &steps}
+		_, err := state.run(program, 0)
+		if err != nil {
+			continue
+		}
+		if !state.changed && matrix == nil {
+			continue
+		}
+		var output bytes.Buffer
+		steps = 0
+		state = type2State{font: font, args: stack[:0], width: font.def, seed: font.seed + uint64(gid), steps: &steps, output: &output}
+		if matrix != nil {
+			state.matrix, state.widthTarget, state.stripHints = matrix, &type2Font{}, true
+		}
+		if _, err := state.run(program, 0); err != nil {
+			return nil, false, fmt.Errorf("CFF glyph %d: %w", gid, err)
+		}
+		result[gid] = output.Bytes()
+		changed = true
+	}
+	return result, changed, nil
+}
+
 // push 按Type2规范附录B校验并追加操作数
 // 入参: value 操作数
 // 返回: error 栈或数值错误
@@ -356,169 +521,4 @@ func (s *type2State) appendComponent(code, x, y float64) error {
 	}
 	s.outX, s.outY = child.outX, child.outY
 	return nil
-}
-
-// readType2Index 读取并校验CFF索引的全部偏移，不复制程序字节
-// 入参: data 字体数据, offset 索引偏移
-// 返回: [][]byte 索引项, int 索引结束位置, error 错误信息
-func readType2Index(data []byte, offset int) ([][]byte, int, error) {
-	count, base, end, err := scanCFFIndex(data, offset)
-	if err != nil || count == 0 {
-		return nil, end, err
-	}
-	width := int(data[offset+2])
-	items := make([][]byte, count)
-	previous := 1
-	for index := 0; index <= count; index++ {
-		value := uint64(0)
-		for _, b := range data[offset+3+index*width : offset+3+(index+1)*width] {
-			value = value<<8 | uint64(b)
-		}
-		if index != 0 {
-			items[index-1] = data[base+previous-1 : base+int(value)-1]
-		}
-		previous = int(value)
-	}
-	return items, end, nil
-}
-
-// readType2Font 读取单FD字体的Type2执行资源，CID字体先经字体规范化
-// 入参: data CFF字体数据
-// 返回: *type2Font 执行资源, error 错误信息
-func readType2Font(data []byte) (*type2Font, error) {
-	if !isBareCFFData(data) {
-		return nil, fmt.Errorf("invalid CFF header")
-	}
-	names, end, err := readType2Index(data, int(data[2]))
-	if err != nil {
-		return nil, fmt.Errorf("invalid CFF name index: %w", err)
-	}
-	if len(names) != 1 {
-		return nil, fmt.Errorf("invalid CFF font count")
-	}
-	tops, end, err := readType2Index(data, end)
-	if err != nil {
-		return nil, fmt.Errorf("invalid CFF top index: %w", err)
-	}
-	if len(tops) != 1 {
-		return nil, fmt.Errorf("invalid CFF top dictionary count")
-	}
-	_, end, err = readType2Index(data, end)
-	if err != nil {
-		return nil, err
-	}
-	globals, _, err := readType2Index(data, end)
-	if err != nil {
-		return nil, err
-	}
-	dict, err := readCFFDict(tops[0])
-	if err != nil {
-		return nil, err
-	}
-	if value, ok := dict[1206]; ok && (len(value) != 1 || value[0] != 2) {
-		return nil, fmt.Errorf("unsupported CFF charstring type")
-	}
-	if _, cid := dict[1230]; cid {
-		return nil, fmt.Errorf("CID CFF requires FD normalization")
-	}
-	offset := dict[17]
-	if len(offset) != 1 || !finite(offset[0]) || offset[0] < 0 || offset[0] > float64(len(data)) || offset[0] != math.Trunc(offset[0]) {
-		return nil, fmt.Errorf("invalid CFF charstrings offset")
-	}
-	chars, _, err := readType2Index(data, int(offset[0]))
-	if err != nil {
-		return nil, fmt.Errorf("invalid CFF charstrings: %w", err)
-	}
-	if len(chars) == 0 {
-		return nil, fmt.Errorf("empty CFF charstrings")
-	}
-	font := &type2Font{data: data, chars: chars, globals: globals, seed: 1}
-	if _, err := readType2Private(data, dict[18], font); err != nil {
-		return nil, err
-	}
-	return font, nil
-}
-
-// readType2Private 读取FD私有字宽、随机种子和局部子程序
-// 入参: data 字体数据, values Private范围, font 执行资源
-// 返回: cffDict 私有字典, error 范围或字段错误
-func readType2Private(data []byte, values []float64, font *type2Font) (cffDict, error) {
-	private := cffDict{}
-	var err error
-	if values != nil {
-		if len(values) != 2 || !finite(values[0]) || !finite(values[1]) || values[0] < 0 || values[1] < 0 || values[0] > float64(len(data)) || values[1] > float64(len(data))-values[0] || values[0] != math.Trunc(values[0]) || values[1] != math.Trunc(values[1]) {
-			return nil, fmt.Errorf("invalid CFF private range")
-		}
-		start := int(values[1])
-		private, err = readCFFDict(data[start : start+int(values[0])])
-		if err != nil {
-			return nil, err
-		}
-		for op, target := range map[int]*float64{20: &font.def, 21: &font.nominal} {
-			if value, ok := private[op]; ok {
-				if len(value) != 1 || !finite(value[0]) {
-					return nil, fmt.Errorf("invalid CFF private width")
-				}
-				*target = value[0]
-			}
-		}
-		if value, ok := private[1219]; ok {
-			if len(value) != 1 || !finite(value[0]) || value[0] < math.MinInt32 || value[0] > math.MaxInt32 || value[0] != math.Trunc(value[0]) {
-				return nil, fmt.Errorf("invalid CFF random seed")
-			}
-			font.seed = uint64(int64(value[0])) | 1
-		}
-		if value, ok := private[19]; ok {
-			if len(value) != 1 || !finite(value[0]) || value[0] < 0 || value[0] > float64(len(data)-start) || value[0] != math.Trunc(value[0]) {
-				return nil, fmt.Errorf("invalid CFF local subroutine offset")
-			}
-			font.locals, _, err = readType2Index(data, start+int(value[0]))
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-	return private, nil
-}
-
-// normalizeType2ProgramsMatrix 规范化字形指令并按需变换轮廓与字宽
-// 入参: data CFF字体数据, matrix 设计坐标变换，nil时保留原坐标
-// 返回: [][]byte 字形程序, bool 是否变更, error 错误信息
-func normalizeType2ProgramsMatrix(data []byte, matrix *[6]float64) ([][]byte, bool, error) {
-	font, err := readType2Font(data)
-	if err != nil {
-		return nil, false, err
-	}
-	result := slices.Clone(font.chars)
-	changed := false
-	var stack [48]float64
-	for gid, program := range font.chars {
-		if len(program) == 0 {
-			if matrix == nil {
-				continue
-			}
-			program = []byte{14}
-		}
-		steps := 0
-		state := type2State{font: font, args: stack[:0], width: font.def, seed: font.seed + uint64(gid), steps: &steps}
-		_, err := state.run(program, 0)
-		if err != nil {
-			continue
-		}
-		if !state.changed && matrix == nil {
-			continue
-		}
-		var output bytes.Buffer
-		steps = 0
-		state = type2State{font: font, args: stack[:0], width: font.def, seed: font.seed + uint64(gid), steps: &steps, output: &output}
-		if matrix != nil {
-			state.matrix, state.widthTarget, state.stripHints = matrix, &type2Font{}, true
-		}
-		if _, err := state.run(program, 0); err != nil {
-			return nil, false, fmt.Errorf("CFF glyph %d: %w", gid, err)
-		}
-		result[gid] = output.Bytes()
-		changed = true
-	}
-	return result, changed, nil
 }

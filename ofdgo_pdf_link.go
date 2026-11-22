@@ -25,16 +25,33 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// PDFDestination 获取当前文档的PDF运行时定位语义，坐标单位为毫米
-// 返回值独立于阅读器；普通OFD及保存为OFD再打开的文档不返回PDF目标
-// 入参: dest 当前文档动作中的目标
-// 返回: pdfgo.DestinationTarget 页面左上原点的定位目标, bool 是否来自PDF导入快照
-func (r *Reader) PDFDestination(dest Dest) (pdfgo.DestinationTarget, bool) {
-	if d := r.pdfDestinations; d != nil && d.root == r.documentRoot {
-		target, ok := d.targets[pdfDestinationKey(dest)]
-		return target, ok
-	}
-	return pdfgo.DestinationTarget{}, false
+// PDFDestinationTarget 描述页面左上原点坐标下的PDF定位目标，坐标单位为毫米
+type PDFDestinationTarget struct {
+	Mode     string
+	Left     float64
+	Top      float64
+	Right    float64
+	Bottom   float64
+	Zoom     float64
+	KeepLeft bool
+	KeepTop  bool
+	KeepZoom bool
+}
+
+// PDFDestinationView 描述视口左上位置和缩放率，位置使用未缩放的页面坐标
+type PDFDestinationView struct {
+	Left float64
+	Top  float64
+	Zoom float64
+}
+
+// PDFDestinationViewport 描述PDF定位目标计算所需的窗口尺寸、当前视图和页面范围
+type PDFDestinationViewport struct {
+	Width         float64
+	Height        float64
+	Current       PDFDestinationView
+	PageBounds    Box
+	ContentBounds *Box
 }
 
 // pdfEmbeddedFile 保存目标路径的容器与原始文件，阅读器按需打开
@@ -47,7 +64,130 @@ type pdfEmbeddedFile struct {
 // pdfDestinations 保存PDF导入文档的运行时目标语义，不写入OFD包
 type pdfDestinations struct {
 	root    string
-	targets map[Dest]pdfgo.DestinationTarget
+	targets map[Dest]PDFDestinationTarget
+}
+
+// fromPDFDestinationTarget 将内部pdfgo定位目标转换为根包定位目标
+// 入参: target 内部定位目标
+// 返回: PDFDestinationTarget 根包定位目标
+func fromPDFDestinationTarget(target pdfgo.DestinationTarget) PDFDestinationTarget {
+	return PDFDestinationTarget{
+		Mode:     string(target.Mode),
+		Left:     target.Left,
+		Top:      target.Top,
+		Right:    target.Right,
+		Bottom:   target.Bottom,
+		Zoom:     target.Zoom,
+		KeepLeft: target.KeepLeft,
+		KeepTop:  target.KeepTop,
+		KeepZoom: target.KeepZoom,
+	}
+}
+
+// toPDFDestinationTarget 将根包PDF定位目标转换为内部pdfgo目标结构
+// 入参: target 根包定位目标
+// 返回: pdfgo.DestinationTarget 内部定位目标
+func toPDFDestinationTarget(target PDFDestinationTarget) pdfgo.DestinationTarget {
+	return pdfgo.DestinationTarget{
+		Mode:     pdfgo.Name(target.Mode),
+		Left:     target.Left,
+		Top:      target.Top,
+		Right:    target.Right,
+		Bottom:   target.Bottom,
+		Zoom:     target.Zoom,
+		KeepLeft: target.KeepLeft,
+		KeepTop:  target.KeepTop,
+		KeepZoom: target.KeepZoom,
+	}
+}
+
+// toPDFDestinationViewport 将根包视口结构转换为内部pdfgo视口结构
+// 入参: viewport 根包视口配置
+// 返回: pdfgo.DestinationViewport 内部视口配置
+func toPDFDestinationViewport(viewport PDFDestinationViewport) pdfgo.DestinationViewport {
+	out := pdfgo.DestinationViewport{
+		Width:      viewport.Width,
+		Height:     viewport.Height,
+		Current:    pdfgo.DestinationView{Left: viewport.Current.Left, Top: viewport.Current.Top, Zoom: viewport.Current.Zoom},
+		PageBounds: pdfgo.Rectangle{XMin: viewport.PageBounds.X, YMin: viewport.PageBounds.Y, XMax: viewport.PageBounds.X + viewport.PageBounds.W, YMax: viewport.PageBounds.Y + viewport.PageBounds.H},
+	}
+	if viewport.ContentBounds != nil {
+		b := *viewport.ContentBounds
+		rect := pdfgo.Rectangle{XMin: b.X, YMin: b.Y, XMax: b.X + b.W, YMax: b.Y + b.H}
+		out.ContentBounds = &rect
+	}
+	return out
+}
+
+// pdfDestinationKey 按OFD模式实际编码的属性生成运行时目标索引
+// 入参: dest OFD目标
+// 返回: Dest 与序列化后目标一致的键
+func pdfDestinationKey(dest Dest) Dest {
+	dest = dest.effective()
+	switch dest.Type {
+	case "Fit":
+		dest.Left, dest.Top, dest.Right, dest.Bottom, dest.Zoom = 0, 0, 0, 0, 0
+		dest.OmitLeft, dest.OmitTop, dest.OmitZoom = true, true, true
+	case "FitH":
+		dest.Left, dest.Right, dest.Bottom, dest.Zoom = 0, 0, 0, 0
+		dest.OmitLeft, dest.OmitZoom = true, true
+	case "FitV":
+		dest.Top, dest.Right, dest.Bottom, dest.Zoom = 0, 0, 0, 0
+		dest.OmitTop, dest.OmitZoom = true, true
+	case "FitR":
+		dest.Zoom, dest.OmitZoom = 0, true
+	case "XYZ":
+		dest.Right, dest.Bottom = 0, 0
+	}
+	return dest
+}
+
+// Transform 对PDF定位目标应用二维仿射变换矩阵
+// 入参: matrix 仿射变换矩阵[a,b,c,d,e,f]
+// 返回: PDFDestinationTarget 变换后的定位目标, error 参数错误
+func (d PDFDestinationTarget) Transform(matrix [6]float64) (PDFDestinationTarget, error) {
+	result, err := toPDFDestinationTarget(d).Transform(pdfgo.Matrix(matrix))
+	if err != nil {
+		return PDFDestinationTarget{}, err
+	}
+	return fromPDFDestinationTarget(result), nil
+}
+
+// View 根据视口尺寸和页面范围计算PDF定位目标对应的视图位置与缩放率
+// 入参: viewport 视口与页面范围配置
+// 返回: PDFDestinationView 目标视图, error 参数错误
+func (d PDFDestinationTarget) View(viewport PDFDestinationViewport) (PDFDestinationView, error) {
+	result, err := toPDFDestinationTarget(d).View(toPDFDestinationViewport(viewport))
+	if err != nil {
+		return PDFDestinationView{}, err
+	}
+	return PDFDestinationView{Left: result.Left, Top: result.Top, Zoom: result.Zoom}, nil
+}
+
+// Constrain 将视图位置限制在视口与页面有效范围内
+// 入参: viewport 视口与页面范围配置
+// 返回: PDFDestinationView 约束后的视图, error 参数错误
+func (v PDFDestinationView) Constrain(viewport PDFDestinationViewport) (PDFDestinationView, error) {
+	result, err := (pdfgo.DestinationView{Left: v.Left, Top: v.Top, Zoom: v.Zoom}).Constrain(toPDFDestinationViewport(viewport))
+	if err != nil {
+		return PDFDestinationView{}, err
+	}
+	return PDFDestinationView{Left: result.Left, Top: result.Top, Zoom: result.Zoom}, nil
+}
+
+// PDFDestination 获取当前文档的PDF运行时定位语义，坐标单位为毫米
+// 返回值独立于阅读器；普通OFD及保存为OFD再打开的文档不返回PDF目标
+// 入参: dest 当前文档动作中的目标
+// 返回: PDFDestinationTarget 页面左上原点的定位目标, bool 是否来自PDF导入快照
+func (r *Reader) PDFDestination(dest Dest) (PDFDestinationTarget, bool) {
+	if r == nil {
+		return PDFDestinationTarget{}, false
+	}
+	if d := r.pdfDestinations; d != nil && d.root == r.documentRoot {
+		target, ok := d.targets[pdfDestinationKey(dest)]
+		return target, ok
+	}
+	return PDFDestinationTarget{}, false
 }
 
 // clone 复制定位信息，避免增量导入及编辑影响已交付的阅读快照
@@ -848,32 +988,18 @@ func (p *pdfImporter) embeddedLinkAction(object pdfgo.Object, strict bool) (*Act
 // setPDFDestination 保存PDF目标到导入文档的运行时索引
 // 入参: dest OFD动作目标, target 保留空坐标的PDF定位语义
 func (e *Editor) setPDFDestination(dest Dest, target pdfgo.DestinationTarget) {
-	target.Zoom, target.KeepZoom = dest.effective().Zoom, dest.OmitZoom || dest.Zoom == 0
 	if e.pdfDestinations == nil {
-		e.pdfDestinations = &pdfDestinations{root: "Doc_0/Document.xml", targets: make(map[Dest]pdfgo.DestinationTarget)}
+		e.pdfDestinations = &pdfDestinations{root: "Doc_0/Document.xml", targets: make(map[Dest]PDFDestinationTarget)}
 	}
-	e.pdfDestinations.targets[pdfDestinationKey(dest)] = target
-}
-
-// pdfDestinationKey 按OFD模式实际编码的属性生成运行时目标索引
-// 入参: dest OFD目标
-// 返回: Dest 与序列化后目标一致的键
-func pdfDestinationKey(dest Dest) Dest {
-	dest = dest.effective()
-	switch dest.Type {
-	case "Fit":
-		dest.Left, dest.Top, dest.Right, dest.Bottom, dest.Zoom = 0, 0, 0, 0, 0
-		dest.OmitLeft, dest.OmitTop, dest.OmitZoom = true, true, true
-	case "FitH":
-		dest.Left, dest.Right, dest.Bottom, dest.Zoom = 0, 0, 0, 0
-		dest.OmitLeft, dest.OmitZoom = true, true
-	case "FitV":
-		dest.Top, dest.Right, dest.Bottom, dest.Zoom = 0, 0, 0, 0
-		dest.OmitTop, dest.OmitZoom = true, true
-	case "FitR":
-		dest.Zoom, dest.OmitZoom = 0, true
-	case "XYZ":
-		dest.Right, dest.Bottom = 0, 0
+	e.pdfDestinations.targets[pdfDestinationKey(dest)] = PDFDestinationTarget{
+		Mode:     string(target.Mode),
+		Left:     target.Left,
+		Top:      target.Top,
+		Right:    target.Right,
+		Bottom:   target.Bottom,
+		Zoom:     dest.effective().Zoom,
+		KeepLeft: target.KeepLeft,
+		KeepTop:  target.KeepTop,
+		KeepZoom: dest.OmitZoom || dest.Zoom == 0,
 	}
-	return dest
 }

@@ -14,8 +14,8 @@
 
 //go:build js && wasm
 
-package ofdgo
+package font
 
-// canLoadSystemFonts 判断是否可以读取系统字体
-// 返回: bool 是否可以读取
-func canLoadSystemFonts() bool { return false }
+// CanLoadSystemFonts 判断当前运行环境是否允许读取系统字体
+// 返回: bool 是否允许读取
+func CanLoadSystemFonts() bool { return false }

@@ -25,6 +25,38 @@ import (
 	"unicode/utf8"
 )
 
+// nextAttachmentID 分配以字母开头且不与已有附件重复的标识
+// 入参: used 已用附件标识, maximum 当前编号上限
+// 返回: string 附件标识, uint64 更新后的编号上限
+func nextAttachmentID(used map[string]bool, maximum uint64) (string, uint64) {
+	for {
+		maximum++
+		id := "a" + formatUnitID(maximum)
+		if !used[id] {
+			used[id] = true
+			return id, maximum
+		}
+	}
+}
+
+// validateAttachmentName 校验非空附件名及XML可无损表示的Unicode字符
+// 入参: name 显示名称
+// 返回: error 名称错误
+func validateAttachmentName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("attachment name is required")
+	}
+	if !utf8.ValidString(name) {
+		return fmt.Errorf("attachment name is not valid UTF-8")
+	}
+	for _, char := range name {
+		if char < 0x20 && char != '\t' && char != '\n' && char != '\r' || char == 0xfffe || char == 0xffff {
+			return fmt.Errorf("attachment name contains an invalid XML character")
+		}
+	}
+	return nil
+}
+
 // Attachments 获取当前编辑状态的附件列表，返回值与编辑器相互独立
 // 返回: []Attachment 附件信息, error 结构错误
 func (e *Editor) Attachments() ([]Attachment, error) {
@@ -72,8 +104,8 @@ func (e *Editor) AddAttachmentContext(ctx context.Context, name string, data []b
 			return "", err
 		}
 	}
-	used := base.attachmentIDs
-	if used == nil {
+	var used map[string]bool
+	if base.attachmentIDs == nil {
 		attachments, err := base.reader.attachmentsContext(ctx, true)
 		if err != nil {
 			return "", err
@@ -85,13 +117,11 @@ func (e *Editor) AddAttachmentContext(ctx context.Context, name string, data []b
 			}
 			used[attachment.ID] = true
 		}
-		for removedID := range base.removedAttachments {
-			used[removedID] = true
-		}
 	} else {
-		for removedID := range base.removedAttachments {
-			used[removedID] = true
-		}
+		used = maps.Clone(base.attachmentIDs)
+	}
+	for removedID := range base.removedAttachments {
+		used[removedID] = true
 	}
 	id, maximum := nextAttachmentID(used, maximum)
 	if maximum > maxUnitID {
@@ -167,18 +197,24 @@ func (e *Editor) AddAttachmentContext(ctx context.Context, name string, data []b
 			parts[docName] = editorPatchXML(docData, []editorXMLPatch{{position, position, doc.textXML("Attachments", "/"+attName)}})
 		}
 	}
-	if err := e.commitAnnotationPartsContext(ctx, base, parts); err != nil {
+	next := *base
+	if next.removedAttachments[id] {
+		removed := maps.Clone(next.removedAttachments)
+		delete(removed, id)
+		next.removedAttachments = removed
+	}
+	next.idsReady = true
+	if err := e.commitAnnotationPartsContext(ctx, &next, parts); err != nil {
 		return "", err
 	}
-	base.attachmentIDs = nil
 	used[id] = true
-	e.source.attachmentIDs = used
-	if e.source != nil && e.source.removedAttachments[id] {
-		removed := maps.Clone(e.source.removedAttachments)
-		delete(removed, id)
-		e.source.removedAttachments = removed
+	if e.source != nil {
+		updated := *e.source
+		updated.attachmentIDs = used
+		updated.idsReady = true
+		e.source = &updated
 	}
-	e.maxID, e.source.idsReady = maximum, true
+	e.maxID = maximum
 	return id, nil
 }
 
@@ -272,7 +308,12 @@ func (e *Editor) ReplaceAttachmentContext(ctx context.Context, id string, data [
 		return err
 	}
 	if changed {
-		e.maxID, e.source.idsReady = maximum+1, true
+		e.maxID = maximum + 1
+		if e.source != nil {
+			next := *e.source
+			next.idsReady = true
+			e.source = &next
+		}
 	}
 	return nil
 }
@@ -291,20 +332,6 @@ func (e *Editor) DeleteAttachmentContext(ctx context.Context, id string) error {
 	return e.editAttachment(ctx, id, func([]byte, *editorXML, map[string][]byte) ([]byte, error) {
 		return nil, nil
 	})
-}
-
-// nextAttachmentID 分配以字母开头且不与已有附件重复的标识
-// 入参: used 已用附件标识, maximum 当前编号上限
-// 返回: string 附件标识, uint64 更新后的编号上限
-func nextAttachmentID(used map[string]bool, maximum uint64) (string, uint64) {
-	for {
-		maximum++
-		id := "a" + formatUnitID(maximum)
-		if !used[id] {
-			used[id] = true
-			return id, maximum
-		}
-	}
 }
 
 // editAttachment 对单个附件片段执行原子编辑，兼容独立附件文件及内联声明
@@ -368,45 +395,42 @@ func (e *Editor) editAttachment(ctx context.Context, id string, change func([]by
 		return ctx.Err()
 	}
 	parts[name] = editorPatchXML(data, []editorXMLPatch{{found.start, found.end, updated}})
-	if err := e.commitAnnotationPartsContext(ctx, base, parts); err != nil {
-		return err
-	}
+	next := *base
 	if len(updated) == 0 {
 		removed := maps.Clone(base.removedAttachments)
 		if removed == nil {
 			removed = make(map[string]bool)
 		}
 		removed[id] = true
-		e.source.removedAttachments = removed
+		next.removedAttachments = removed
 	}
 	if file := node.child("FileLoc"); file != nil {
 		location := strings.TrimSpace(editorImportText(fragment, file))
 		if location != "" {
-			retired := maps.Clone(base.retiredAttachments)
-			if retired == nil {
-				retired = make(map[string]bool)
+			oldPath := editorResourceLocation(name, "", location)
+			retireOld := len(updated) == 0
+			if !retireOld {
+				updatedNode, parseErr := parseEditorXMLContext(ctx, updated)
+				if parseErr != nil {
+					return parseErr
+				}
+				newPath := ""
+				if updatedFile := updatedNode.child("FileLoc"); updatedFile != nil {
+					if newLoc := strings.TrimSpace(editorImportText(updated, updatedFile)); newLoc != "" {
+						newPath = editorResourceLocation(name, "", newLoc)
+					}
+				}
+				retireOld = newPath != oldPath
 			}
-			retired[editorResourceLocation(name, "", location)] = true
-			e.source.retiredAttachments = retired
+			if retireOld {
+				retired := maps.Clone(base.retiredAttachments)
+				if retired == nil {
+					retired = make(map[string]bool)
+				}
+				retired[oldPath] = true
+				next.retiredAttachments = retired
+			}
 		}
 	}
-	return nil
-}
-
-// validateAttachmentName 校验非空附件名及XML可无损表示的Unicode字符
-// 入参: name 显示名称
-// 返回: error 名称错误
-func validateAttachmentName(name string) error {
-	if strings.TrimSpace(name) == "" {
-		return fmt.Errorf("attachment name is required")
-	}
-	if !utf8.ValidString(name) {
-		return fmt.Errorf("attachment name is not valid UTF-8")
-	}
-	for _, char := range name {
-		if char < 0x20 && char != '\t' && char != '\n' && char != '\r' || char == 0xfffe || char == 0xffff {
-			return fmt.Errorf("attachment name contains an invalid XML character")
-		}
-	}
-	return nil
+	return e.commitAnnotationPartsContext(ctx, &next, parts)
 }

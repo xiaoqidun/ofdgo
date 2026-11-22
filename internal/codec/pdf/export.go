@@ -22,7 +22,6 @@ import (
 	"context"
 	"fmt"
 	"image"
-	"image/color"
 	"io"
 	"math"
 	"slices"
@@ -69,14 +68,6 @@ type RawImage struct {
 	Data             []byte
 }
 
-// TextFauxBold 保存需在PDF内容流中启用填充并描边伪粗体的文字对象区间
-type TextFauxBold struct {
-	First     int
-	Count     int
-	LineWidth float64
-	Color     color.RGBA
-}
-
 // StreamWriter 为PDF 1.7流式写出器，支持平衡页面树、对象流分批压缩及预测器交叉引用流
 type StreamWriter struct {
 	ctx           context.Context
@@ -102,17 +93,48 @@ type StreamWriter struct {
 	zlibWriter    *zlib.Writer
 }
 
+// outputWriter 在分块输出前后检查取消，不改变底层写入错误
+type outputWriter struct {
+	ctx    context.Context
+	writer io.Writer
+}
+
+// xrefEntry 记录单个PDF间接对象的交叉引用定位信息
+type xrefEntry struct {
+	kind   uint8
+	field2 uint64
+	field3 uint32
+}
+
+// pageTreeNode 描述平衡页面树中的单个内部节点
+type pageTreeNode struct {
+	ref    pdfgo.Reference
+	parent pdfgo.Reference
+	kids   []pdfgo.Reference
+	count  int
+}
+
 // NewStreamWriter 创建流式PDF写出器并预分配目录、平衡页面树与全部页面引用
 // 入参: ctx 取消上下文, writer 目标输出流, pageCount 总页数, compress 是否压缩流对象, level zlib压缩级别
 // 返回: *StreamWriter 流式写出器, error 写入或参数错误
 func NewStreamWriter(ctx context.Context, writer io.Writer, pageCount int, compress bool, level int) (*StreamWriter, error) {
+	return newStreamWriter(ctx, writer, pageCount, compress, level, false)
+}
+
+// newStreamWriter 创建流式PDF写出器并按需允许零页文档
+// 入参: ctx 取消上下文, writer 目标输出流, pageCount 总页数, compress 是否压缩流对象, level zlib压缩级别, allowEmpty 是否允许零页
+// 返回: *StreamWriter 流式写出器, error 写入或参数错误
+func newStreamWriter(ctx context.Context, writer io.Writer, pageCount int, compress bool, level int, allowEmpty bool) (*StreamWriter, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if pageCount <= 0 {
+	if writer == nil {
+		return nil, fmt.Errorf("PDF output writer is nil")
+	}
+	if pageCount < 0 || !allowEmpty && pageCount == 0 {
 		return nil, fmt.Errorf("PDF page count must be positive")
 	}
 	if level < zlib.NoCompression || level > zlib.BestCompression {
@@ -120,7 +142,7 @@ func NewStreamWriter(ctx context.Context, writer io.Writer, pageCount int, compr
 	}
 	sw := &StreamWriter{
 		ctx:           ctx,
-		out:           bufio.NewWriterSize(writer, streamBufferBytes),
+		out:           bufio.NewWriterSize(outputWriter{ctx: ctx, writer: writer}, streamBufferBytes),
 		compress:      compress,
 		compressLevel: level,
 		xref:          []xrefEntry{{kind: xrefFree, field2: 0, field3: 65535}},
@@ -135,6 +157,247 @@ func NewStreamWriter(ctx context.Context, writer io.Writer, pageCount int, compr
 		return nil, err
 	}
 	return sw, nil
+}
+
+// CompressBytes 使用可复用zlib写入器压缩独立字节切片并返回新切片
+// 入参: zw 可选复用zlib写入器, buf 可选复用缓冲, level 压缩级别, data 原始数据
+// 返回: []byte 压缩副本, *zlib.Writer 复用后的写入器, error 压缩错误
+func CompressBytes(zw *zlib.Writer, buf *bytes.Buffer, level int, data []byte) ([]byte, *zlib.Writer, error) {
+	if buf == nil {
+		buf = &bytes.Buffer{}
+	} else {
+		buf.Reset()
+	}
+	if zw == nil {
+		var err error
+		zw, err = zlib.NewWriterLevel(buf, level)
+		if err != nil {
+			return nil, nil, err
+		}
+	} else {
+		zw.Reset(buf)
+	}
+	if _, err := zw.Write(data); err != nil {
+		return nil, zw, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, zw, err
+	}
+	return bytes.Clone(buf.Bytes()), zw, nil
+}
+
+// appendPDFStreamDict 序列化流字典并写入Length与可选FlateDecode，不修改调用方字典
+// 入参: buf 目标缓冲, dict 原始流字典, length 载荷字节数, addFlate 是否补充FlateDecode
+func appendPDFStreamDict(buf *bytes.Buffer, dict pdfgo.Dictionary, length int, addFlate bool) {
+	keys := make([]pdfgo.Name, 0, len(dict)+2)
+	hasFilter := false
+	for k := range dict {
+		if k == "Length" {
+			continue
+		}
+		if k == "Filter" {
+			hasFilter = true
+		}
+		keys = append(keys, k)
+	}
+	slices.SortFunc(keys, func(a, b pdfgo.Name) int { return cmp.Compare(a, b) })
+	buf.WriteString("<<")
+	for _, k := range keys {
+		appendPDFName(buf, string(k))
+		v := dict[k]
+		if pdfObjectNeedsLeadingSpace(v) {
+			buf.WriteByte(' ')
+		}
+		appendPDFObject(buf, v)
+	}
+	if addFlate && !hasFilter {
+		buf.WriteString("/Filter/FlateDecode")
+	}
+	buf.WriteString("/Length ")
+	buf.WriteString(strconv.Itoa(length))
+	buf.WriteString(">>")
+}
+
+// appendPDFObject 按ISO 32000-1语法序列化任意PDF对象值
+// 入参: buf 目标缓冲, obj PDF对象
+func appendPDFObject(buf *bytes.Buffer, obj pdfgo.Object) {
+	switch v := obj.(type) {
+	case nil:
+		buf.WriteString("null")
+	case pdfgo.Boolean:
+		if v {
+			buf.WriteString("true")
+		} else {
+			buf.WriteString("false")
+		}
+	case pdfgo.Integer:
+		buf.WriteString(strconv.FormatInt(int64(v), 10))
+	case pdfgo.Real:
+		fv := float64(v)
+		if fv != 0 && math.Abs(fv) < 1e-4 && math.Abs(fv) >= 1e-12 {
+			appendCompactFloat(buf, fv, -1)
+		} else {
+			appendCompactFloat(buf, fv, 6)
+		}
+	case pdfgo.Name:
+		appendPDFName(buf, string(v))
+	case pdfgo.String:
+		appendPDFLiteralString(buf, []byte(v))
+	case pdfgo.Reference:
+		buf.WriteString(strconv.FormatInt(v.Number, 10))
+		buf.WriteByte(' ')
+		buf.WriteString(strconv.FormatInt(v.Generation, 10))
+		buf.WriteString(" R")
+	case pdfgo.Array:
+		buf.WriteByte('[')
+		for i, item := range v {
+			if i > 0 && pdfObjectNeedsLeadingSpace(item) {
+				buf.WriteByte(' ')
+			}
+			appendPDFObject(buf, item)
+		}
+		buf.WriteByte(']')
+	case pdfgo.Dictionary:
+		keys := make([]pdfgo.Name, 0, len(v))
+		for k := range v {
+			keys = append(keys, k)
+		}
+		slices.SortFunc(keys, func(a, b pdfgo.Name) int { return cmp.Compare(a, b) })
+		buf.WriteString("<<")
+		for _, k := range keys {
+			appendPDFName(buf, string(k))
+			val := v[k]
+			if pdfObjectNeedsLeadingSpace(val) {
+				buf.WriteByte(' ')
+			}
+			appendPDFObject(buf, val)
+		}
+		buf.WriteString(">>")
+	default:
+		buf.WriteString("null")
+	}
+}
+
+// pdfObjectNeedsLeadingSpace 判断对象序列化在名称或前驱项之后是否需要空格分隔
+// 入参: obj PDF对象
+// 返回: bool 是否需要前置空格
+func pdfObjectNeedsLeadingSpace(obj pdfgo.Object) bool {
+	switch obj.(type) {
+	case pdfgo.Name, pdfgo.String, pdfgo.Array, pdfgo.Dictionary:
+		return false
+	default:
+		return true
+	}
+}
+
+// appendPDFName 按PDF名称转义规则序列化名称对象
+// 入参: buf 目标缓冲, name 名称文本
+func appendPDFName(buf *bytes.Buffer, name string) {
+	buf.WriteByte('/')
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c < 0x21 || c > 0x7E || c == '#' || c == '/' || c == '%' || c == '(' || c == ')' || c == '<' || c == '>' || c == '[' || c == ']' || c == '{' || c == '}' {
+			const hex = "0123456789ABCDEF"
+			buf.WriteByte('#')
+			buf.WriteByte(hex[c>>4])
+			buf.WriteByte(hex[c&0x0F])
+			continue
+		}
+		buf.WriteByte(c)
+	}
+}
+
+// appendPDFLiteralString 按PDF字面量字符串规则转义并写入字节串
+// 入参: buf 目标缓冲, data 原始字节
+func appendPDFLiteralString(buf *bytes.Buffer, data []byte) {
+	buf.WriteByte('(')
+	for _, c := range data {
+		switch c {
+		case '\\', '(', ')':
+			buf.WriteByte('\\')
+			buf.WriteByte(c)
+		case '\n':
+			buf.WriteString(`\n`)
+		case '\r':
+			buf.WriteString(`\r`)
+		case '\t':
+			buf.WriteString(`\t`)
+		case '\b':
+			buf.WriteString(`\b`)
+		case '\f':
+			buf.WriteString(`\f`)
+		default:
+			buf.WriteByte(c)
+		}
+	}
+	buf.WriteByte(')')
+}
+
+// appendCompactFloat 将有限浮点数格式化为紧凑PDF实数文本，省略尾随零与前导零
+// 入参: buf 目标缓冲, value 浮点值, prec 最大小数位数
+func appendCompactFloat(buf *bytes.Buffer, value float64, prec int) {
+	var scratch [48]byte
+	out := appendCompactFloatBytes(scratch[:0], value, prec)
+	buf.Write(out)
+}
+
+// appendCompactFloatBytes 向字节切片追加紧凑PDF实数，避免临时字符串分配
+// 入参: dst 目标切片, value 浮点值, prec 最大小数位数
+// 返回: []byte 追加后的切片
+func appendCompactFloatBytes(dst []byte, value float64, prec int) []byte {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return append(dst, '0')
+	}
+	if value == 0 {
+		return append(dst, '0')
+	}
+	start := len(dst)
+	dst = strconv.AppendFloat(dst, value, 'f', prec, 64)
+	dot := bytes.IndexByte(dst[start:], '.')
+	if dot >= 0 {
+		end := len(dst)
+		for end > start+dot+1 && dst[end-1] == '0' {
+			end--
+		}
+		if end == start+dot+1 {
+			end--
+		}
+		dst = dst[:end]
+	}
+	s := dst[start:]
+	if len(s) == 2 && s[0] == '-' && s[1] == '0' {
+		return append(dst[:start], '0')
+	}
+	if len(s) > 2 && s[0] == '0' && s[1] == '.' {
+		copy(dst[start:], s[1:])
+		return dst[:len(dst)-1]
+	}
+	if len(s) > 3 && s[0] == '-' && s[1] == '0' && s[2] == '.' {
+		dst[start+1] = '.'
+		copy(dst[start+2:], s[3:])
+		return dst[:len(dst)-1]
+	}
+	return dst
+}
+
+// minByteWidth 计算无符号整数大端编码所需的最小字节宽度
+// 入参: v 无符号整数
+// 返回: int 最小字节数
+func minByteWidth(v uint64) int {
+	w := 1
+	for v >>= 8; v != 0; v >>= 8 {
+		w++
+	}
+	return w
+}
+
+// putBigEndian 按指定宽度以大端序写入无符号整数
+// 入参: dst 目标切片, v 无符号整数
+func putBigEndian(dst []byte, v uint64) {
+	for i := len(dst) - 1; i >= 0; i-- {
+		dst[i] = byte(v)
+		v >>= 8
+	}
 }
 
 // CatalogRef 返回文档目录对象引用
@@ -202,7 +465,7 @@ func (w *StreamWriter) WriteObject(ref pdfgo.Reference, obj pdfgo.Object) error 
 	w.objStmOffsets = append(w.objStmOffsets, w.objStmBody.Len())
 	w.objStmNums = append(w.objStmNums, int(ref.Number))
 	appendPDFObject(&w.objStmBody, obj)
-	if len(w.objStmNums) >= objStmBatchSize {
+	if len(w.objStmNums) >= objStmBatchSize || w.objStmBody.Len() >= streamBufferBytes {
 		return w.flushObjStm()
 	}
 	return nil
@@ -329,39 +592,6 @@ func (w *StreamWriter) Finish(catalog pdfgo.Dictionary, info pdfgo.Dictionary) e
 	return w.ctx.Err()
 }
 
-// CompressBytes 使用可复用zlib写入器压缩独立字节切片并返回新切片
-// 入参: zw 可选复用zlib写入器, buf 可选复用缓冲, level 压缩级别, data 原始数据
-// 返回: []byte 压缩副本, *zlib.Writer 复用后的写入器, error 压缩错误
-func CompressBytes(zw *zlib.Writer, buf *bytes.Buffer, level int, data []byte) ([]byte, *zlib.Writer, error) {
-	if buf == nil {
-		buf = &bytes.Buffer{}
-	} else {
-		buf.Reset()
-	}
-	if zw == nil {
-		var err error
-		zw, err = zlib.NewWriterLevel(buf, level)
-		if err != nil {
-			return nil, nil, err
-		}
-	} else {
-		zw.Reset(buf)
-	}
-	if _, err := zw.Write(data); err != nil {
-		return nil, zw, err
-	}
-	if err := zw.Close(); err != nil {
-		return nil, zw, err
-	}
-	return bytes.Clone(buf.Bytes()), zw, nil
-}
-
-// outputWriter 在分块输出前后检查取消，不改变底层写入错误
-type outputWriter struct {
-	ctx    context.Context
-	writer io.Writer
-}
-
 // Write 写入当前数据块并回报取消或写入错误
 // 入参: data 输出数据
 // 返回: int 写入字节数, error 取消或写入错误
@@ -374,21 +604,6 @@ func (w outputWriter) Write(data []byte) (int, error) {
 		err = w.ctx.Err()
 	}
 	return n, err
-}
-
-// xrefEntry 记录单个PDF间接对象的交叉引用定位信息
-type xrefEntry struct {
-	kind   uint8
-	field2 uint64
-	field3 uint32
-}
-
-// pageTreeNode 描述平衡页面树中的单个内部节点
-type pageTreeNode struct {
-	ref    pdfgo.Reference
-	parent pdfgo.Reference
-	kids   []pdfgo.Reference
-	count  int
 }
 
 // initPageTree 自底向上构建度为64的平衡页面树并预分配所有页面与内部节点引用
@@ -648,213 +863,4 @@ func (w *StreamWriter) writeRaw(data []byte) error {
 		return err
 	}
 	return nil
-}
-
-// appendPDFStreamDict 序列化流字典并写入Length与可选FlateDecode，不修改调用方字典
-// 入参: buf 目标缓冲, dict 原始流字典, length 载荷字节数, addFlate 是否补充FlateDecode
-func appendPDFStreamDict(buf *bytes.Buffer, dict pdfgo.Dictionary, length int, addFlate bool) {
-	keys := make([]pdfgo.Name, 0, len(dict)+2)
-	hasFilter := false
-	for k := range dict {
-		if k == "Length" {
-			continue
-		}
-		if k == "Filter" {
-			hasFilter = true
-		}
-		keys = append(keys, k)
-	}
-	slices.SortFunc(keys, func(a, b pdfgo.Name) int { return cmp.Compare(a, b) })
-	buf.WriteString("<<")
-	for _, k := range keys {
-		appendPDFName(buf, string(k))
-		v := dict[k]
-		if pdfObjectNeedsLeadingSpace(v) {
-			buf.WriteByte(' ')
-		}
-		appendPDFObject(buf, v)
-	}
-	if addFlate && !hasFilter {
-		buf.WriteString("/Filter/FlateDecode")
-	}
-	buf.WriteString("/Length ")
-	buf.WriteString(strconv.Itoa(length))
-	buf.WriteString(">>")
-}
-
-// appendPDFObject 按ISO 32000-1语法序列化任意PDF对象值
-// 入参: buf 目标缓冲, obj PDF对象
-func appendPDFObject(buf *bytes.Buffer, obj pdfgo.Object) {
-	switch v := obj.(type) {
-	case nil:
-		buf.WriteString("null")
-	case pdfgo.Boolean:
-		if v {
-			buf.WriteString("true")
-		} else {
-			buf.WriteString("false")
-		}
-	case pdfgo.Integer:
-		buf.WriteString(strconv.FormatInt(int64(v), 10))
-	case pdfgo.Real:
-		appendCompactFloat(buf, float64(v), 6)
-	case pdfgo.Name:
-		appendPDFName(buf, string(v))
-	case pdfgo.String:
-		appendPDFLiteralString(buf, []byte(v))
-	case pdfgo.Reference:
-		buf.WriteString(strconv.FormatInt(v.Number, 10))
-		buf.WriteByte(' ')
-		buf.WriteString(strconv.FormatInt(v.Generation, 10))
-		buf.WriteString(" R")
-	case pdfgo.Array:
-		buf.WriteByte('[')
-		for i, item := range v {
-			if i > 0 && pdfObjectNeedsLeadingSpace(item) {
-				buf.WriteByte(' ')
-			}
-			appendPDFObject(buf, item)
-		}
-		buf.WriteByte(']')
-	case pdfgo.Dictionary:
-		keys := make([]pdfgo.Name, 0, len(v))
-		for k := range v {
-			keys = append(keys, k)
-		}
-		slices.SortFunc(keys, func(a, b pdfgo.Name) int { return cmp.Compare(a, b) })
-		buf.WriteString("<<")
-		for _, k := range keys {
-			appendPDFName(buf, string(k))
-			val := v[k]
-			if pdfObjectNeedsLeadingSpace(val) {
-				buf.WriteByte(' ')
-			}
-			appendPDFObject(buf, val)
-		}
-		buf.WriteString(">>")
-	default:
-		buf.WriteString("null")
-	}
-}
-
-// pdfObjectNeedsLeadingSpace 判断对象序列化在名称或前驱项之后是否需要空格分隔
-// 入参: obj PDF对象
-// 返回: bool 是否需要前置空格
-func pdfObjectNeedsLeadingSpace(obj pdfgo.Object) bool {
-	switch obj.(type) {
-	case pdfgo.Name, pdfgo.String, pdfgo.Array, pdfgo.Dictionary:
-		return false
-	default:
-		return true
-	}
-}
-
-// appendPDFName 按PDF名称转义规则序列化名称对象
-// 入参: buf 目标缓冲, name 名称文本
-func appendPDFName(buf *bytes.Buffer, name string) {
-	buf.WriteByte('/')
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		if c < 0x21 || c > 0x7E || c == '#' || c == '/' || c == '%' || c == '(' || c == ')' || c == '<' || c == '>' || c == '[' || c == ']' || c == '{' || c == '}' {
-			const hex = "0123456789ABCDEF"
-			buf.WriteByte('#')
-			buf.WriteByte(hex[c>>4])
-			buf.WriteByte(hex[c&0x0F])
-			continue
-		}
-		buf.WriteByte(c)
-	}
-}
-
-// appendPDFLiteralString 按PDF字面量字符串规则转义并写入字节串
-// 入参: buf 目标缓冲, data 原始字节
-func appendPDFLiteralString(buf *bytes.Buffer, data []byte) {
-	buf.WriteByte('(')
-	for _, c := range data {
-		switch c {
-		case '\\', '(', ')':
-			buf.WriteByte('\\')
-			buf.WriteByte(c)
-		case '\n':
-			buf.WriteString(`\n`)
-		case '\r':
-			buf.WriteString(`\r`)
-		case '\t':
-			buf.WriteString(`\t`)
-		case '\b':
-			buf.WriteString(`\b`)
-		case '\f':
-			buf.WriteString(`\f`)
-		default:
-			buf.WriteByte(c)
-		}
-	}
-	buf.WriteByte(')')
-}
-
-// appendCompactFloat 将有限浮点数格式化为紧凑PDF实数文本，省略尾随零与前导零
-// 入参: buf 目标缓冲, value 浮点值, prec 最大小数位数
-func appendCompactFloat(buf *bytes.Buffer, value float64, prec int) {
-	var scratch [48]byte
-	out := appendCompactFloatBytes(scratch[:0], value, prec)
-	buf.Write(out)
-}
-
-// appendCompactFloatBytes 向字节切片追加紧凑PDF实数，避免临时字符串分配
-// 入参: dst 目标切片, value 浮点值, prec 最大小数位数
-// 返回: []byte 追加后的切片
-func appendCompactFloatBytes(dst []byte, value float64, prec int) []byte {
-	if math.IsNaN(value) || math.IsInf(value, 0) {
-		return append(dst, '0')
-	}
-	if value == 0 {
-		return append(dst, '0')
-	}
-	start := len(dst)
-	dst = strconv.AppendFloat(dst, value, 'f', prec, 64)
-	dot := bytes.IndexByte(dst[start:], '.')
-	if dot >= 0 {
-		end := len(dst)
-		for end > start+dot+1 && dst[end-1] == '0' {
-			end--
-		}
-		if end == start+dot+1 {
-			end--
-		}
-		dst = dst[:end]
-	}
-	s := dst[start:]
-	if len(s) == 2 && s[0] == '-' && s[1] == '0' {
-		return append(dst[:start], '0')
-	}
-	if len(s) > 2 && s[0] == '0' && s[1] == '.' {
-		copy(dst[start:], s[1:])
-		return dst[:len(dst)-1]
-	}
-	if len(s) > 3 && s[0] == '-' && s[1] == '0' && s[2] == '.' {
-		dst[start+1] = '.'
-		copy(dst[start+2:], s[3:])
-		return dst[:len(dst)-1]
-	}
-	return dst
-}
-
-// minByteWidth 计算无符号整数大端编码所需的最小字节宽度
-// 入参: v 无符号整数
-// 返回: int 最小字节数
-func minByteWidth(v uint64) int {
-	w := 1
-	for v >>= 8; v != 0; v >>= 8 {
-		w++
-	}
-	return w
-}
-
-// putBigEndian 按指定宽度以大端序写入无符号整数
-// 入参: dst 目标切片, v 无符号整数
-func putBigEndian(dst []byte, v uint64) {
-	for i := len(dst) - 1; i >= 0; i-- {
-		dst[i] = byte(v)
-		v >>= 8
-	}
 }

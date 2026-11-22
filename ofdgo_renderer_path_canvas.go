@@ -41,6 +41,21 @@ type pathStyle struct {
 	dashPattern   []float64
 }
 
+// pathLineCap 转换端点样式
+// 入参: cap 端点样式名称, fallback 默认端点样式
+// 返回: canvas.Capper 端点样式
+func pathLineCap(cap string, fallback canvas.Capper) canvas.Capper {
+	switch cap {
+	case "Butt":
+		return canvas.ButtCap
+	case "Round":
+		return canvas.RoundCap
+	case "Square":
+		return canvas.SquareCap
+	}
+	return fallback
+}
+
 // applyFillColor 应用填充颜色
 // 入参: r 渲染器, fill 填充颜色, bx 边界X坐标, by 边界Y坐标, pageH 页面高度, alpha 对象透明度
 func (s *pathStyle) applyFillColor(r *Renderer, fill *FillColor, bx, by, pageH float64, alpha *int) {
@@ -108,7 +123,7 @@ func (s *pathStyle) applyDrawParam(r *Renderer, dp *DrawParam, bx, by, pageH flo
 		s.lineCap = pathLineCap(dp.Cap, s.lineCap)
 	}
 	s.applyLineJoin(dp.Join, dp.MiterLimit, dp.MiterLimitSet)
-	if dp.DashPattern != "" || dp.dashPatternSet {
+	if dp.DashPattern != "" || dp.DashPatternSet {
 		s.dashPattern = parseFloats(dp.DashPattern)
 	}
 	if dp.DashOffset != nil {
@@ -132,7 +147,7 @@ func (s *pathStyle) applyPathObject(r *Renderer, obj PathObject, bx, by, pageH f
 		s.lineCap = pathLineCap(obj.Cap, canvas.ButtCap)
 	}
 	s.applyLineJoin(obj.Join, obj.MiterLimit, obj.MiterLimitSet)
-	if obj.DashPattern != "" || obj.dashPatternSet {
+	if obj.DashPattern != "" || obj.DashPatternSet {
 		s.dashPattern = parseFloats(obj.DashPattern)
 	}
 	if obj.DashOffset != nil {
@@ -543,19 +558,4 @@ func (r *Renderer) parseCanvasPath(data string) (*canvas.Path, error) {
 		cache.put(key, path.Copy(), cost)
 	}
 	return path, nil
-}
-
-// pathLineCap 转换端点样式
-// 入参: cap 端点样式名称, fallback 默认端点样式
-// 返回: canvas.Capper 端点样式
-func pathLineCap(cap string, fallback canvas.Capper) canvas.Capper {
-	switch cap {
-	case "Butt":
-		return canvas.ButtCap
-	case "Round":
-		return canvas.RoundCap
-	case "Square":
-		return canvas.SquareCap
-	}
-	return fallback
 }

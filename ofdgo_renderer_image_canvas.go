@@ -20,12 +20,18 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"reflect"
 
 	"github.com/tdewolff/canvas"
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	"golang.org/x/image/draw"
 )
+
+// transparentEdgeResult 记录单页内复用的透明补边图像及边距宽度
+type transparentEdgeResult struct {
+	img image.Image
+	pad int
+}
 
 // isOpaqueEncodedImage 判断惰性编码图像是否不含透明通道与额外色彩转换，避免SVG输出触发像素解码
 // 入参: img 图像对象
@@ -63,11 +69,47 @@ func isDirectSVGEncodedImage(img image.Image) bool {
 	}
 }
 
-// isAxisAlignedCanvasMatrix 判断仿射变换矩阵是否无旋转和斜切
+// isAxisAlignedCanvasMatrix 判断仿射变换矩阵是否严格轴对齐且非退化
 // 入参: m 变换矩阵
 // 返回: bool 是否轴对齐
 func isAxisAlignedCanvasMatrix(m canvas.Matrix) bool {
-	return math.Abs(m[0][1]) <= 1e-9 && math.Abs(m[1][0]) <= 1e-9
+	return m[0][0] != 0 && m[1][1] != 0 && math.Abs(m[0][1]) <= 1e-9*math.Abs(m[0][0]) && math.Abs(m[1][0]) <= 1e-9*math.Abs(m[1][1])
+}
+
+// isPointerImage 判断图像实现是否为可安全按身份比较的指针类型
+// 入参: img 图像对象
+// 返回: bool 是否为指针图像
+func isPointerImage(img image.Image) bool {
+	return img != nil && reflect.ValueOf(img).Kind() == reflect.Pointer
+}
+
+// cachedTransparentEdge 按源图像指针在单页内缓存透明补边结果，避免重复全图扫描
+// 入参: ctx 取消上下文, cache 页内补边缓存指针, img 源图像
+// 返回: image.Image 补边后图像, int 补边像素数, error 解码或取消错误
+func cachedTransparentEdge(ctx context.Context, cache *map[image.Image]transparentEdgeResult, img image.Image) (image.Image, int, error) {
+	cacheable := cache != nil && isPointerImage(img)
+	if cacheable && *cache != nil {
+		if entry, ok := (*cache)[img]; ok {
+			return entry.img, entry.pad, nil
+		}
+	}
+	unwrapped := unwrapEncodedImage(img)
+	padded, pad, err := baseimage.WithTransparentEdge(ctx, unwrapped)
+	if err != nil {
+		return nil, 0, err
+	}
+	if padded == unwrapped {
+		padded = img
+	} else {
+		padded = wrapEncodedImage(padded)
+	}
+	if cacheable {
+		if *cache == nil {
+			*cache = make(map[image.Image]transparentEdgeResult)
+		}
+		(*cache)[img] = transparentEdgeResult{img: padded, pad: pad}
+	}
+	return padded, pad, nil
 }
 
 // imageClipContains 判断裁剪是否完整包含变换后的图像，避免重复削弱边缘覆盖率
@@ -79,7 +121,7 @@ func imageClipContains(img image.Image, clipPath *canvas.Path, m canvas.Matrix) 
 	if rect, ok := rectangularPath(clipPath); ok {
 		return rect.Contains(outline.FastBounds())
 	}
-	if basegeom.ConvexContains(basegeom.Path(*geometryFromCanvasPath(clipPath)), basegeom.Path(*geometryFromCanvasPath(outline))) {
+	if geometryConvexContains(*geometryFromCanvasPath(clipPath), *geometryFromCanvasPath(outline)) {
 		return true
 	}
 	return clipPath.Contains(outline)
@@ -205,9 +247,15 @@ func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPa
 		if work == nil {
 			work = r.outputContext()
 		}
+		var edgeCache *map[image.Image]transparentEdgeResult
+		if isSVG {
+			edgeCache = &svgOutput.transparentEdges
+		} else if r.transparentEdges != nil {
+			edgeCache = &r.transparentEdges
+		}
 		var pad int
 		var err error
-		img, pad, err = baseimage.WithTransparentEdge(work, img)
+		img, pad, err = cachedTransparentEdge(work, edgeCache, img)
 		if err != nil {
 			r.renderError = err
 			return
@@ -266,7 +314,7 @@ func (r *Renderer) renderImageBorder(ctx *canvas.Context, obj ImageObject, box B
 		}
 		borderClip = r.intersectCachedClipPath(parentClip, canvasClip)
 	}
-	origin, _ := renderObjectMatrix(obj.Boundary, IdentityMatrix, RenderState{Parent: parentCTM, BoundaryInCTM: boundaryInCTM})
+	origin, _ := renderObjectMatrix(obj.Boundary, IdentityMatrix(), RenderState{Parent: parentCTM, BoundaryInCTM: boundaryInCTM})
 	border.Boundary = ""
 	r.renderPath(ctx, border, pageH, nil, &origin, true, borderClip)
 }
@@ -278,7 +326,7 @@ func (r *Renderer) renderImageBorder(ctx *canvas.Context, obj ImageObject, box B
 func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canvas.Matrix, dpi float64) image.Image {
 	work := r.pageContext
 	if work == nil {
-		work = context.Background()
+		work = r.outputContext()
 	}
 	if err := work.Err(); err != nil {
 		r.renderError = err
@@ -296,7 +344,7 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		return img
 	}
 	original := img
-	source, err := baseimage.PixelDataContext(r.pageContext, img)
+	source, err := baseimage.PixelDataContext(work, img)
 	if err != nil {
 		r.renderError = err
 		return img
@@ -336,7 +384,7 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		r.renderError = fmt.Errorf("image clip raster: %w", ErrBackendUnavailable)
 		return img
 	}
-	result, err := raster.Render(compiler.page)
+	result, err := raster.Render(work, compiler.page)
 	if cancelErr := work.Err(); cancelErr != nil {
 		err = cancelErr
 	}

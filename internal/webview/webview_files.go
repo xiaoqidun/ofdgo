@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -54,6 +53,7 @@ type fileEntry struct {
 	pinned     bool
 	saveTarget ofdgo.Output
 	readers    int
+	reused     bool
 	retired    bool
 	dropHandle string
 }
@@ -81,6 +81,29 @@ type fileStore struct {
 	closed    bool
 }
 
+// fileWriter 在同目录临时文件中保存输出
+type fileWriter struct {
+	id      string
+	entryID string
+	store   *fileStore
+	output  ofdgo.WriteTransaction
+}
+
+// packFileSlot 在单次打包任务中按顺序复用单个打开的文件句柄
+type packFileSlot struct {
+	mu      sync.Mutex
+	store   *fileStore
+	id      string
+	reader  io.ReaderAt
+	release func() error
+}
+
+// packSlotReader 将打包文件的随机读取转发到共享单槽缓存
+type packSlotReader struct {
+	slot *packFileSlot
+	id   string
+}
+
 // newFileStore 创建独立文件授权表
 // 返回: *fileStore 文件授权表, error 创建错误
 func newFileStore() (*fileStore, error) {
@@ -89,6 +112,90 @@ func newFileStore() (*fileStore, error) {
 		return nil, err
 	}
 	return &fileStore{entries: make(map[string]*fileEntry), pathIndex: make(map[string]string), children: make(map[string]map[string]struct{}), holders: make(map[string]*fileHolder), writers: make(map[string]*fileWriter), temporary: dir}, nil
+}
+
+// temporaryDirectory 创建独立临时目录
+// 返回: string 目录路径, error 创建错误
+func temporaryDirectory() (string, error) {
+	return os.MkdirTemp("", "ofdgo-*")
+}
+
+// isNewImageDocument 判断图片导入参数是否为新建文档模式
+// 入参: args 调用参数列表
+// 返回: bool 插入位置为负数时返回true
+func isNewImageDocument(args []any) bool {
+	if len(args) <= 2 {
+		return false
+	}
+	switch v := args[2].(type) {
+	case float64:
+		return v < 0
+	case int:
+		return v < 0
+	case int64:
+		return v < 0
+	default:
+		return false
+	}
+}
+
+// nativeFileToken 提取调用首参数中的原生文件标识
+// 入参: args 调用参数列表
+// 返回: string 文件授权标识，不存在时返回空字符串
+func nativeFileToken(args []any) string {
+	if len(args) == 0 {
+		return ""
+	}
+	descriptor, ok := args[0].(map[string]any)
+	if !ok {
+		return ""
+	}
+	token, _ := descriptor["nativeFile"].(string)
+	return token
+}
+
+// normalizePath 生成用于路径索引的规范化键
+// 入参: path 文件或目录路径
+// 返回: string 规范化路径键
+func normalizePath(path string) string {
+	cleaned := filepath.Clean(path)
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(cleaned)
+	}
+	return cleaned
+}
+
+// isSubPath 判断目标路径是否严格位于根目录之下
+// 入参: root 根目录路径, target 目标路径
+// 返回: bool 是否为有效子路径
+func isSubPath(root, target string) bool {
+	if root == "" || target == "" {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(target))
+	if err != nil || rel == "." || rel == ".." {
+		return false
+	}
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// saveError 将文件保存冲突与权限错误转换为面向用户的中文提示
+// 入参: err 原始错误
+// 返回: error 中文提示错误
+func saveError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ofdgo.ErrSaveConflict) {
+		return errors.New("目标文件已被其他程序修改，请重新打开或另存为")
+	}
+	if errors.Is(err, ofdgo.ErrSaveBusy) {
+		return errors.New("目标文件正在保存中，请稍后再试")
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return errors.New("没有写入该文件的权限")
+	}
+	return err
 }
 
 // add 登记已有授权文件
@@ -357,6 +464,14 @@ func (s *fileStore) beginHolderCall(holder, name string, args []any) func(bool) 
 				case "ofdgoCreateDocument":
 					if ok {
 						state.mainToken = ""
+						state.detectToken = ""
+						state.importToken = ""
+					}
+				case "ofdgoImportImages":
+					if ok {
+						if isNewImageDocument(args) {
+							state.mainToken = ""
+						}
 						state.detectToken = ""
 						state.importToken = ""
 					}
@@ -881,23 +996,24 @@ func (s *fileStore) removeTempDirectory(id string) error {
 
 // child 在已授权目录中查找或创建直接子项
 // 入参: id 目录授权标识, name 子项名称, directory 是否为目录, create 是否允许创建
-// 返回: map[string]any 句柄描述, error 访问错误
-func (s *fileStore) child(id, name string, directory, create bool) (map[string]any, error) {
+// 返回: map[string]any 句柄描述, bool 是否本次新登记条目, bool 是否本次新建磁盘项, error 访问错误
+func (s *fileStore) child(id, name string, directory, create bool) (map[string]any, bool, bool, error) {
 	if !fs.ValidPath(name) || name == "." || strings.ContainsAny(name, "/\\:") {
-		return nil, fmt.Errorf("文件名无效")
+		return nil, false, false, fmt.Errorf("文件名无效")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	parent := s.entries[id]
 	if parent == nil || !parent.directory || parent.retired {
-		return nil, fmt.Errorf("目录授权无效")
+		return nil, false, false, fmt.Errorf("目录授权无效")
 	}
 	path := filepath.Join(parent.path, name)
 	norm := normalizePath(path)
 	if key, ok := s.pathIndex[norm]; ok {
 		if entry := s.entries[key]; entry != nil && !entry.retired && entry.directory == directory {
 			if _, err := os.Stat(path); err == nil {
-				return s.descriptor(key), nil
+				entry.reused = true
+				return s.descriptor(key), false, false, nil
 			} else if errors.Is(err, os.ErrNotExist) {
 				s.unregisterIndex(entry)
 			}
@@ -905,7 +1021,7 @@ func (s *fileStore) child(id, name string, directory, create bool) (map[string]a
 	}
 	root, err := os.OpenRoot(parent.path)
 	if err != nil {
-		return nil, err
+		return nil, false, false, err
 	}
 	defer root.Close()
 	info, err := root.Stat(name)
@@ -921,20 +1037,20 @@ func (s *fileStore) child(id, name string, directory, create bool) (map[string]a
 			}
 		}
 		if err != nil {
-			return nil, err
+			return nil, false, false, err
 		}
 		created = true
 		info, err = root.Stat(name)
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, false, err
 	}
 	if info.IsDir() != directory {
-		return nil, fmt.Errorf("文件类型不匹配")
+		return nil, false, false, fmt.Errorf("文件类型不匹配")
 	}
 	key := rand.Text()
 	s.registerEntry(&fileEntry{id: key, parentID: id, path: path, name: name, size: info.Size(), modTime: info.ModTime().UnixMilli(), directory: directory, owned: created}, true)
-	return s.descriptor(key), nil
+	return s.descriptor(key), true, created, nil
 }
 
 // reserve 为批量输出独占创建入口并避开已有文件
@@ -1018,9 +1134,92 @@ func (s *fileStore) begin(ctx context.Context, id string) (*fileWriter, error) {
 	if err != nil {
 		return nil, saveError(err)
 	}
-	writer := &fileWriter{id: rand.Text(), store: s, output: output}
+	writer := &fileWriter{id: rand.Text(), entryID: id, store: s, output: output}
 	s.writers[writer.id] = writer
 	return writer, nil
+}
+
+// hasActiveHolder 判断授权标识是否仍被任一会话持有，调用方持有mu
+// 入参: id 授权标识
+// 返回: bool 是否存在活跃会话持有者
+func (s *fileStore) hasActiveHolder(id string) bool {
+	for _, holder := range s.holders {
+		if holder == nil {
+			continue
+		}
+		if holder.entries[id] != nil || holder.mainToken == id || holder.detectToken == id || holder.importToken == id {
+			return true
+		}
+	}
+	return false
+}
+
+// hasActiveWriter 判断授权标识是否仍存在未结束的写入事务，调用方持有mu
+// 入参: id 授权标识
+// 返回: bool 是否存在活跃写入事务
+func (s *fileStore) hasActiveWriter(id string) bool {
+	for _, writer := range s.writers {
+		if writer != nil && writer.entryID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// discardChild 精确按条目ID回滚未交付的子项授权并按条件清理本次新建的磁盘路径
+// 入参: childID 子项授权标识, created 是否本次新建磁盘项
+func (s *fileStore) discardChild(childID string, created bool) {
+	if childID == "" {
+		return
+	}
+	var files []*os.File
+	var stop func() bool
+	s.mu.Lock()
+	entry := s.entries[childID]
+	if entry == nil || entry.retired || entry.pinned || entry.directory && entry.temporary || entry.reused {
+		s.mu.Unlock()
+		return
+	}
+	otherActive := entry.readers > 0 || entry.saveTarget != nil || len(s.children[childID]) > 0 || s.hasActiveHolder(childID) || s.hasActiveWriter(childID)
+	canRemove := created && entry.owned && !otherActive && entry.path != "" && s.pathIndex[normalizePath(entry.path)] == childID
+	if canRemove {
+		parent := s.entries[entry.parentID]
+		if parent != nil && parent.directory && !parent.retired && parent.path != "" && entry.name != "" {
+			if entry.directory {
+				s.collectTreeFiles(entry, &files)
+			} else if file, _ := s.collectIdleEntry(entry); file != nil {
+				files = append(files, file)
+			}
+			for _, file := range files {
+				_ = file.Close()
+			}
+			files = nil
+			if root, err := os.OpenRoot(parent.path); err == nil {
+				if entry.directory {
+					_ = root.RemoveAll(entry.name)
+				} else {
+					_ = root.Remove(entry.name)
+				}
+				_ = root.Close()
+			}
+		}
+	}
+	if entry.directory {
+		s.retireTree(entry, &files)
+	} else {
+		stop = entry.stop
+		entry.stop = nil
+		if file, _ := s.retireEntry(entry); file != nil {
+			files = append(files, file)
+		}
+	}
+	s.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	for _, file := range files {
+		_ = file.Close()
+	}
 }
 
 // remove 清理由当前窗口创建的目录子项
@@ -1153,13 +1352,6 @@ func (s *fileStore) close() error {
 	return errors.Join(err, os.RemoveAll(s.temporary))
 }
 
-// fileWriter 在同目录临时文件中保存输出
-type fileWriter struct {
-	id     string
-	store  *fileStore
-	output ofdgo.WriteTransaction
-}
-
 // Write 追加输出数据
 // 入参: data 输出数据
 // 返回: int 写入字节数, error 写入错误
@@ -1190,15 +1382,6 @@ func (w *fileWriter) release() {
 	w.store.mu.Lock()
 	defer w.store.mu.Unlock()
 	delete(w.store.writers, w.id)
-}
-
-// packFileSlot 在单次打包任务中按顺序复用单个打开的文件句柄
-type packFileSlot struct {
-	mu      sync.Mutex
-	store   *fileStore
-	id      string
-	reader  io.ReaderAt
-	release func() error
 }
 
 // readAt 按需切换打包槽位文件并读取指定区间数据
@@ -1240,92 +1423,9 @@ func (p *packFileSlot) close() error {
 	return nil
 }
 
-// packSlotReader 将打包文件的随机读取转发到共享单槽缓存
-type packSlotReader struct {
-	slot *packFileSlot
-	id   string
-}
-
 // ReadAt 从共享打包槽位读取指定位置的数据
 // 入参: data 目标缓冲区, offset 字节偏移
 // 返回: int 读取字节数, error 读取错误
 func (r packSlotReader) ReadAt(data []byte, offset int64) (int, error) {
 	return r.slot.readAt(r.id, data, offset)
-}
-
-// temporaryDirectory 创建独立临时目录
-// 返回: string 目录路径, error 创建错误
-func temporaryDirectory() (string, error) {
-	for i := 0; i < 100; i++ {
-		n, err := rand.Int(rand.Reader, big.NewInt(10000000))
-		if err != nil {
-			return "", err
-		}
-		path := filepath.Join(os.TempDir(), fmt.Sprintf("ofdgo-%07d", n.Int64()))
-		err = os.Mkdir(path, 0700)
-		if os.IsExist(err) {
-			continue
-		}
-		return path, err
-	}
-	return "", os.ErrExist
-}
-
-// nativeFileToken 提取调用首参数中的原生文件标识
-// 入参: args 调用参数列表
-// 返回: string 文件授权标识，不存在时返回空字符串
-func nativeFileToken(args []any) string {
-	if len(args) == 0 {
-		return ""
-	}
-	descriptor, ok := args[0].(map[string]any)
-	if !ok {
-		return ""
-	}
-	token, _ := descriptor["nativeFile"].(string)
-	return token
-}
-
-// normalizePath 生成用于路径索引的规范化键
-// 入参: path 文件或目录路径
-// 返回: string 规范化路径键
-func normalizePath(path string) string {
-	cleaned := filepath.Clean(path)
-	if runtime.GOOS == "windows" {
-		return strings.ToLower(cleaned)
-	}
-	return cleaned
-}
-
-// isSubPath 判断目标路径是否严格位于根目录之下
-// 入参: root 根目录路径, target 目标路径
-// 返回: bool 是否为有效子路径
-func isSubPath(root, target string) bool {
-	if root == "" || target == "" {
-		return false
-	}
-	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(target))
-	if err != nil || rel == "." || rel == ".." {
-		return false
-	}
-	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// saveError 将文件保存冲突与权限错误转换为面向用户的中文提示
-// 入参: err 原始错误
-// 返回: error 中文提示错误
-func saveError(err error) error {
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, ofdgo.ErrSaveConflict) {
-		return errors.New("目标文件已被其他程序修改，请重新打开或另存为")
-	}
-	if errors.Is(err, ofdgo.ErrSaveBusy) {
-		return errors.New("目标文件正在保存中，请稍后再试")
-	}
-	if errors.Is(err, os.ErrPermission) {
-		return errors.New("没有写入该文件的权限")
-	}
-	return err
 }

@@ -45,7 +45,7 @@ func MergeReplacement(marks []*pdfgo.TextMark, replacement *pdfgo.ReplacementTex
 			return nil, false
 		}
 		count += len(mark.Glyphs)
-		sequence = CommonSequence(sequence, mark.Sequence)
+		sequence = commonSequence(sequence, mark.Sequence)
 	}
 	if count == 0 {
 		return nil, false
@@ -71,10 +71,10 @@ func MergeReplacement(marks []*pdfgo.TextMark, replacement *pdfgo.ReplacementTex
 	return &merged, true
 }
 
-// CommonSequence 查找两个内容区段的最近共同外层，不将合并内容归入单个子区段
+// commonSequence 查找两个内容区段的最近共同外层，不将合并内容归入单个子区段
 // 入参: first 首个区段, second 后续区段
 // 返回: *pdfgo.ContentSequence 共同区段，没有共同区段时为空
-func CommonSequence(first, second *pdfgo.ContentSequence) *pdfgo.ContentSequence {
+func commonSequence(first, second *pdfgo.ContentSequence) *pdfgo.ContentSequence {
 	if first == second {
 		return first
 	}

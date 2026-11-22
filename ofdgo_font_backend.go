@@ -134,6 +134,19 @@ type FontBackend interface {
 	OpenFont(data []byte) (FontMetrics, error)
 }
 
+// resolvedFontKey 区分只读资源的字体标识与精确匹配要求
+type resolvedFontKey struct {
+	id         string
+	exact      bool
+	definition *Font
+}
+
+// resolvedFontResult 缓存字体解析结果及不可用原因
+type resolvedFontResult struct {
+	font ResolvedFont
+	err  error
+}
+
 // ResolveFont 使用配置的字体后端解析资源，保留精确匹配与回退的区别
 // 页面取消及后端取消、超时结果不缓存，后续调用可重试
 // 入参: id 字体资源标识, exact 是否要求精确匹配
@@ -209,7 +222,7 @@ func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
 		}
 		content, err := r.fontPreparations.load(ctx, key, func() (PreparedFont, int, error) {
 			out := PreparedFont{ResolvedFont: ResolvedFont{Data: resolved.Data}, CIDs: basefont.GetCFFCIDRuneMap(resolved.Data)}
-			if _, data, mapping, _, fixErr := FixFontDataAggressive(resolved.Data, true, true); fixErr == nil {
+			if _, data, mapping, _, fixErr := basefont.FixDataAggressive(resolved.Data, true, true); fixErr == nil {
 				out.Data = data
 				if mapping != nil {
 					out.Glyphs = make(map[uint16]rune)
@@ -241,53 +254,25 @@ func (r *Renderer) PrepareFont(id string) (*PreparedFont, error) {
 	return prepared, nil
 }
 
-// resolvedFontKey 区分只读资源的字体标识与精确匹配要求
-type resolvedFontKey struct {
-	id         string
-	exact      bool
-	definition *Font
-}
-
-// resolvedFontResult 缓存字体解析结果及不可用原因
-type resolvedFontResult struct {
-	font ResolvedFont
-	err  error
-}
-
-// fontDataKey 区分只读字体的起点和长度，指针保留源数据直到预算淘汰
-type fontDataKey struct {
-	data *byte
-	size int
-}
-
-// fontDigest 在预算内复用只读字体摘要，内容副本仍按摘要复用解析结果
-// 入参: data 不得修改的字体数据
+// fontDigest 计算字体字节内容的SHA-256摘要
+// 入参: data 字体数据
 // 返回: [32]byte 字体摘要
 func (r *Renderer) fontDigest(data []byte) [32]byte {
-	if len(data) == 0 {
-		return sha256.Sum256(nil)
-	}
-	key := fontDataKey{data: &data[0], size: len(data)}
-	if digest, ok := r.fontDigests.get(key); ok {
-		return digest
-	}
-	digest := sha256.Sum256(data)
-	r.fontDigests.put(key, digest, len(data)+256)
-	return digest
+	return sha256.Sum256(data)
 }
 
 // resetFontCache 重置字体解析及字形缓存，保留图片和非字体后端状态
 func (r *Renderer) resetFontCache() {
 	if r.fontSourcesCache != nil {
+		r.fontSourcesCache.data.clear()
 		r.fontSourcesCache.collections.clear()
 	}
-	r.fontSourcesCache = newFontSourceCache(r.Reader.resources)
+	r.fontSourcesCache = newFontSourceCache(r.reader.resources)
 	r.resetFontBackendCache()
 }
 
 // resetFontBackendCache 清理后端字体对象，保留字体文件和图片缓存
 func (r *Renderer) resetFontBackendCache() {
-	r.fontDigests.clear()
 	r.fontPreparations.clear()
 	r.fontMetrics.clear()
 	r.glyphOutlines.clear()
@@ -298,15 +283,14 @@ func (r *Renderer) resetFontBackendCache() {
 	}
 	r.sharedBackendStates = make(map[any]any)
 	r.preparedFonts = make(map[string]*PreparedFont)
-	r.fontDigests = resourceCache[fontDataKey, [32]byte](r.Reader.resources, 64<<20)
-	r.fontPreparations = resourceCache[[32]byte, PreparedFont](r.Reader.resources, 64<<20)
+	r.fontPreparations = resourceCache[[32]byte, PreparedFont](r.reader.resources, 64<<20)
 	r.resolvedFonts = make(map[resolvedFontKey]resolvedFontResult)
 	if r.fontSourcesCache != nil {
 		r.fontSourcesCache.fallback = ResolvedFont{}
 		r.fontSourcesCache.fallbackRead = false
 	}
-	r.fontMetrics = resourceCache[[32]byte, FontMetrics](r.Reader.resources, 64<<20)
-	r.glyphOutlines = resourceCache[glyphOutlineKey, GeometryPath](r.Reader.resources, 16<<20)
+	r.fontMetrics = resourceCache[[32]byte, FontMetrics](r.reader.resources, 64<<20)
+	r.glyphOutlines = resourceCache[glyphOutlineKey, GeometryPath](r.reader.resources, 16<<20)
 	for _, state := range r.backendStates {
 		if fonts, ok := state.(interface{ resetFonts() }); ok {
 			fonts.resetFonts()

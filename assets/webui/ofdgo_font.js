@@ -229,6 +229,7 @@ export class FontManager {
 		this.localFonts = [];
 		this.catalog = [];
 		this.catalogLoaded = false;
+		this.catalogPromise = null;
 		this.permission = "prompt";
 		this.sequence = 0;
 		this.database = null;
@@ -329,22 +330,29 @@ export class FontManager {
 		return this.transaction("readwrite", (store) => store.delete(id));
 	}
 
-	async queryLocal() {
-		try {
-			const available = this.host ? await this.host.fonts() : await window.queryLocalFonts();
-			this.catalog = this.host ? available : available.map(font => ({ family: font.family, fullName: font.fullName,
-				postscriptName: font.postscriptName, style: font.style, blob: () => font.blob() }));
-			this.catalogLoaded = true;
-			this.permission = "granted";
-			this.onPermissionChange();
-			return this.catalog;
-		} catch (err) {
-			if (err && err.name === "NotAllowedError") {
-				this.permission = "denied";
+	queryLocal() {
+		if (this.catalogPromise) return this.catalogPromise;
+		const task = (async () => {
+			try {
+				const available = this.host ? await this.host.fonts() : await window.queryLocalFonts();
+				this.catalog = this.host ? available : available.map(font => ({ family: font.family, fullName: font.fullName,
+					postscriptName: font.postscriptName, style: font.style, blob: () => font.blob() }));
+				this.catalogLoaded = true;
+				this.permission = "granted";
 				this.onPermissionChange();
+				return this.catalog;
+			} catch (err) {
+				if (err && err.name === "NotAllowedError") {
+					this.permission = "denied";
+					this.onPermissionChange();
+				}
+				throw err;
+			} finally {
+				if (this.catalogPromise === task) this.catalogPromise = null;
 			}
-			throw err;
-		}
+		})();
+		this.catalogPromise = task;
+		return task;
 	}
 
 	async files(fonts) {
@@ -491,13 +499,26 @@ export class FontManager {
 
 	localEntries(fonts = this.catalog) {
 		const entries = new Map();
+		const byLower = new Map();
 		const disabled = new Set(this.localFonts.filter(font => !font.enabled).map(font => font.name));
 		for (const font of fonts) {
 			if (disabled.has(this.localName(font))) continue;
-			const names = [this.localName(font), font.postscriptName && `${font.postscriptName}.ttf`,
-				font.family && `${[font.family, font.style].filter(Boolean).join(" ")}.ttf`, ...(font.names || []).map(name => `${name}.ttf`)];
+			const style = font.style || "";
+			const bold = typeof font.bold === "boolean" ? font.bold : /\b(?:bold|semibold|demibold|extrabold|ultrabold|black|heavy)\b|粗体|加粗|特粗/i.test(style);
+			const italic = typeof font.italic === "boolean" ? font.italic : /\b(?:italic|oblique)\b|斜体/i.test(style);
+			const priority = !bold && !italic ? 4 : bold && !italic ? 3 : !bold ? 2 : 1;
+			const familyStyle = [font.family, font.style].filter(Boolean).join(" ").trim();
+			const names = [this.localName(font), font.family && `${font.family}.ttf`, font.postscriptName && `${font.postscriptName}.ttf`,
+				familyStyle && `${familyStyle}.ttf`, ...(font.names || []).map(name => name && `${name}.ttf`)];
 			for (const name of names) {
-				if (name && !entries.has(name)) entries.set(name, font);
+				if (!name) continue;
+				const key = name.toLowerCase();
+				const previous = byLower.get(key);
+				if (!previous || priority > previous.priority) {
+					if (previous && previous.name !== name) entries.delete(previous.name);
+					entries.set(name, font);
+					byLower.set(key, { name, priority });
+				}
 			}
 		}
 		return entries;

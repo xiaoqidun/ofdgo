@@ -31,6 +31,322 @@ import (
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
+// editorFontUsage 汇总原文档字体的字符、显式字形及无法确定的引用
+type editorFontUsage struct {
+	chars  map[rune]bool
+	glyphs map[uint16]bool
+	unsafe bool
+}
+
+// editorFontSubset 保存单个新增字体及其快照最近一次裁剪结果，不保留历史字形集合
+type editorFontSubset struct {
+	source [32]byte
+	chars  [32]byte
+	glyphs []uint16
+	data   []byte
+	mapped bool
+}
+
+// editorFontRegistration 记录最近一次成功注册的输入与标识，不保留原始文件
+type editorFontRegistration struct {
+	checksum [32]byte
+	name     string
+	index    int
+	id       string
+}
+
+// editorSourceFontKey 区分原字体内容及完整用字集合
+type editorSourceFontKey struct {
+	source [32]byte
+	usage  [32]byte
+}
+
+// editorSourceFontCache 在单次资源处理中复用裁剪结果，空值表示无体积收益
+type editorSourceFontCache map[editorSourceFontKey][]byte
+
+// editorSourceFontTask 保存单次并发字体裁剪任务的输入和结果
+type editorSourceFontTask struct {
+	name       string
+	key        editorSourceFontKey
+	data       []byte
+	characters []rune
+	glyphs     []uint16
+	result     []byte
+	err        error
+}
+
+// newEditorFontUsage 创建字体用字记录
+// 返回: *editorFontUsage 用字记录
+func newEditorFontUsage() *editorFontUsage {
+	return &editorFontUsage{chars: make(map[rune]bool), glyphs: make(map[uint16]bool)}
+}
+
+// buildEditorSourceFontKey 生成原字体内容与排序用字的去重键
+// 入参: data 原字体字节, usage 用字记录
+// 返回: editorSourceFontKey 缓存键, []rune 排序字符, []uint16 排序显式字形
+func buildEditorSourceFontKey(data []byte, usage *editorFontUsage) (editorSourceFontKey, []rune, []uint16) {
+	characters, glyphs := slices.Sorted(maps.Keys(usage.chars)), slices.Sorted(maps.Keys(usage.glyphs))
+	encoded := make([]byte, 0, 8+4*len(characters)+2*len(glyphs))
+	encoded = binary.LittleEndian.AppendUint32(encoded, uint32(len(characters)))
+	for _, char := range characters {
+		encoded = binary.LittleEndian.AppendUint32(encoded, uint32(char))
+	}
+	encoded = binary.LittleEndian.AppendUint32(encoded, uint32(len(glyphs)))
+	for _, glyph := range glyphs {
+		encoded = binary.LittleEndian.AppendUint16(encoded, glyph)
+	}
+	return editorSourceFontKey{source: sha256.Sum256(data), usage: sha256.Sum256(encoded)}, characters, glyphs
+}
+
+// computeEditorFontSubset 无副作用计算字体子集结果，直接复用已解析字体与缓存摘要
+// 入参: ctx 取消上下文, backend 字体资源后端, data 字体原始字节, parsed 已解析字体资源, usage 用字记录, preserve 是否保留原字形编号, cached 既有缓存
+// 返回: *editorFontSubset 新子集缓存, bool 是否需要替换既有缓存, error 裁剪或取消错误
+func computeEditorFontSubset(ctx context.Context, backend FontResourceBackend, data []byte, parsed *FontResource, usage *editorFontUsage, preserve bool, cached *editorFontSubset) (*editorFontSubset, bool, error) {
+	sfnt := fontResourceSFNT(parsed)
+	glyphs, ok := expandEditorFontGlyphs(sfnt, data, usage.glyphs, parsed.NumGlyphs())
+	if !ok {
+		return nil, true, nil
+	}
+	var explicit []uint16
+	if preserve {
+		glyphs[0] = true
+		explicit = slices.Sorted(maps.Keys(glyphs))
+	}
+	for char := range usage.chars {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		glyphs[parsed.GlyphIndex(char)] = true
+	}
+	glyphs[0] = true
+	ids := slices.Sorted(maps.Keys(glyphs))
+	chars := slices.Sorted(maps.Keys(usage.chars))
+	charsDigest := editorFontCharsDigest(chars)
+	checksum := sha256.Sum256(data)
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	if cached != nil && cached.source == checksum && cached.chars == charsDigest && cached.mapped == preserve && slices.Equal(cached.glyphs, ids) {
+		return cached, false, nil
+	}
+	subset, err := subsetEditorFontData(ctx, backend, sfnt, data, chars, explicit, ids, preserve)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	if len(subset) >= len(data) {
+		subset = nil
+	}
+	return &editorFontSubset{source: checksum, chars: charsDigest, glyphs: ids, data: subset, mapped: preserve}, true, nil
+}
+
+// editorObjectFontScan 判断对象是否需要扫描嵌套文字或复合资源
+// 入参: object 图形对象
+// 返回: bool 是否需要完整引用扫描
+func editorObjectFontScan(object GraphicObject) bool {
+	var clips *Clips
+	var fill, stroke *FillColor
+	switch object.Type {
+	case "CompositeObject", "CompositeGraphicUnit":
+		return true
+	case "TextObject", "Text":
+		clips = object.TextObject.Clips
+		fill, stroke = object.TextObject.FillColor, (*FillColor)(object.TextObject.StrokeColor)
+	case "PathObject", "Path":
+		clips = object.PathObject.Clips
+		fill, stroke = object.PathObject.FillColor, (*FillColor)(object.PathObject.StrokeColor)
+	case "ImageObject":
+		clips = object.ImageObject.Clips
+		if object.ImageObject.Border != nil {
+			stroke = (*FillColor)(object.ImageObject.Border.BorderColor)
+		}
+	}
+	return clips != nil || fill != nil && fill.Pattern != nil || stroke != nil && stroke.Pattern != nil
+}
+
+// editorFontCharsDigest 计算排序后字符集合的内容摘要，用于缓存命中校验
+// 入参: chars 已排序字符切片
+// 返回: [32]byte SHA-256摘要
+func editorFontCharsDigest(chars []rune) [32]byte {
+	if len(chars) == 0 {
+		return [32]byte{}
+	}
+	encoded := make([]byte, 0, len(chars)*4)
+	for _, char := range chars {
+		encoded = binary.LittleEndian.AppendUint32(encoded, uint32(char))
+	}
+	return sha256.Sum256(encoded)
+}
+
+// expandEditorFontGlyphs 展开显式字形编号并对CID编码CFF字体执行CID到GID反查，优先复用已解析缓存
+// 入参: sfnt 已解析字体，可为空, data 字体原始字节, source 显式字形集合, numGlyphs 字体字形总数
+// 返回: map[uint16]bool 展开后的字形集合, bool 编号是否全部有效
+func expandEditorFontGlyphs(sfnt *basefont.SFNT, data []byte, source map[uint16]bool, numGlyphs uint16) (map[uint16]bool, bool) {
+	glyphs := make(map[uint16]bool, len(source)+1)
+	if len(source) == 0 {
+		return glyphs, true
+	}
+	var cidToGID map[uint16]uint16
+	if sfnt != nil {
+		cidToGID = sfnt.CFFCIDToGID()
+	} else {
+		cidToGID = basefont.CFFCIDToGID(data)
+	}
+	for id := range source {
+		valid := false
+		if id < numGlyphs {
+			glyphs[id] = true
+			valid = true
+		}
+		if gid, ok := cidToGID[id]; ok && gid < numGlyphs {
+			glyphs[gid] = true
+			valid = true
+		}
+		if !valid {
+			return nil, false
+		}
+	}
+	return glyphs, true
+}
+
+// subsetEditorFontData 在保留原编号或存在格式14变体映射时优先传入字符集合裁剪，默认后端直接复用已解析字体
+// 入参: ctx 取消上下文, backend 字体资源后端, sfnt 已解析字体，可为空, data 字体字节, chars 排序后字符, explicit 显式字形, ids 全部字形, preserve 是否保留原编号
+// 返回: []byte 字体子集, error 裁剪或取消错误
+func subsetEditorFontData(ctx context.Context, backend FontResourceBackend, sfnt *basefont.SFNT, data []byte, chars []rune, explicit, ids []uint16, preserve bool) ([]byte, error) {
+	hasVariations := false
+	if sfnt != nil {
+		hasVariations = sfnt.HasCmapVariations()
+	} else {
+		hasVariations = basefont.HasCmapVariations(data)
+	}
+	useParsed := sfnt != nil && isDefaultFontResourceBackend(backend)
+	if len(chars) > 0 && (preserve || hasVariations) {
+		var subset []byte
+		var err error
+		if useParsed {
+			u := &basefont.Usage{Characters: make(map[rune]bool, len(chars)), Glyphs: make(map[uint16]bool, len(explicit))}
+			for _, char := range chars {
+				u.Characters[char] = true
+			}
+			if preserve {
+				for _, glyph := range explicit {
+					u.Glyphs[glyph] = true
+				}
+			}
+			subset = basefont.SubsetSourceSFNTParsed(sfnt, u, len(data))
+		} else {
+			usage := FontUsage{Characters: chars}
+			if preserve {
+				usage.Glyphs = explicit
+			}
+			subset, err = backend.SubsetSourceFont(data, usage)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if len(subset) > 0 && len(subset) < len(data) {
+			return subset, nil
+		}
+		if hasVariations {
+			return nil, nil
+		}
+	}
+	if useParsed {
+		return basefont.SubsetSFNTParsed(sfnt, data, ids, preserve)
+	}
+	return backend.SubsetFont(data, ids, preserve)
+}
+
+// isDefaultFontResourceBackend 判断字体资源后端是否为内置SFNT实现
+// 入参: backend 字体资源后端
+// 返回: bool 是否为内置SFNT后端
+func isDefaultFontResourceBackend(backend FontResourceBackend) bool {
+	switch backend.(type) {
+	case SFNTBackend, *SFNTBackend:
+		return true
+	}
+	return false
+}
+
+// fontResourceSFNT 从内置字体资源度量中提取已解析的SFNT对象
+// 入参: parsed 已解析字体资源
+// 返回: *basefont.SFNT 已解析字体，外部实现返回nil
+func fontResourceSFNT(parsed *FontResource) *basefont.SFNT {
+	if parsed == nil {
+		return nil
+	}
+	switch metrics := parsed.FontMetrics.(type) {
+	case sfntResourceMetrics:
+		return metrics.SFNT
+	case *sfntResourceMetrics:
+		return metrics.SFNT
+	case sfntFontMetrics:
+		return metrics.SFNT
+	case *sfntFontMetrics:
+		return metrics.SFNT
+	}
+	return nil
+}
+
+// runFontSubsetTasks 在任务数不少于2且存在多核预算时使用有界worker池并发执行，按索引确定返回首个错误
+// 入参: ctx 取消上下文, count 任务数量, fn 单个任务执行回调
+// 返回: error 取消或首个任务错误
+func runFontSubsetTasks(ctx context.Context, count int, fn func(context.Context, int) error) error {
+	if count == 0 {
+		return ctx.Err()
+	}
+	workers := min(count, conversionWorkers(ctx))
+	if workers <= 1 {
+		for index := range count {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := fn(ctx, index); err != nil {
+				return err
+			}
+		}
+		return ctx.Err()
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errs := make([]error, count)
+	var next atomic.Int64
+	var group sync.WaitGroup
+	for range workers {
+		group.Go(func() {
+			for {
+				if runCtx.Err() != nil {
+					return
+				}
+				index := int(next.Add(1) - 1)
+				if index >= count {
+					return
+				}
+				if err := fn(runCtx, index); err != nil {
+					errs[index] = err
+					cancel()
+					return
+				}
+			}
+		})
+	}
+	group.Wait()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // AddFont 注册OpenType字体，集合字体按索引提取，重复资源复用标识，引用后写入文档
 // 入参: file 字体文件, index 集合内字体索引，单字体为0
 // 返回: string 字体资源标识, error 错误信息
@@ -59,16 +375,46 @@ func (e *Editor) AddFont(file FontFile, index int) (string, error) {
 // 入参: name 字体名称
 // 返回: string 字体资源标识, error 错误信息
 func (e *Editor) AddExternalFont(name string) (string, error) {
+	return e.addExternalFont(name, "", "", false, false)
+}
+
+// addExternalFont 注册不含字体文件的名称引用并保留家族名、字符集与粗斜体属性，重复注册复用标识
+// 入参: name 字体名称, family 字体家族名，空值沿用字体名称, charset 字符集，空值省略输出, bold 是否粗体, italic 是否斜体
+// 返回: string 字体资源标识, error 错误信息
+func (e *Editor) addExternalFont(name, family, charset string, bold, italic bool) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return "", fmt.Errorf("empty external font name")
 	}
-	key := editorResourceKey{checksum: sha256.Sum256([]byte(name)), kind: "Font/external"}
+	family = strings.TrimSpace(family)
+	if family == "" {
+		family = name
+	}
+	charset = strings.TrimSpace(charset)
+	var keyBuf strings.Builder
+	keyBuf.Grow(len(name) + len(family) + len(charset) + 5)
+	keyBuf.WriteString(name)
+	keyBuf.WriteByte(0)
+	keyBuf.WriteString(family)
+	keyBuf.WriteByte(0)
+	keyBuf.WriteString(charset)
+	keyBuf.WriteByte(0)
+	if bold {
+		keyBuf.WriteByte('1')
+	} else {
+		keyBuf.WriteByte('0')
+	}
+	if italic {
+		keyBuf.WriteByte('1')
+	} else {
+		keyBuf.WriteByte('0')
+	}
+	key := editorResourceKey{checksum: sha256.Sum256([]byte(keyBuf.String())), kind: "Font/external"}
 	if id := e.resourceID[key]; id != "" {
 		return id, nil
 	}
 	for _, resource := range e.resources {
-		if resource.font != nil && resource.font.FontFile == "" && resource.font.FontName == name {
+		if resource.font != nil && resource.font.FontFile == "" && resource.font.FontName == name && resource.font.FamilyName == family && resource.font.Charset == charset && resource.font.Bold == bold && resource.font.Italic == italic {
 			e.resourceID[key] = resource.font.ID
 			return resource.font.ID, nil
 		}
@@ -76,24 +422,14 @@ func (e *Editor) AddExternalFont(name string) (string, error) {
 	if err := e.prepareSourceIDs(); err != nil {
 		return "", err
 	}
-	id := e.nextID()
-	e.resources = append(e.resources, editorResource{font: &Font{ID: id, FontName: name, FamilyName: name}})
+	id, err := e.nextID()
+	if err != nil {
+		return "", err
+	}
+	e.resources = append(e.resources, editorResource{font: &Font{ID: id, FontName: name, FamilyName: family, Charset: charset, Bold: bold, Italic: italic}})
 	e.resourceID[key] = id
 	e.fontRenderer = nil
 	return id, nil
-}
-
-// editorFontUsage 汇总原文档字体的字符、显式字形及无法确定的引用
-type editorFontUsage struct {
-	chars  map[rune]bool
-	glyphs map[uint16]bool
-	unsafe bool
-}
-
-// newEditorFontUsage 创建字体用字记录
-// 返回: *editorFontUsage 用字记录
-func newEditorFontUsage() *editorFontUsage {
-	return &editorFontUsage{chars: make(map[rune]bool), glyphs: make(map[uint16]bool)}
 }
 
 // text 收集TextCode字符和CGTransform显式字形，异常编号使该字体保持原样
@@ -216,32 +552,6 @@ func (u *editorFontUsage) merge(other *editorFontUsage, unsafe bool) {
 	}
 }
 
-// editorFontSubset 保存单个新增字体及其快照最近一次裁剪结果，不保留历史字形集合
-type editorFontSubset struct {
-	source [32]byte
-	chars  [32]byte
-	glyphs []uint16
-	data   []byte
-	mapped bool
-}
-
-// editorFontRegistration 记录最近一次成功注册的输入与标识，不保留原始文件
-type editorFontRegistration struct {
-	checksum [32]byte
-	name     string
-	index    int
-	id       string
-}
-
-// editorSourceFontKey 区分原字体内容及完整用字集合
-type editorSourceFontKey struct {
-	source [32]byte
-	usage  [32]byte
-}
-
-// editorSourceFontCache 在单次资源处理中复用裁剪结果，空值表示无体积收益
-type editorSourceFontCache map[editorSourceFontKey][]byte
-
 // prepareBatch 有界并发预裁剪去重后的独立字体，并将成功结果按序写入缓存
 // 入参: ctx 取消上下文, backend 字体资源后端, tasks 去重后的独立字体任务
 // 返回: map[editorSourceFontKey]error 裁剪错误映射, error 取消错误
@@ -323,34 +633,6 @@ func (c *editorSourceFontCache) subset(ctx context.Context, backend FontResource
 	return result, nil
 }
 
-// editorSourceFontTask 保存单次并发字体裁剪任务的输入和结果
-type editorSourceFontTask struct {
-	name       string
-	key        editorSourceFontKey
-	data       []byte
-	characters []rune
-	glyphs     []uint16
-	result     []byte
-	err        error
-}
-
-// buildEditorSourceFontKey 生成原字体内容与排序用字的去重键
-// 入参: data 原字体字节, usage 用字记录
-// 返回: editorSourceFontKey 缓存键, []rune 排序字符, []uint16 排序显式字形
-func buildEditorSourceFontKey(data []byte, usage *editorFontUsage) (editorSourceFontKey, []rune, []uint16) {
-	characters, glyphs := slices.Sorted(maps.Keys(usage.chars)), slices.Sorted(maps.Keys(usage.glyphs))
-	encoded := make([]byte, 0, 8+4*len(characters)+2*len(glyphs))
-	encoded = binary.LittleEndian.AppendUint32(encoded, uint32(len(characters)))
-	for _, char := range characters {
-		encoded = binary.LittleEndian.AppendUint32(encoded, uint32(char))
-	}
-	encoded = binary.LittleEndian.AppendUint32(encoded, uint32(len(glyphs)))
-	for _, glyph := range glyphs {
-		encoded = binary.LittleEndian.AppendUint16(encoded, glyph)
-	}
-	return editorSourceFontKey{source: sha256.Sum256(data), usage: sha256.Sum256(encoded)}, characters, glyphs
-}
-
 // clearFontResourceCache 清除字体后端生成的解析与裁剪缓存，保留原始资源
 func (e *Editor) clearFontResourceCache() {
 	e.fonts = make(map[string]*FontResource)
@@ -371,7 +653,10 @@ func (e *Editor) addFontResource(parsed *FontResource, checksum [32]byte) (strin
 	if err := e.prepareSourceIDs(); err != nil {
 		return "", err
 	}
-	id := e.nextID()
+	id, err := e.nextID()
+	if err != nil {
+		return "", err
+	}
 	definition := parsed.Font
 	definition.ID = id
 	resource := editorResource{
@@ -584,50 +869,6 @@ func (e *Editor) subsetSnapshotFonts(ctx context.Context, progress editorProgres
 		}
 	}
 	return result, progress.report("fonts", len(candidates), len(candidates))
-}
-
-// computeEditorFontSubset 无副作用计算字体子集结果，直接复用已解析字体与缓存摘要
-// 入参: ctx 取消上下文, backend 字体资源后端, data 字体原始字节, parsed 已解析字体资源, usage 用字记录, preserve 是否保留原字形编号, cached 既有缓存
-// 返回: *editorFontSubset 新子集缓存, bool 是否需要替换既有缓存, error 裁剪或取消错误
-func computeEditorFontSubset(ctx context.Context, backend FontResourceBackend, data []byte, parsed *FontResource, usage *editorFontUsage, preserve bool, cached *editorFontSubset) (*editorFontSubset, bool, error) {
-	sfnt := fontResourceSFNT(parsed)
-	glyphs, ok := expandEditorFontGlyphs(sfnt, data, usage.glyphs, parsed.NumGlyphs())
-	if !ok {
-		return nil, true, nil
-	}
-	var explicit []uint16
-	if preserve {
-		glyphs[0] = true
-		explicit = slices.Sorted(maps.Keys(glyphs))
-	}
-	for char := range usage.chars {
-		if err := ctx.Err(); err != nil {
-			return nil, false, err
-		}
-		glyphs[parsed.GlyphIndex(char)] = true
-	}
-	glyphs[0] = true
-	ids := slices.Sorted(maps.Keys(glyphs))
-	chars := slices.Sorted(maps.Keys(usage.chars))
-	charsDigest := editorFontCharsDigest(chars)
-	checksum := sha256.Sum256(data)
-	if err := ctx.Err(); err != nil {
-		return nil, false, err
-	}
-	if cached != nil && cached.source == checksum && cached.chars == charsDigest && cached.mapped == preserve && slices.Equal(cached.glyphs, ids) {
-		return cached, false, nil
-	}
-	subset, err := subsetEditorFontData(ctx, backend, sfnt, data, chars, explicit, ids, preserve)
-	if err != nil {
-		return nil, false, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, false, err
-	}
-	if len(subset) >= len(data) {
-		subset = nil
-	}
-	return &editorFontSubset{source: checksum, chars: charsDigest, glyphs: ids, data: subset, mapped: preserve}, true, nil
 }
 
 // subsetNewFonts 解析尚未物化为源资源的新增字体，保持编辑字体完整
@@ -1023,211 +1264,6 @@ func (e *Editor) collectTextFontUsage(ctx context.Context, obj TextObject, used 
 			}
 			usage.glyphs[uint16(id)] = true
 			count++
-		}
-	}
-	return nil
-}
-
-// editorObjectFontScan 判断对象是否需要扫描嵌套文字或复合资源
-// 入参: object 图形对象
-// 返回: bool 是否需要完整引用扫描
-func editorObjectFontScan(object GraphicObject) bool {
-	var clips *Clips
-	var fill, stroke *FillColor
-	switch object.Type {
-	case "CompositeObject", "CompositeGraphicUnit":
-		return true
-	case "TextObject", "Text":
-		clips = object.TextObject.Clips
-		fill, stroke = object.TextObject.FillColor, (*FillColor)(object.TextObject.StrokeColor)
-	case "PathObject", "Path":
-		clips = object.PathObject.Clips
-		fill, stroke = object.PathObject.FillColor, (*FillColor)(object.PathObject.StrokeColor)
-	case "ImageObject":
-		clips = object.ImageObject.Clips
-		if object.ImageObject.Border != nil {
-			stroke = (*FillColor)(object.ImageObject.Border.BorderColor)
-		}
-	}
-	return clips != nil || fill != nil && fill.Pattern != nil || stroke != nil && stroke.Pattern != nil
-}
-
-// editorFontCharsDigest 计算排序后字符集合的内容摘要，用于缓存命中校验
-// 入参: chars 已排序字符切片
-// 返回: [32]byte SHA-256摘要
-func editorFontCharsDigest(chars []rune) [32]byte {
-	if len(chars) == 0 {
-		return [32]byte{}
-	}
-	encoded := make([]byte, 0, len(chars)*4)
-	for _, char := range chars {
-		encoded = binary.LittleEndian.AppendUint32(encoded, uint32(char))
-	}
-	return sha256.Sum256(encoded)
-}
-
-// expandEditorFontGlyphs 展开显式字形编号并对CID编码CFF字体执行CID到GID反查，优先复用已解析缓存
-// 入参: sfnt 已解析字体，可为空, data 字体原始字节, source 显式字形集合, numGlyphs 字体字形总数
-// 返回: map[uint16]bool 展开后的字形集合, bool 编号是否全部有效
-func expandEditorFontGlyphs(sfnt *basefont.SFNT, data []byte, source map[uint16]bool, numGlyphs uint16) (map[uint16]bool, bool) {
-	glyphs := make(map[uint16]bool, len(source)+1)
-	if len(source) == 0 {
-		return glyphs, true
-	}
-	var cidToGID map[uint16]uint16
-	if sfnt != nil {
-		cidToGID = sfnt.CFFCIDToGID()
-	} else {
-		cidToGID = basefont.CFFCIDToGID(data)
-	}
-	for id := range source {
-		valid := false
-		if id < numGlyphs {
-			glyphs[id] = true
-			valid = true
-		}
-		if gid, ok := cidToGID[id]; ok && gid < numGlyphs {
-			glyphs[gid] = true
-			valid = true
-		}
-		if !valid {
-			return nil, false
-		}
-	}
-	return glyphs, true
-}
-
-// subsetEditorFontData 在保留原编号或存在格式14变体映射时优先传入字符集合裁剪，默认后端直接复用已解析字体
-// 入参: ctx 取消上下文, backend 字体资源后端, sfnt 已解析字体，可为空, data 字体字节, chars 排序后字符, explicit 显式字形, ids 全部字形, preserve 是否保留原编号
-// 返回: []byte 字体子集, error 裁剪或取消错误
-func subsetEditorFontData(ctx context.Context, backend FontResourceBackend, sfnt *basefont.SFNT, data []byte, chars []rune, explicit, ids []uint16, preserve bool) ([]byte, error) {
-	hasVariations := false
-	if sfnt != nil {
-		hasVariations = sfnt.HasCmapVariations()
-	} else {
-		hasVariations = basefont.HasCmapVariations(data)
-	}
-	useParsed := sfnt != nil && isDefaultFontResourceBackend(backend)
-	if len(chars) > 0 && (preserve || hasVariations) {
-		var subset []byte
-		var err error
-		if useParsed {
-			u := &basefont.Usage{Characters: make(map[rune]bool, len(chars)), Glyphs: make(map[uint16]bool, len(explicit))}
-			for _, char := range chars {
-				u.Characters[char] = true
-			}
-			if preserve {
-				for _, glyph := range explicit {
-					u.Glyphs[glyph] = true
-				}
-			}
-			subset = basefont.SubsetSourceSFNTParsed(sfnt, u, len(data))
-		} else {
-			usage := FontUsage{Characters: chars}
-			if preserve {
-				usage.Glyphs = explicit
-			}
-			subset, err = backend.SubsetSourceFont(data, usage)
-		}
-		if err != nil {
-			return nil, err
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if len(subset) > 0 && len(subset) < len(data) {
-			return subset, nil
-		}
-		if hasVariations {
-			return nil, nil
-		}
-	}
-	if useParsed {
-		return basefont.SubsetSFNTParsed(sfnt, data, ids, preserve)
-	}
-	return backend.SubsetFont(data, ids, preserve)
-}
-
-// isDefaultFontResourceBackend 判断字体资源后端是否为内置SFNT实现
-// 入参: backend 字体资源后端
-// 返回: bool 是否为内置SFNT后端
-func isDefaultFontResourceBackend(backend FontResourceBackend) bool {
-	switch backend.(type) {
-	case SFNTBackend, *SFNTBackend:
-		return true
-	}
-	return false
-}
-
-// fontResourceSFNT 从内置字体资源度量中提取已解析的SFNT对象
-// 入参: parsed 已解析字体资源
-// 返回: *basefont.SFNT 已解析字体，外部实现返回nil
-func fontResourceSFNT(parsed *FontResource) *basefont.SFNT {
-	if parsed == nil {
-		return nil
-	}
-	switch metrics := parsed.FontMetrics.(type) {
-	case sfntResourceMetrics:
-		return metrics.SFNT
-	case *sfntResourceMetrics:
-		return metrics.SFNT
-	case sfntFontMetrics:
-		return metrics.SFNT
-	case *sfntFontMetrics:
-		return metrics.SFNT
-	}
-	return nil
-}
-
-// runFontSubsetTasks 在任务数不少于2且存在多核预算时使用有界worker池并发执行，按索引确定返回首个错误
-// 入参: ctx 取消上下文, count 任务数量, fn 单个任务执行回调
-// 返回: error 取消或首个任务错误
-func runFontSubsetTasks(ctx context.Context, count int, fn func(context.Context, int) error) error {
-	if count == 0 {
-		return ctx.Err()
-	}
-	workers := min(count, conversionWorkers(ctx))
-	if workers <= 1 {
-		for index := range count {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if err := fn(ctx, index); err != nil {
-				return err
-			}
-		}
-		return ctx.Err()
-	}
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	errs := make([]error, count)
-	var next atomic.Int64
-	var group sync.WaitGroup
-	for range workers {
-		group.Go(func() {
-			for {
-				if runCtx.Err() != nil {
-					return
-				}
-				index := int(next.Add(1) - 1)
-				if index >= count {
-					return
-				}
-				if err := fn(runCtx, index); err != nil {
-					errs[index] = err
-					cancel()
-					return
-				}
-			}
-		})
-	}
-	group.Wait()
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	for _, err := range errs {
-		if err != nil {
-			return err
 		}
 	}
 	return nil

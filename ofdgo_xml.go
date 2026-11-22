@@ -37,9 +37,6 @@ const (
 	ofdNamespace2016   = "http://www.ofdspec.org/2016"
 )
 
-// ofdXMLNamespace 标识XML命名空间，不代表文档版本或功能支持范围
-type ofdXMLNamespace uint8
-
 // 未声明、未知、旧版及2016版OFD命名空间，不限制已知内容的读取
 const (
 	ofdXMLUnqualified ofdXMLNamespace = iota
@@ -47,6 +44,9 @@ const (
 	ofdXMLLegacy
 	ofdXML2016
 )
+
+// ofdXMLNamespace 标识XML命名空间，不代表文档版本或功能支持范围
+type ofdXMLNamespace uint8
 
 // ofdXMLChild 判断子节点是否属于可识别的OFD命名空间或父节点所在的未知命名空间
 // 入参: parent 父节点名称, child 子节点名称

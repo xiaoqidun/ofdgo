@@ -34,87 +34,11 @@ type editorNameCache struct {
 	counters map[string]int
 }
 
-// packageDirectory 获取当前文档的包内根目录，新建文档与编辑文档共用布局
-// 返回: string 文档目录
-func (e *Editor) packageDirectory() string {
-	if e.source != nil {
-		return e.source.directory
-	}
-	return "Doc_0"
-}
-
 // packagePagePath 按稳定页面标识生成路径，页面重排不改变文件名
 // 入参: directory 文档目录, id 页面标识
 // 返回: string 页面路径
 func packagePagePath(directory, id string) string {
 	return path.Join(directory, "Pages", "Page_"+id, "Content.xml")
-}
-
-// packageName 为新增条目分配文档内路径，不覆盖原文件或本次资源
-// 维护当前编辑器路径缓存与按前缀递增的序号计数器，将命名探测降至均摊O(1)
-// 入参: relative 文档相对路径
-// 返回: string 未占用路径
-func (e *Editor) packageName(relative string) string {
-	var reader *Reader
-	if e.source != nil {
-		reader = e.source.reader
-	}
-	name := path.Join(e.packageDirectory(), relative)
-	cache := e.nameCache
-	if cache == nil || cache.owner != e {
-		cache = &editorNameCache{
-			owner:    e,
-			source:   e.source,
-			resCount: len(e.resources),
-			used:     make(map[string]struct{}, len(e.resources)),
-			counters: make(map[string]int),
-		}
-		for _, resource := range e.resources {
-			cache.used[resource.name] = struct{}{}
-		}
-		e.nameCache = cache
-	} else if cache.source != e.source || cache.resCount > len(e.resources) {
-		clear(cache.used)
-		clear(cache.counters)
-		for _, resource := range e.resources {
-			cache.used[resource.name] = struct{}{}
-		}
-		cache.source = e.source
-		cache.resCount = len(e.resources)
-	} else if cache.resCount < len(e.resources) {
-		for _, resource := range e.resources[cache.resCount:] {
-			cache.used[resource.name] = struct{}{}
-		}
-		cache.resCount = len(e.resources)
-	}
-	base, extension := strings.TrimSuffix(name, path.Ext(name)), path.Ext(name)
-	for i := cache.counters[name]; ; i++ {
-		candidate := name
-		if i != 0 {
-			candidate = base + "_" + strconv.Itoa(i) + extension
-		}
-		occupied := false
-		if reader != nil {
-			_, occupied = reader.packageFile(candidate)
-			_, cached := reader.files[candidate]
-			occupied = occupied || cached || reader.encryptedSource().has(candidate)
-		}
-		if !occupied {
-			_, occupied = cache.used[candidate]
-		}
-		if !occupied {
-			cache.counters[name] = i
-			return candidate
-		}
-	}
-}
-
-// syncPackageNameCache 在增量提交推进文档快照后同步命名缓存来源，保留序号计数器
-// 入参: before 提交前的包快照, after 提交后的包快照
-func (e *Editor) syncPackageNameCache(before, after *editorSource) {
-	if e.nameCache != nil && e.nameCache.owner == e && e.nameCache.source == before {
-		e.nameCache.source = after
-	}
 }
 
 // appendOFDXMLBeforeClosing 在标准OFD 2016根元素闭合标签前直接追加子XML片段
@@ -340,4 +264,80 @@ func mergePackageResources(ctx context.Context, reader *Reader, parts map[string
 	}
 	parts[name] = data
 	return name, false, nil
+}
+
+// packageDirectory 获取当前文档的包内根目录，新建文档与编辑文档共用布局
+// 返回: string 文档目录
+func (e *Editor) packageDirectory() string {
+	if e.source != nil {
+		return e.source.directory
+	}
+	return "Doc_0"
+}
+
+// packageName 为新增条目分配文档内路径，不覆盖原文件或本次资源
+// 维护当前编辑器路径缓存与按前缀递增的序号计数器，将命名探测降至均摊O(1)
+// 入参: relative 文档相对路径
+// 返回: string 未占用路径
+func (e *Editor) packageName(relative string) string {
+	var reader *Reader
+	if e.source != nil {
+		reader = e.source.reader
+	}
+	name := path.Join(e.packageDirectory(), relative)
+	cache := e.nameCache
+	if cache == nil || cache.owner != e {
+		cache = &editorNameCache{
+			owner:    e,
+			source:   e.source,
+			resCount: len(e.resources),
+			used:     make(map[string]struct{}, len(e.resources)),
+			counters: make(map[string]int),
+		}
+		for _, resource := range e.resources {
+			cache.used[resource.name] = struct{}{}
+		}
+		e.nameCache = cache
+	} else if cache.source != e.source || cache.resCount > len(e.resources) {
+		clear(cache.used)
+		clear(cache.counters)
+		for _, resource := range e.resources {
+			cache.used[resource.name] = struct{}{}
+		}
+		cache.source = e.source
+		cache.resCount = len(e.resources)
+	} else if cache.resCount < len(e.resources) {
+		for _, resource := range e.resources[cache.resCount:] {
+			cache.used[resource.name] = struct{}{}
+		}
+		cache.resCount = len(e.resources)
+	}
+	base, extension := strings.TrimSuffix(name, path.Ext(name)), path.Ext(name)
+	for i := cache.counters[name]; ; i++ {
+		candidate := name
+		if i != 0 {
+			candidate = base + "_" + strconv.Itoa(i) + extension
+		}
+		occupied := false
+		if reader != nil {
+			_, occupied = reader.packageFile(candidate)
+			_, cached := reader.files[candidate]
+			occupied = occupied || cached || reader.encryptedSource().has(candidate)
+		}
+		if !occupied {
+			_, occupied = cache.used[candidate]
+		}
+		if !occupied {
+			cache.counters[name] = i
+			return candidate
+		}
+	}
+}
+
+// syncPackageNameCache 在增量提交推进文档快照后同步命名缓存来源，保留序号计数器
+// 入参: before 提交前的包快照, after 提交后的包快照
+func (e *Editor) syncPackageNameCache(before, after *editorSource) {
+	if e.nameCache != nil && e.nameCache.owner == e && e.nameCache.source == before {
+		e.nameCache.source = after
+	}
 }

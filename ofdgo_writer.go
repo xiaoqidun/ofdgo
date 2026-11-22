@@ -32,6 +32,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"weak"
 
@@ -76,6 +78,72 @@ type WriteTransaction interface {
 	Abort() error
 }
 
+// fileOutput 使用本地文件事务保存文档
+type fileOutput struct {
+	target *basefile.Target
+}
+
+// editorSnapshotArchive 复用独立压缩包，超预算时仅在已有快照存活期间共享
+type editorSnapshotArchive struct {
+	files    []*zip.File
+	archive  weak.Pointer[zip.Reader]
+	retained *renderCache[int, *zip.Reader]
+}
+
+// snapshotTempHandle 管理溢出快照临时文件的并发读取与原子防双关清理
+type snapshotTempHandle struct {
+	closed atomic.Bool
+	mu     sync.RWMutex
+	file   *os.File
+	name   string
+}
+
+// snapshotReaderAt 封装快照随机读取器作为ZIP条目共同持有的底层ReaderAt对象
+type snapshotReaderAt struct {
+	buf *editorSnapshotBuffer
+}
+
+// editorSnapshotBuffer 分块保存压缩数据，超预算时自动溢出至临时文件并支持并发随机读取
+type editorSnapshotBuffer struct {
+	chunks     [][]byte
+	size       int64
+	spillLimit int64
+	temp       *snapshotTempHandle
+	err        error
+}
+
+// editorProgress 编辑与保存阶段的进度回调，nil表示不回报进度
+type editorProgress func(stage string, completed, total int) error
+
+// ofdCountingWriter 记录实际输出字节数
+type ofdCountingWriter struct {
+	writer io.Writer
+	count  int64
+}
+
+// ofdXML 使用标准ofd命名空间写出XML
+type ofdXML struct {
+	encoder    *xml.Encoder
+	references *editorReferenceScan
+	ctx        context.Context
+	attrs      ofdAttrs
+	escaped    bytes.Buffer
+	spaces     bytes.Buffer
+	err        error
+}
+
+// ofdAttrs OFD节点属性
+type ofdAttrs []xml.Attr
+
+// editorResourceSelection 保存单次输出中同一编辑快照的资源筛选结果
+type editorResourceSelection struct {
+	owner         *Editor
+	fonts, images []editorResource
+	spaces        []ColorSpace
+	files         map[string]bool
+	extra         map[string][]byte
+}
+
 // NewFileOutput 创建本地保存目标并记录当前文件状态，不创建或修改文件
 // 同一目标应复用返回值，以便后续保存检测外部修改
 // 替换前比较文件标识、大小和修改时间，不提供跨进程排他锁
@@ -87,6 +155,113 @@ func NewFileOutput(name string) (Output, error) {
 		return nil, err
 	}
 	return &fileOutput{target: target}, nil
+}
+
+// newOFDXML 创建XML编码器
+// 入参: writer 输出流
+// 返回: *ofdXML 编码器
+func newOFDXML(writer io.Writer) *ofdXML {
+	_, err := io.WriteString(writer, xml.Header)
+	return &ofdXML{encoder: xml.NewEncoder(writer), err: err}
+}
+
+// parseOwnedTemplateResource 解析托管模板页资源元数据
+// 入参: resource 编辑器资源条目
+// 返回: TemplatePage 模板定义, bool 是否为托管模板页
+func parseOwnedTemplateResource(resource editorResource) (TemplatePage, bool) {
+	if resource.draw != nil || !strings.HasPrefix(resource.drawSource, editorOwnedTemplatePrefix) {
+		return TemplatePage{}, false
+	}
+	rest := strings.TrimPrefix(resource.drawSource, editorOwnedTemplatePrefix)
+	parts := strings.SplitN(rest, "|", 3)
+	if len(parts) != 3 || parts[0] == "" {
+		return TemplatePage{}, false
+	}
+	return TemplatePage{ID: parts[0], ZOrder: parts[1], Name: parts[2], BaseLoc: "/" + resource.name}, true
+}
+
+// newSnapshotZipReader 用快照缓冲构造ZIP阅读器并将临时文件清理绑定至所有条目共享的ReaderAt
+// 入参: data 快照缓冲
+// 返回: *zip.Reader ZIP阅读器, error 打开错误
+func newSnapshotZipReader(data *editorSnapshotBuffer) (*zip.Reader, error) {
+	if data == nil {
+		return nil, fmt.Errorf("snapshot buffer is nil")
+	}
+	ra := &snapshotReaderAt{buf: data}
+	reader, err := zip.NewReader(ra, data.size)
+	if err != nil {
+		return nil, err
+	}
+	if data.temp != nil {
+		runtime.AddCleanup(ra, cleanupSnapshotHandle, data.temp)
+	}
+	return reader, nil
+}
+
+// pruneReaderZip 按保留条件裁剪阅读器ZIP条目并同步刷新归档缓存标识与最大标识缓存
+// 入参: r 目标阅读器, keep 保留条目判定函数
+func pruneReaderZip(r *Reader, keep func(*zip.File) bool) {
+	if r == nil || r.zip == nil {
+		return
+	}
+	files := make([]*zip.File, 0, len(r.zip.File))
+	for _, file := range r.zip.File {
+		if keep(file) {
+			files = append(files, file)
+		}
+	}
+	r.zip = &zip.Reader{Comment: r.zip.Comment, File: files}
+	r.archiveID = nextReaderArchiveID.Add(1)
+	r.maxIDCache = &archiveMaxIDCache{}
+	r.fileIndex = nil
+	r.fileNames = nil
+	r.pageHeaderCache = nil
+	r.pageHeaders = nil
+}
+
+// cleanupSnapshotHandle 在最后一个持有共享ReaderAt的ZIP对象回收后原子关闭并删除临时文件
+// 入参: handle 待清理的临时文件句柄
+func cleanupSnapshotHandle(handle *snapshotTempHandle) {
+	if handle != nil {
+		_ = handle.Close()
+	}
+}
+
+// encodeOFDXML 编码文档节点，用于保存和独立副本
+// 入参: encode 节点写入方法
+// 返回: []byte XML数据, error 错误信息
+func encodeOFDXML(encode func(*ofdXML)) ([]byte, error) {
+	return encodeOFDXMLContext(nil, encode)
+}
+
+// encodeOFDXMLContext 编码文档节点，失败时不返回部分数据
+// 入参: ctx 取消上下文，可为nil, encode 节点写入方法
+// 返回: []byte XML数据, error 编码或取消错误
+func encodeOFDXMLContext(ctx context.Context, encode func(*ofdXML)) ([]byte, error) {
+	var data bytes.Buffer
+	x := newOFDXML(&data)
+	x.ctx = ctx
+	if !x.checkContext() {
+		return nil, x.err
+	}
+	encode(x)
+	if err := x.finish(); err != nil {
+		return nil, err
+	}
+	return data.Bytes(), nil
+}
+
+// shadingAttrs 编码轴向和径向渐变的共同属性
+// 入参: mapType 映射方式, mapUnit 映射周期, extend 延伸方式, start 渐变起点, end 渐变终点
+// 返回: ofdAttrs 属性集合
+func shadingAttrs(mapType string, mapUnit float64, extend, start, end string) ofdAttrs {
+	var attrs ofdAttrs
+	attrs.add("MapType", mapType)
+	attrs.number("MapUnit", mapUnit)
+	attrs.add("Extend", extend)
+	attrs.add("StartPoint", start)
+	attrs.add("EndPoint", end)
+	return attrs
 }
 
 // Snapshot 创建独立编辑快照，完成后可与原编辑器并行使用
@@ -102,12 +277,14 @@ func (e *Editor) Snapshot(ctx context.Context) (*Editor, error) {
 		return nil, err
 	}
 	defer reader.Close()
-	next := &Reader{files: make(map[string][]byte, len(reader.files)), encryption: reader.encryption, documentIndex: reader.documentIndex, selectedVersion: cloneEditorData(reader.selectedVersion), resources: e.runtimeResources, pdfDestinations: reader.pdfDestinations.clone()}
+	next := &Reader{files: make(map[string][]byte, len(reader.files)), documentIndex: reader.documentIndex, selectedVersion: cloneEditorData(reader.selectedVersion), resources: e.runtimeResources, pdfDestinations: reader.pdfDestinations.clone()}
 	if reader.encryption != nil {
-		next.encryption = &encryptionState{info: cloneEditorData(reader.encryption.info), options: cloneEncryptionOptions(reader.encryption.options)}
+		next.encryption = newEncryptionState(cloneEditorData(reader.encryption.info), cloneEncryptionOptions(reader.encryption.options), nil)
+		next.adoptEncryptionHold()
 	}
-	if reader.Zip != nil {
-		next.Zip, err = e.copySnapshotArchive(ctx, reader.Zip)
+	defer next.Close()
+	if reader.zip != nil {
+		next.zip, err = e.copySnapshotArchive(ctx, reader.zip)
 		if err != nil {
 			return nil, err
 		}
@@ -212,11 +389,6 @@ func (e *Editor) Reader(ctx context.Context) (*Reader, error) {
 	return e.readerContext(ctx, nil)
 }
 
-// fileOutput 使用本地文件事务保存文档
-type fileOutput struct {
-	target *basefile.Target
-}
-
 // Begin 创建本地文件写入事务
 // 入参: ctx 取消上下文
 // 返回: WriteTransaction 写入事务, error 文件状态错误
@@ -224,20 +396,52 @@ func (o *fileOutput) Begin(ctx context.Context) (WriteTransaction, error) {
 	return o.target.Begin(ctx)
 }
 
-// editorSnapshotArchive 复用独立压缩包，超预算时仅在已有快照存活期间共享
-type editorSnapshotArchive struct {
-	files    []*zip.File
-	archive  weak.Pointer[zip.Reader]
-	retained *renderCache[int, *zip.Reader]
+// ReadAt 在读锁保护下从临时文件随机读取指定字节区间
+// 入参: data 目标缓冲, offset 文件偏移, limit 最大可读长度
+// 返回: int 读取字节数, error 读取或关闭错误
+func (h *snapshotTempHandle) ReadAt(data []byte, offset, limit int64) (int, error) {
+	if h == nil || h.closed.Load() {
+		return 0, os.ErrClosed
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.file == nil {
+		return 0, os.ErrClosed
+	}
+	n, err := h.file.ReadAt(data[:limit], offset)
+	if err == nil && n < len(data) {
+		err = io.EOF
+	}
+	return n, err
 }
 
-// editorSnapshotBuffer 分块保存压缩数据，超预算时自动溢出至临时文件并支持并发随机读取
-type editorSnapshotBuffer struct {
-	chunks     [][]byte
-	size       int64
-	spillLimit int64
-	tempFile   *os.File
-	tempName   string
+// Close 原子关闭并删除底层快照临时文件，重复调用安全
+// 返回: error 关闭或删除错误
+func (h *snapshotTempHandle) Close() error {
+	if h == nil || !h.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	h.mu.Lock()
+	file, name := h.file, h.name
+	h.file, h.name = nil, ""
+	h.mu.Unlock()
+	if file == nil {
+		return nil
+	}
+	err := file.Close()
+	if name != "" {
+		if rmErr := os.Remove(name); err == nil && !errors.Is(rmErr, os.ErrNotExist) {
+			err = rmErr
+		}
+	}
+	return err
+}
+
+// ReadAt 从底层快照缓冲随机读取字节
+// 入参: data 目标缓冲, offset 数据偏移
+// 返回: int 读取字节数, error 读取错误
+func (r *snapshotReaderAt) ReadAt(data []byte, offset int64) (int, error) {
+	return r.buf.ReadAt(data, offset)
 }
 
 // Write 追加快照数据，超出内存阈值时自动迁移至临时文件
@@ -251,10 +455,13 @@ func (b *editorSnapshotBuffer) Write(data []byte) (int, error) {
 	if limit <= 0 {
 		limit = editorSnapshotArchiveLimit
 	}
-	if b.tempFile == nil && b.size+int64(len(data)) > limit {
-		if temp, err := os.CreateTemp("", "ofdgo-snapshot-*.tmp"); err == nil {
+	if b.temp == nil && b.err == nil && b.size+int64(len(data)) > limit {
+		temp, err := os.CreateTemp("", "ofdgo-snapshot-*.tmp")
+		if err != nil {
+			b.err = err
+		} else {
 			written := int64(0)
-			spillErr := error(nil)
+			var spillErr error
 			for i, chunk := range b.chunks {
 				valid := len(chunk)
 				if i == len(b.chunks)-1 {
@@ -269,18 +476,28 @@ func (b *editorSnapshotBuffer) Write(data []byte) (int, error) {
 				written += int64(valid)
 			}
 			if spillErr == nil && written == b.size {
-				b.tempFile = temp
-				b.tempName = temp.Name()
+				b.temp = &snapshotTempHandle{file: temp, name: temp.Name()}
 				b.chunks = nil
 			} else {
+				if spillErr == nil {
+					spillErr = io.ErrShortWrite
+				}
+				b.err = spillErr
 				name := temp.Name()
 				_ = temp.Close()
 				_ = os.Remove(name)
 			}
 		}
 	}
-	if b.tempFile != nil {
-		n, err := b.tempFile.Write(data)
+	if b.temp != nil {
+		b.temp.mu.RLock()
+		file := b.temp.file
+		if file == nil {
+			b.temp.mu.RUnlock()
+			return 0, os.ErrClosed
+		}
+		n, err := file.Write(data)
+		b.temp.mu.RUnlock()
 		b.size += int64(n)
 		return n, err
 	}
@@ -304,16 +521,12 @@ func (b *editorSnapshotBuffer) ReadAt(data []byte, offset int64) (int, error) {
 	if offset < 0 {
 		return 0, fmt.Errorf("negative snapshot offset")
 	}
-	if b.tempFile != nil {
+	if b.temp != nil {
 		if offset >= b.size {
 			return 0, io.EOF
 		}
 		limit := min(int64(len(data)), b.size-offset)
-		n, err := b.tempFile.ReadAt(data[:limit], offset)
-		if err == nil && n < len(data) {
-			err = io.EOF
-		}
-		return n, err
+		return b.temp.ReadAt(data, offset, limit)
 	}
 	read := 0
 	for len(data) > 0 {
@@ -331,29 +544,18 @@ func (b *editorSnapshotBuffer) ReadAt(data []byte, offset int64) (int, error) {
 	return read, nil
 }
 
-// Close 释放内存分块并关闭删除溢出的临时文件
+// Close 释放内存分块并原子关闭删除溢出的临时文件
 // 返回: error 关闭或删除错误
 func (b *editorSnapshotBuffer) Close() error {
 	for _, chunk := range b.chunks {
 		clear(chunk)
 	}
 	b.chunks = nil
-	if b.tempFile == nil {
+	if b.temp == nil {
 		return nil
 	}
-	file, name := b.tempFile, b.tempName
-	b.tempFile, b.tempName = nil, ""
-	err := file.Close()
-	if name != "" {
-		if rmErr := os.Remove(name); err == nil && !errors.Is(rmErr, os.ErrNotExist) {
-			err = rmErr
-		}
-	}
-	return err
+	return b.temp.Close()
 }
-
-// editorProgress 编辑与保存阶段的进度回调，nil表示不回报进度
-type editorProgress func(stage string, completed, total int) error
 
 // report 回报进度并原样传递调用方停止原因
 // 入参: stage 阶段, completed 已处理项, total 总项数
@@ -380,12 +582,6 @@ func (progress editorProgress) withContext(ctx context.Context) editorProgress {
 	}
 }
 
-// ofdCountingWriter 记录实际输出字节数
-type ofdCountingWriter struct {
-	writer io.Writer
-	count  int64
-}
-
 // Write 写入并累计字节数
 // 入参: data 数据
 // 返回: int 字节数, error 错误信息
@@ -396,25 +592,6 @@ func (w *ofdCountingWriter) Write(data []byte) (int, error) {
 		err = io.ErrShortWrite
 	}
 	return n, err
-}
-
-// ofdXML 使用标准ofd命名空间写出XML
-type ofdXML struct {
-	encoder    *xml.Encoder
-	references *editorReferenceScan
-	ctx        context.Context
-	attrs      ofdAttrs
-	escaped    bytes.Buffer
-	spaces     bytes.Buffer
-	err        error
-}
-
-// newOFDXML 创建XML编码器
-// 入参: writer 输出流
-// 返回: *ofdXML 编码器
-func newOFDXML(writer io.Writer) *ofdXML {
-	_, err := io.WriteString(writer, xml.Header)
-	return &ofdXML{encoder: xml.NewEncoder(writer), err: err}
 }
 
 // page 按标准顺序写出页面定义、图层、对象及动作
@@ -663,7 +840,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		}
 		attrs.add("Join", obj.Join)
 		attrs.add("Cap", obj.Cap)
-		if obj.dashPatternSet {
+		if obj.DashPatternSet {
 			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: obj.DashPattern})
 		} else {
 			attrs.add("DashPattern", obj.DashPattern)
@@ -702,7 +879,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.add("Join", obj.Join)
 		attrs.add("Cap", obj.Cap)
 		attrs.add("Rule", obj.Rule)
-		if obj.dashPatternSet {
+		if obj.DashPatternSet {
 			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: obj.DashPattern})
 		} else {
 			attrs.add("DashPattern", obj.DashPattern)
@@ -736,7 +913,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		}
 		attrs.add("Join", obj.Join)
 		attrs.add("Cap", obj.Cap)
-		if obj.dashPatternSet {
+		if obj.DashPatternSet {
 			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: obj.DashPattern})
 		} else {
 			attrs.add("DashPattern", obj.DashPattern)
@@ -765,7 +942,7 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		}
 		attrs.add("Join", obj.Join)
 		attrs.add("Cap", obj.Cap)
-		if obj.dashPatternSet {
+		if obj.DashPatternSet {
 			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: obj.DashPattern})
 		} else {
 			attrs.add("DashPattern", obj.DashPattern)
@@ -859,7 +1036,7 @@ func (x *ofdXML) clips(clips *Clips, ctm string) {
 	if clips == nil || !x.checkContext() {
 		return
 	}
-	matrix := IdentityMatrix
+	matrix := IdentityMatrix()
 	if clips.usesObjectMatrix() {
 		matrix = NewMatrix(ctm)
 	}
@@ -1193,9 +1370,6 @@ func (x *ofdXML) actions(actions []Action) {
 	x.end("Actions")
 }
 
-// ofdAttrs OFD节点属性
-type ofdAttrs []xml.Attr
-
 // add 添加非空属性
 // 入参: name 属性名, value 属性值
 func (a *ofdAttrs) add(name, value string) {
@@ -1226,15 +1400,6 @@ func (a *ofdAttrs) alpha(value *int) {
 	if value != nil {
 		a.add("Alpha", strconv.Itoa(*value))
 	}
-}
-
-// editorResourceSelection 保存单次输出中同一编辑快照的资源筛选结果
-type editorResourceSelection struct {
-	owner         *Editor
-	fonts, images []editorResource
-	spaces        []ColorSpace
-	files         map[string]bool
-	extra         map[string][]byte
 }
 
 // copySnapshotArchive 复用条目未变的独立压缩包，取消或失败不发布缓存
@@ -1278,7 +1443,7 @@ func (e *Editor) copySnapshotArchive(ctx context.Context, source *zip.Reader) (*
 	if err := archive.Close(); err != nil {
 		return nil, err
 	}
-	reader, err := zip.NewReader(data, data.size)
+	reader, err := newSnapshotZipReader(data)
 	if err != nil {
 		return nil, err
 	}
@@ -1286,11 +1451,8 @@ func (e *Editor) copySnapshotArchive(ctx context.Context, source *zip.Reader) (*
 		return nil, err
 	}
 	cleanupData = false
-	if data.tempFile != nil {
-		runtime.AddCleanup(reader, cleanupSnapshotBuffer, data)
-	}
 	cached := &editorSnapshotArchive{files: slices.Clone(source.File), archive: weak.Make(reader)}
-	if data.tempFile == nil && int64(len(data.chunks)) <= limit/editorSnapshotChunkSize {
+	if data.temp == nil && int64(len(data.chunks)) <= limit/editorSnapshotChunkSize {
 		cached.retained = resourceCache[int, *zip.Reader](e.runtimeResources, editorSnapshotArchiveLimit)
 		cached.retained.limit = int(min(limit, int64(int(^uint(0)>>1)-1)))
 		cached.retained.put(0, reader, len(data.chunks)*editorSnapshotChunkSize)
@@ -1381,6 +1543,8 @@ func (e *Editor) writePagesTo(writer io.Writer, indexes []int) (int64, error) {
 	selected.SetFontDirs(e.fontDirs...)
 	selected.SetFontFS(e.fontFS...)
 	selected.encryption = e.encryption
+	selected.syncEncryptionHold()
+	defer selected.Close()
 	selected.optimizedImages = maps.Clone(e.optimizedImages)
 	id := selected.Info.DocID
 	selected.Info = cloneEditorData(e.Info)
@@ -1510,6 +1674,7 @@ func (e *Editor) readerWithOptions(ctx context.Context, progress editorProgress,
 	defer func() {
 		if result != nil {
 			result.pdfDestinations = e.pdfDestinations.clone()
+			result.bindEncryptionHold()
 		}
 	}()
 	if err := ctx.Err(); err != nil {
@@ -1578,6 +1743,7 @@ func (e *Editor) skeletonReader(ctx context.Context) (*Reader, error) {
 		name := r.ResPath(page.BaseLoc)
 		r.pageHeaders.put(name, PageContent{Area: e.pages[i].Area, Template: slices.Clone(e.pages[i].Template), PageRes: slices.Clone(e.pages[i].PageRes)}, nil)
 	}
+	r.bindEncryptionHold()
 	return r, nil
 }
 
@@ -2625,6 +2791,13 @@ func (e *Editor) addOwnedTemplatePage(ctx context.Context, area PageArea, object
 	if err := e.prepareSourceIDsContext(ctx); err != nil {
 		return "", err
 	}
+	savedMaxID := e.maxID
+	committed := false
+	defer func() {
+		if !committed {
+			e.maxID = savedMaxID
+		}
+	}()
 	zOrder = editorTemplateOrder(zOrder)
 	validation := &editorValidation{Editor: e}
 	prepared := make([]GraphicObject, len(objects))
@@ -2632,14 +2805,24 @@ func (e *Editor) addOwnedTemplatePage(ctx context.Context, area PageArea, object
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		item, err := validation.prepareObject(e.nextID(), object)
+		objID, err := e.nextID()
+		if err != nil {
+			return "", err
+		}
+		item, err := validation.prepareObject(objID, object)
 		if err != nil {
 			return "", err
 		}
 		prepared[i] = item
 	}
-	tplID := e.nextID()
-	layerID := e.nextID()
+	tplID, err := e.nextID()
+	if err != nil {
+		return "", err
+	}
+	layerID, err := e.nextID()
+	if err != nil {
+		return "", err
+	}
 	tplPage := PageContent{
 		Area:    area,
 		Content: Content{Layer: []Layer{{ID: layerID, Type: "Body", Objects: prepared}}},
@@ -2665,24 +2848,17 @@ func (e *Editor) addOwnedTemplatePage(ctx context.Context, area PageArea, object
 		}
 	}
 	tag := editorOwnedTemplatePrefix + tplID + "|" + zOrder + "|" + title
-	e.resources = append(e.resources, editorResource{
+	resource := editorResource{
 		name:       loc,
 		data:       data,
 		drawSource: tag,
 		references: refs,
 		usage:      usage,
-	})
+	}
 	if e.source != nil {
-		reader := e.source.reader
-		if reader.files == nil {
-			reader.files = make(map[string][]byte)
-		}
-		if reader.fileNames == nil {
-			reader.fileNames = make(map[string]bool)
-		}
-		reader.files[loc] = data
-		reader.fileNames[loc] = true
-		docData, err := reader.readFileViewContext(ctx, reader.documentRoot)
+		baseSource := e.source
+		baseReader := baseSource.reader
+		docData, err := baseReader.readFileViewContext(ctx, baseReader.documentRoot)
 		if err != nil {
 			return "", err
 		}
@@ -2700,16 +2876,51 @@ func (e *Editor) addOwnedTemplatePage(ctx context.Context, area PageArea, object
 		if err != nil {
 			return "", err
 		}
-		at := common.close
-		if node := common.child("DefaultCS"); node != nil {
-			at = node.start
+		var patched []byte
+		if common.open == common.end {
+			patched = editorAppendStructure(docData, common, fragment)
+		} else {
+			at := common.close
+			if node := common.child("DefaultCS"); node != nil {
+				at = node.start
+			}
+			patched = editorPatchXML(docData, []editorXMLPatch{{at, at, fragment}})
 		}
-		patched := editorPatchXML(docData, []editorXMLPatch{{at, at, fragment}})
-		reader.files[reader.documentRoot] = patched
-		reader.fileNames[reader.documentRoot] = true
-		e.source.recordAppendOnlyFiles(map[string][]byte{loc: data, reader.documentRoot: patched})
-		e.source.document.CommonData.TemplatePage = append(e.source.document.CommonData.TemplatePage, TemplatePage{ID: tplID, Name: title, BaseLoc: "/" + loc, ZOrder: zOrder})
+		docPath := cleanPackagePath(baseReader.documentRoot)
+		nextReader := *baseReader
+		nextReader.encHold = nil
+		nextReader.files = maps.Clone(baseReader.files)
+		if nextReader.files == nil {
+			nextReader.files = make(map[string][]byte, 2)
+		}
+		nextReader.fileNames = maps.Clone(baseReader.fileNames)
+		if nextReader.fileNames == nil {
+			nextReader.fileNames = make(map[string]bool, 2)
+		}
+		nextReader.files[loc] = data
+		nextReader.fileNames[loc] = true
+		nextReader.files[docPath] = patched
+		nextReader.fileNames[docPath] = true
+		nextDoc := *baseSource.document
+		nextDoc.CommonData.TemplatePage = append(slices.Clone(baseSource.document.CommonData.TemplatePage), TemplatePage{ID: tplID, Name: title, BaseLoc: "/" + loc, ZOrder: zOrder})
+		nextReader.doc = &nextDoc
+		nextSource := *baseSource
+		nextSource.reader = &nextReader
+		nextSource.document = &nextDoc
+		nextSource.appendOnlyFiles = maps.Clone(baseSource.appendOnlyFiles)
+		nextSource.recordAppendOnlyFiles(map[string][]byte{loc: data, docPath: patched})
+		e.resources = append(e.resources, resource)
+		e.source = &nextSource
+		if e.ownedReader == baseReader {
+			e.ownedReader = &nextReader
+			e.ownedOwner = e
+			e.ownedTx = e.transactionChanges
+		}
+		committed = true
+		return tplID, nil
 	}
+	e.resources = append(e.resources, resource)
+	committed = true
 	return tplID, nil
 }
 
@@ -2738,64 +2949,4 @@ func (e *Editor) usedOwnedTemplates() ([]TemplatePage, map[string]bool) {
 		files[resource.name] = true
 	}
 	return list, files
-}
-
-// parseOwnedTemplateResource 解析托管模板页资源元数据
-// 入参: resource 编辑器资源条目
-// 返回: TemplatePage 模板定义, bool 是否为托管模板页
-func parseOwnedTemplateResource(resource editorResource) (TemplatePage, bool) {
-	if resource.draw != nil || !strings.HasPrefix(resource.drawSource, editorOwnedTemplatePrefix) {
-		return TemplatePage{}, false
-	}
-	rest := strings.TrimPrefix(resource.drawSource, editorOwnedTemplatePrefix)
-	parts := strings.SplitN(rest, "|", 3)
-	if len(parts) != 3 || parts[0] == "" {
-		return TemplatePage{}, false
-	}
-	return TemplatePage{ID: parts[0], ZOrder: parts[1], Name: parts[2], BaseLoc: "/" + resource.name}, true
-}
-
-// cleanupSnapshotBuffer 在最后一个持有快照归档的Reader回收后清理临时存储
-// 入参: buf 待清理的快照缓冲
-func cleanupSnapshotBuffer(buf *editorSnapshotBuffer) {
-	if buf != nil {
-		_ = buf.Close()
-	}
-}
-
-// encodeOFDXML 编码文档节点，用于保存和独立副本
-// 入参: encode 节点写入方法
-// 返回: []byte XML数据, error 错误信息
-func encodeOFDXML(encode func(*ofdXML)) ([]byte, error) {
-	return encodeOFDXMLContext(nil, encode)
-}
-
-// encodeOFDXMLContext 编码文档节点，失败时不返回部分数据
-// 入参: ctx 取消上下文，可为nil, encode 节点写入方法
-// 返回: []byte XML数据, error 编码或取消错误
-func encodeOFDXMLContext(ctx context.Context, encode func(*ofdXML)) ([]byte, error) {
-	var data bytes.Buffer
-	x := newOFDXML(&data)
-	x.ctx = ctx
-	if !x.checkContext() {
-		return nil, x.err
-	}
-	encode(x)
-	if err := x.finish(); err != nil {
-		return nil, err
-	}
-	return data.Bytes(), nil
-}
-
-// shadingAttrs 编码轴向和径向渐变的共同属性
-// 入参: mapType 映射方式, mapUnit 映射周期, extend 延伸方式, start 渐变起点, end 渐变终点
-// 返回: ofdAttrs 属性集合
-func shadingAttrs(mapType string, mapUnit float64, extend, start, end string) ofdAttrs {
-	var attrs ofdAttrs
-	attrs.add("MapType", mapType)
-	attrs.number("MapUnit", mapUnit)
-	attrs.add("Extend", extend)
-	attrs.add("StartPoint", start)
-	attrs.add("EndPoint", end)
-	return attrs
 }

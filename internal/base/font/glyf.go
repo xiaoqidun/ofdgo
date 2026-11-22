@@ -38,6 +38,160 @@ type Outliner struct {
 	warnings map[uint16]error
 }
 
+// ttGlyph 保存字形轮廓及四个度量虚拟点
+type ttGlyph struct {
+	points  []ttPoint
+	ends    []uint16
+	metrics *[4]ttPoint
+	warning error
+}
+
+// ttRecoverableHint 判断栈参数、区点轮廓及函数引用或控制流错误是否允许保留执行前轮廓
+// 入参: err 指令错误
+// 返回: bool 是否可恢复
+func ttRecoverableHint(err error) bool {
+	return errors.Is(err, errTTStackUnderflow) || errors.Is(err, errTTInvalidReference) || errors.Is(err, errTTInvalidControlFlow)
+}
+
+// trueTypeGlyphData 按loca索引读取字形，拒绝倒序或越界的数据范围
+// 入参: tables 字体表, id 字形编号
+// 返回: []byte 字形数据, error 索引错误
+func trueTypeGlyphData(tables map[string][]byte, id uint16) ([]byte, error) {
+	head, loca, glyf := tables["head"], tables["loca"], tables["glyf"]
+	if len(head) < 52 {
+		return nil, fmt.Errorf("truncated TrueType head")
+	}
+	var start, end uint64
+	switch binary.BigEndian.Uint16(head[50:]) {
+	case 0:
+		offset := int(id) * 2
+		if offset+4 > len(loca) {
+			return nil, fmt.Errorf("truncated TrueType loca")
+		}
+		start, end = uint64(binary.BigEndian.Uint16(loca[offset:]))*2, uint64(binary.BigEndian.Uint16(loca[offset+2:]))*2
+	case 1:
+		offset := int(id) * 4
+		if offset+8 > len(loca) {
+			return nil, fmt.Errorf("truncated TrueType loca")
+		}
+		start, end = uint64(binary.BigEndian.Uint32(loca[offset:])), uint64(binary.BigEndian.Uint32(loca[offset+4:]))
+	default:
+		return nil, fmt.Errorf("invalid TrueType loca format")
+	}
+	if start > end || end > uint64(len(glyf)) {
+		return nil, fmt.Errorf("invalid TrueType glyph %d range", id)
+	}
+	return glyf[start:end], nil
+}
+
+// readTTSimple 读取简单字形的重复标志、差分坐标和字节码
+// 入参: data 字形数据, count 轮廓数
+// 返回: ttGlyph 字形轮廓, []byte 字节码, error 数据错误
+func readTTSimple(data []byte, count int) (ttGlyph, []byte, error) {
+	var result ttGlyph
+	if count == 0 && len(data) == 10 {
+		return result, nil, nil
+	}
+	if len(data) < 12+2*count {
+		return result, nil, fmt.Errorf("truncated TrueType contour endpoints")
+	}
+	pos := 10
+	for i := 0; i < count; i++ {
+		end := binary.BigEndian.Uint16(data[pos:])
+		pos += 2
+		if i > 0 && end <= result.ends[i-1] {
+			return result, nil, fmt.Errorf("unordered TrueType contour endpoints")
+		}
+		result.ends = append(result.ends, end)
+	}
+	length := int(binary.BigEndian.Uint16(data[pos:]))
+	pos += 2
+	if length > len(data)-pos {
+		return result, nil, fmt.Errorf("truncated TrueType glyph instructions")
+	}
+	program := data[pos : pos+length]
+	pos += length
+	points := 0
+	if count > 0 {
+		points = int(result.ends[count-1]) + 1
+	}
+	flags := make([]byte, 0, points)
+	for len(flags) < points {
+		if pos >= len(data) {
+			return result, nil, fmt.Errorf("truncated TrueType point flags")
+		}
+		flag := data[pos]
+		pos++
+		repeat := 1
+		if flag&8 != 0 {
+			if pos >= len(data) {
+				return result, nil, fmt.Errorf("truncated TrueType flag repeat")
+			}
+			repeat += int(data[pos])
+			pos++
+		}
+		if repeat > points-len(flags) {
+			return result, nil, fmt.Errorf("excessive TrueType flag repeat")
+		}
+		for i := 0; i < repeat; i++ {
+			flags = append(flags, flag)
+		}
+	}
+	result.points = make([]ttPoint, points)
+	for axis := 0; axis < 2; axis++ {
+		coordinate := int32(0)
+		short, same := byte(2<<axis), byte(16<<axis)
+		for i, flag := range flags {
+			if flag&short != 0 {
+				if pos >= len(data) {
+					return result, nil, fmt.Errorf("truncated TrueType short coordinate")
+				}
+				delta := int32(data[pos])
+				pos++
+				if flag&same == 0 {
+					delta = -delta
+				}
+				coordinate += delta
+			} else if flag&same == 0 {
+				if len(data)-pos < 2 {
+					return result, nil, fmt.Errorf("truncated TrueType coordinate")
+				}
+				coordinate += int32(int16(binary.BigEndian.Uint16(data[pos:])))
+				pos += 2
+			}
+			p := &result.points[i]
+			p.on = flag&1 != 0
+			if axis == 0 {
+				p.x, p.ox = coordinate*64, coordinate*64
+			} else {
+				p.y, p.oy = coordinate*64, coordinate*64
+			}
+		}
+	}
+	return result, program, nil
+}
+
+// ttOutlineOnly 识别已剥离提示表但仍引用字体函数或控制值的子集字形，使用设计轮廓
+// 入参: tables 字体表, code 字形程序
+// 返回: bool 是否只提取轮廓, error 字节码错误
+func ttOutlineOnly(tables map[string][]byte, code []byte) (bool, error) {
+	if len(tables["fpgm"])+len(tables["prep"])+len(tables["cvt "]) != 0 {
+		return false, nil
+	}
+	for pc := 0; pc < len(code); {
+		op := code[pc]
+		if op == 0x2a || op == 0x2b || op == 0x3e || op == 0x3f || op == 0x44 || op == 0x45 || op == 0x70 || op >= 0x73 && op <= 0x75 || op >= 0xe0 {
+			return true, nil
+		}
+		var err error
+		pc, err = ttInstructionEnd(code, pc)
+		if err != nil {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
 // Path 按字体设计坐标提取闭合轮廓，TrueType保留字形指令处理
 // 入参: path 路径接收器, glyph 字形编号, scale 字体单位缩放
 // 返回: error 字形解析错误
@@ -149,14 +303,6 @@ func (f *Outliner) GlyphWarning(id uint16) error {
 	return f.warnings[id]
 }
 
-// ttGlyph 保存字形轮廓及四个度量虚拟点
-type ttGlyph struct {
-	points  []ttPoint
-	ends    []uint16
-	metrics *[4]ttPoint
-	warning error
-}
-
 // glyph 解码简单或复合字形并执行对应字节码，不改写字体资源
 // 入参: id 字形编号, active 递归访问集合
 // 返回: ttGlyph 字形轮廓, error 字形错误
@@ -244,44 +390,6 @@ func (f *Outliner) phantomPoints(id uint16, data []byte) [4]ttPoint {
 	return [4]ttPoint{{x: left * 64, ox: left * 64}, {x: (left + int32(f.Font.GlyphAdvance(id))) * 64, ox: (left + int32(f.Font.GlyphAdvance(id))) * 64}, {y: top * 64, oy: top * 64}, {y: (top - int32(f.Font.GlyphVerticalAdvance(id))) * 64, oy: (top - int32(f.Font.GlyphVerticalAdvance(id))) * 64}}
 }
 
-// ttRecoverableHint 判断栈参数、区点轮廓及函数引用或控制流错误是否允许保留执行前轮廓
-// 入参: err 指令错误
-// 返回: bool 是否可恢复
-func ttRecoverableHint(err error) bool {
-	return errors.Is(err, errTTStackUnderflow) || errors.Is(err, errTTInvalidReference) || errors.Is(err, errTTInvalidControlFlow)
-}
-
-// trueTypeGlyphData 按loca索引读取字形，拒绝倒序或越界的数据范围
-// 入参: tables 字体表, id 字形编号
-// 返回: []byte 字形数据, error 索引错误
-func trueTypeGlyphData(tables map[string][]byte, id uint16) ([]byte, error) {
-	head, loca, glyf := tables["head"], tables["loca"], tables["glyf"]
-	if len(head) < 52 {
-		return nil, fmt.Errorf("truncated TrueType head")
-	}
-	var start, end uint64
-	switch binary.BigEndian.Uint16(head[50:]) {
-	case 0:
-		offset := int(id) * 2
-		if offset+4 > len(loca) {
-			return nil, fmt.Errorf("truncated TrueType loca")
-		}
-		start, end = uint64(binary.BigEndian.Uint16(loca[offset:]))*2, uint64(binary.BigEndian.Uint16(loca[offset+2:]))*2
-	case 1:
-		offset := int(id) * 4
-		if offset+8 > len(loca) {
-			return nil, fmt.Errorf("truncated TrueType loca")
-		}
-		start, end = uint64(binary.BigEndian.Uint32(loca[offset:])), uint64(binary.BigEndian.Uint32(loca[offset+4:]))
-	default:
-		return nil, fmt.Errorf("invalid TrueType loca format")
-	}
-	if start > end || end > uint64(len(glyf)) {
-		return nil, fmt.Errorf("invalid TrueType glyph %d range", id)
-	}
-	return glyf[start:end], nil
-}
-
 // recordGlyphWarning 记录字形恢复提示，允许并发提取轮廓
 // 入参: id 字形编号, warning 恢复原因
 func (f *Outliner) recordGlyphWarning(id uint16, warning error) {
@@ -291,93 +399,6 @@ func (f *Outliner) recordGlyphWarning(id uint16, warning error) {
 		f.warnings = make(map[uint16]error)
 	}
 	f.warnings[id] = warning
-}
-
-// readTTSimple 读取简单字形的重复标志、差分坐标和字节码
-// 入参: data 字形数据, count 轮廓数
-// 返回: ttGlyph 字形轮廓, []byte 字节码, error 数据错误
-func readTTSimple(data []byte, count int) (ttGlyph, []byte, error) {
-	var result ttGlyph
-	if count == 0 && len(data) == 10 {
-		return result, nil, nil
-	}
-	if len(data) < 12+2*count {
-		return result, nil, fmt.Errorf("truncated TrueType contour endpoints")
-	}
-	pos := 10
-	for i := 0; i < count; i++ {
-		end := binary.BigEndian.Uint16(data[pos:])
-		pos += 2
-		if i > 0 && end <= result.ends[i-1] {
-			return result, nil, fmt.Errorf("unordered TrueType contour endpoints")
-		}
-		result.ends = append(result.ends, end)
-	}
-	length := int(binary.BigEndian.Uint16(data[pos:]))
-	pos += 2
-	if length > len(data)-pos {
-		return result, nil, fmt.Errorf("truncated TrueType glyph instructions")
-	}
-	program := data[pos : pos+length]
-	pos += length
-	points := 0
-	if count > 0 {
-		points = int(result.ends[count-1]) + 1
-	}
-	flags := make([]byte, 0, points)
-	for len(flags) < points {
-		if pos >= len(data) {
-			return result, nil, fmt.Errorf("truncated TrueType point flags")
-		}
-		flag := data[pos]
-		pos++
-		repeat := 1
-		if flag&8 != 0 {
-			if pos >= len(data) {
-				return result, nil, fmt.Errorf("truncated TrueType flag repeat")
-			}
-			repeat += int(data[pos])
-			pos++
-		}
-		if repeat > points-len(flags) {
-			return result, nil, fmt.Errorf("excessive TrueType flag repeat")
-		}
-		for i := 0; i < repeat; i++ {
-			flags = append(flags, flag)
-		}
-	}
-	result.points = make([]ttPoint, points)
-	for axis := 0; axis < 2; axis++ {
-		coordinate := int32(0)
-		short, same := byte(2<<axis), byte(16<<axis)
-		for i, flag := range flags {
-			if flag&short != 0 {
-				if pos >= len(data) {
-					return result, nil, fmt.Errorf("truncated TrueType short coordinate")
-				}
-				delta := int32(data[pos])
-				pos++
-				if flag&same == 0 {
-					delta = -delta
-				}
-				coordinate += delta
-			} else if flag&same == 0 {
-				if len(data)-pos < 2 {
-					return result, nil, fmt.Errorf("truncated TrueType coordinate")
-				}
-				coordinate += int32(int16(binary.BigEndian.Uint16(data[pos:])))
-				pos += 2
-			}
-			p := &result.points[i]
-			p.on = flag&1 != 0
-			if axis == 0 {
-				p.x, p.ox = coordinate*64, coordinate*64
-			} else {
-				p.y, p.oy = coordinate*64, coordinate*64
-			}
-		}
-	}
-	return result, program, nil
 }
 
 // composite 合成分量变换和点匹配，保留分量顺序及父级字节码
@@ -531,25 +552,4 @@ func (f *Outliner) composite(glyph uint16, data []byte, phantoms [4]ttPoint, act
 		program = data[pos : pos+n]
 	}
 	return result, program, nil
-}
-
-// ttOutlineOnly 识别已剥离提示表但仍引用字体函数或控制值的子集字形，使用设计轮廓
-// 入参: tables 字体表, code 字形程序
-// 返回: bool 是否只提取轮廓, error 字节码错误
-func ttOutlineOnly(tables map[string][]byte, code []byte) (bool, error) {
-	if len(tables["fpgm"])+len(tables["prep"])+len(tables["cvt "]) != 0 {
-		return false, nil
-	}
-	for pc := 0; pc < len(code); {
-		op := code[pc]
-		if op == 0x2a || op == 0x2b || op == 0x3e || op == 0x3f || op == 0x44 || op == 0x45 || op == 0x70 || op >= 0x73 && op <= 0x75 || op >= 0xe0 {
-			return true, nil
-		}
-		var err error
-		pc, err = ttInstructionEnd(code, pc)
-		if err != nil {
-			return false, err
-		}
-	}
-	return false, nil
 }

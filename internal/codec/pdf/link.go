@@ -34,6 +34,18 @@ const (
 // linkTolerance 链接区域曲线逼近误差，单位为毫米
 const linkTolerance = 0.01
 
+// linkEdge 保存按纵坐标排序的边及原始绕行方向
+type linkEdge struct {
+	a, b    pdfgo.Point
+	winding int
+}
+
+// linkCross 保存水平扫描线与区域边的交点
+type linkCross struct {
+	x    float64
+	edge int
+}
+
 // ActionRegion 将非零绕行区域分解为PDF链接四边形，保留空洞和相交轮廓
 // 入参: ctx 取消上下文, outline 页面SVG路径, pageH 页面高度
 // 返回: *pdfgo.LinkRegion 链接区域，nil表示沿用矩形, error 解析或复杂度错误
@@ -270,26 +282,6 @@ func FlattenLink(ctx context.Context, path *canvas.Path) (*canvas.Path, error) {
 	return result, nil
 }
 
-// linkEdge 保存按纵坐标排序的边及原始绕行方向
-type linkEdge struct {
-	a, b    pdfgo.Point
-	winding int
-}
-
-// x 计算非水平边在指定纵坐标处的横坐标
-// 入参: y 扫描线纵坐标
-// 返回: float64 交点横坐标
-func (e linkEdge) x(y float64) float64 {
-	t := (y - e.a.Y) / (e.b.Y - e.a.Y)
-	return e.a.X*(1-t) + e.b.X*t
-}
-
-// linkCross 保存水平扫描线与区域边的交点
-type linkCross struct {
-	x    float64
-	edge int
-}
-
 // convexLink 直接保留单个凸四边形，三角形只分成三个四边形
 // 入参: path 已展开路径, pageH 页面高度
 // 返回: [][4]pdfgo.Point 逆时针四边形，不适用时为空
@@ -443,4 +435,16 @@ func linkGeometry(path *canvas.Path) basegeom.Path {
 		result = append(result, segment)
 	}
 	return result
+}
+
+// x 计算非水平边在指定纵坐标处的横坐标
+// 入参: y 扫描线纵坐标
+// 返回: float64 交点横坐标
+func (e linkEdge) x(y float64) float64 {
+	span := e.b.Y - e.a.Y
+	if span == 0 || !finite(span) {
+		return e.a.X
+	}
+	t := (y - e.a.Y) / span
+	return e.a.X*(1-t) + e.b.X*t
 }

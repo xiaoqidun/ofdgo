@@ -32,6 +32,592 @@ import (
 // editorClonePlans 仅共享类型的可变字段索引，不持有文档对象或资源
 var editorClonePlans sync.Map
 
+// editorXMLRemapIDs 仅重写标准标识和指向副本内部的引用，保留扩展、文字和XML结构
+// 入参: data 独立片段, root 根节点, ids 原标识与新标识
+// 返回: []byte 修改后的片段, error 错误信息
+func editorXMLRemapIDs(data []byte, root *editorXML, ids map[string]string) ([]byte, error) {
+	return remapEditorXMLIDs(data, root, ids, true)
+}
+
+// editorObjectReference 判断对象内可按ST_RefID重映射的标准属性
+// 入参: name 属性名
+// 返回: bool 是否为标识引用
+func editorObjectReference(name string) bool {
+	switch name {
+	case "Font", "ResourceID", "Substitution", "ImageMask", "Relative", "DrawParam", "ColorSpace", "Thumbnail", "TemplateID", "PageID", "PageRef", "RefId":
+		return true
+	}
+	return false
+}
+
+// editorXMLRemapOnlyIDs 仅重写XML节点树上的ID属性而不触碰外部资源引用属性
+// 入参: data 独立片段, root 根节点, ids 原标识与新标识映射
+// 返回: []byte 修改后的片段, error 编码错误
+func editorXMLRemapOnlyIDs(data []byte, root *editorXML, ids map[string]string) ([]byte, error) {
+	return remapEditorXMLIDs(data, root, ids, false)
+}
+
+// remapEditorXMLIDs 遍历重写标准节点的标识属性及可选的内部引用
+// 入参: data 独立片段, root 根节点, ids 原标识与新标识映射, includeRefs 是否同时重写引用属性和文本节点
+// 返回: []byte 修改后的片段, error 编码错误
+func remapEditorXMLIDs(data []byte, root *editorXML, ids map[string]string, includeRefs bool) ([]byte, error) {
+	var patches []editorXMLPatch
+	var visit func(*editorXML) error
+	visit = func(node *editorXML) error {
+		if classifyOFDNamespace(node.name.Space) != ofdXMLUnknown {
+			decoder := xml.NewDecoder(bytes.NewReader(data[node.start:node.open]))
+			token, err := decoder.RawToken()
+			if err != nil {
+				return err
+			}
+			start := token.(xml.StartElement)
+			changed := false
+			for i := range start.Attr {
+				attr := &start.Attr[i]
+				if attr.Name.Space != "" {
+					continue
+				}
+				if attr.Name.Local == "ID" || includeRefs && editorObjectReference(attr.Name.Local) {
+					if value := ids[editorResourceID(attr.Value)]; value != "" {
+						attr.Value, changed = value, true
+					}
+				}
+			}
+			if changed {
+				value, err := encodeStartElementToken(start, node.open == node.end)
+				if err != nil {
+					return err
+				}
+				patches = append(patches, editorXMLPatch{node.start, node.open, value})
+			}
+			if includeRefs && (node.name.Local == "Font" || node.name.Local == "Substitution" || node.name.Local == "Thumbnail") {
+				if value := ids[editorResourceID(editorImportText(data, node))]; value != "" {
+					patches = append(patches, editorXMLContent(data, node, []byte(value)))
+				}
+			}
+		}
+		for _, child := range node.children {
+			if err := visit(child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := visit(root); err != nil {
+		return nil, err
+	}
+	return editorPatchXML(data, patches), nil
+}
+
+// encodeStartElementToken 序列化保留原前缀的起始标签Token
+// 入参: start 起始标签, selfClosing 是否自闭合
+// 返回: []byte 标签字节切片, error 编码错误
+func encodeStartElementToken(start xml.StartElement, selfClosing bool) ([]byte, error) {
+	if start.Name.Space != "" {
+		start.Name.Local = start.Name.Space + ":" + start.Name.Local
+		start.Name.Space = ""
+	}
+	for i := range start.Attr {
+		attr := &start.Attr[i]
+		if attr.Name.Space != "" {
+			attr.Name.Local = attr.Name.Space + ":" + attr.Name.Local
+			attr.Name.Space = ""
+		}
+	}
+	var header bytes.Buffer
+	encoder := xml.NewEncoder(&header)
+	if err := encoder.EncodeToken(start); err != nil {
+		return nil, err
+	}
+	if err := encoder.Flush(); err != nil {
+		return nil, err
+	}
+	value := header.Bytes()
+	if selfClosing {
+		value = append(value[:len(value)-1], '/', '>')
+	}
+	return value, nil
+}
+
+// editorScopedResourceAttrKind 判断属性是否为资源表引用并返回预期资源类别
+// 入参: elem 元素局部名, attr 属性局部名
+// 返回: string 期望资源类别, bool 是否为资源表引用属性
+func editorScopedResourceAttrKind(elem, attr string) (string, bool) {
+	switch attr {
+	case "Font":
+		return "Font", true
+	case "DrawParam", "Relative":
+		return "DrawParam", true
+	case "ColorSpace":
+		return "ColorSpace", true
+	case "ImageMask", "Substitution", "Thumbnail":
+		return "Image", true
+	case "ResourceID":
+		switch elem {
+		case "ImageObject":
+			return "Image", true
+		case "Sound":
+			return "Audio", true
+		case "Movie":
+			return "Video", true
+		case "DrawParam":
+			return "DrawParam", true
+		case "CompositeObject", "CompositeGraphicUnit":
+			return "CompositeGraphicUnit", true
+		}
+		return "", true
+	}
+	return "", false
+}
+
+// cloneEditorData 深复制编辑快照，未导出的排版及原文来源保持不可变共享
+// 入参: value 原值
+// 返回: T 独立副本
+func cloneEditorData[T any](value T) T {
+	switch source := any(value).(type) {
+	case GraphicObject:
+		return any(copyEditorGraphicObject(source)).(T)
+	case TextObject:
+		return any(copyEditorTextObject(source)).(T)
+	case PathObject:
+		return any(copyEditorPathObject(source)).(T)
+	case ImageObject:
+		return any(copyEditorImageObject(source)).(T)
+	case CompositeGraphicUnit:
+		return any(copyEditorCompositeGraphicUnit(source)).(T)
+	case PageContent:
+		return any(copyEditorPageContent(source)).(T)
+	case Layer:
+		return any(copyEditorLayer(source)).(T)
+	}
+	source := reflect.ValueOf(value)
+	if !source.IsValid() {
+		return value
+	}
+	return cloneEditorValue(source).Interface().(T)
+}
+
+// cloneEditorValue 复制公开指针、切片及数组，纯值数据不创建额外结构
+// 入参: value 原值
+// 返回: reflect.Value 独立副本
+func cloneEditorValue(value reflect.Value) reflect.Value {
+	if !value.IsValid() || !editorCloneMutable(value.Type()) {
+		return value
+	}
+	switch value.Kind() {
+	case reflect.Pointer:
+		if value.IsNil() {
+			return value
+		}
+		result := reflect.New(value.Type().Elem())
+		cloneEditorInto(result.Elem(), value.Elem())
+		return result
+	case reflect.Slice:
+		if value.IsNil() {
+			return value
+		}
+		result := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		if !editorCloneMutable(value.Type().Elem()) {
+			reflect.Copy(result, value)
+		} else {
+			for i := range value.Len() {
+				cloneEditorInto(result.Index(i), value.Index(i))
+			}
+		}
+		return result
+	case reflect.Map:
+		if value.IsNil() {
+			return value
+		}
+		result := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			result.SetMapIndex(cloneEditorValue(iter.Key()), cloneEditorValue(iter.Value()))
+		}
+		return result
+	case reflect.Interface:
+		if value.IsNil() {
+			return value
+		}
+		result := reflect.New(value.Type()).Elem()
+		result.Set(cloneEditorValue(value.Elem()))
+		return result
+	default:
+		result := reflect.New(value.Type()).Elem()
+		cloneEditorInto(result, value)
+		return result
+	}
+}
+
+// cloneEditorInto 直接填充目标结构，避免指针及切片成员的二次结构分配
+// 入参: target 可写目标, source 原值
+func cloneEditorInto(target, source reflect.Value) {
+	switch source.Kind() {
+	case reflect.Struct:
+		target.Set(source)
+		for _, i := range editorCloneFields(source.Type()) {
+			cloneEditorInto(target.Field(i), source.Field(i))
+		}
+	case reflect.Array:
+		target.Set(source)
+		if editorCloneMutable(source.Type().Elem()) {
+			for i := range source.Len() {
+				cloneEditorInto(target.Index(i), source.Index(i))
+			}
+		}
+	default:
+		target.Set(cloneEditorValue(source))
+	}
+}
+
+// editorCloneMutable 判断类型是否含有需要隔离的公开可变成员
+// 入参: kind 数据类型
+// 返回: bool 是否需要独立复制
+func editorCloneMutable(kind reflect.Type) bool {
+	switch kind.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Interface:
+		return true
+	case reflect.Array:
+		return editorCloneMutable(kind.Elem())
+	case reflect.Struct:
+		return len(editorCloneFields(kind)) != 0
+	}
+	return false
+}
+
+// editorCloneFields 按类型复用公开可变字段，索引发布后保持只读
+// 入参: kind 结构类型
+// 返回: []int 可变字段索引
+func editorCloneFields(kind reflect.Type) []int {
+	if cached, ok := editorClonePlans.Load(kind); ok {
+		return cached.([]int)
+	}
+	var fields []int
+	for i := range kind.NumField() {
+		field := kind.Field(i)
+		if field.IsExported() && editorCloneMutable(field.Type) {
+			fields = append(fields, i)
+		}
+	}
+	actual, _ := editorClonePlans.LoadOrStore(kind, fields)
+	return actual.([]int)
+}
+
+// copyEditorGraphicObject 复制GraphicObject的可变字段，保留内部只读状态
+// 入参: value 原值
+// 返回: GraphicObject 独立副本
+func copyEditorGraphicObject(value GraphicObject) GraphicObject {
+	switch value.Type {
+	case "TextObject", "Text":
+		value.TextObject = copyEditorTextObject(value.TextObject)
+	case "PathObject", "Path":
+		value.PathObject = copyEditorPathObject(value.PathObject)
+	case "ImageObject":
+		value.ImageObject = copyEditorImageObject(value.ImageObject)
+	case "CompositeObject", "CompositeGraphicUnit":
+		value.CompositeGraphicUnit = copyEditorCompositeGraphicUnit(value.CompositeGraphicUnit)
+	default:
+		value.TextObject = copyEditorTextObject(value.TextObject)
+		value.PathObject = copyEditorPathObject(value.PathObject)
+		value.ImageObject = copyEditorImageObject(value.ImageObject)
+		value.CompositeGraphicUnit = copyEditorCompositeGraphicUnit(value.CompositeGraphicUnit)
+	}
+	return value
+}
+
+// copyEditorTextObject 复制TextObject的可变字段，保留内部只读状态
+// 入参: value 原值
+// 返回: TextObject 独立副本
+func copyEditorTextObject(value TextObject) TextObject {
+	if value.DashOffset != nil {
+		copied := *value.DashOffset
+		value.DashOffset = &copied
+	}
+	if value.Alpha != nil {
+		copied := *value.Alpha
+		value.Alpha = &copied
+	}
+	if value.Visible != nil {
+		copied := *value.Visible
+		value.Visible = &copied
+	}
+	if value.Fill != nil {
+		copied := *value.Fill
+		value.Fill = &copied
+	}
+	if value.Stroke != nil {
+		copied := *value.Stroke
+		value.Stroke = &copied
+	}
+	value.StrokeColor = cloneEditorData(value.StrokeColor)
+	value.FillColor = cloneEditorData(value.FillColor)
+	value.CGTransform = slices.Clone(value.CGTransform)
+	value.TextCode = slices.Clone(value.TextCode)
+	value.Clips = cloneEditorData(value.Clips)
+	value.Actions = cloneEditorData(value.Actions)
+	return value
+}
+
+// copyEditorPathObject 复制PathObject的可变字段，保留内部只读状态
+// 入参: value 原值
+// 返回: PathObject 独立副本
+func copyEditorPathObject(value PathObject) PathObject {
+	if value.DashOffset != nil {
+		copied := *value.DashOffset
+		value.DashOffset = &copied
+	}
+	if value.Alpha != nil {
+		copied := *value.Alpha
+		value.Alpha = &copied
+	}
+	if value.Visible != nil {
+		copied := *value.Visible
+		value.Visible = &copied
+	}
+	if value.Stroke != nil {
+		copied := *value.Stroke
+		value.Stroke = &copied
+	}
+	if value.Fill != nil {
+		copied := *value.Fill
+		value.Fill = &copied
+	}
+	value.StrokeColor = cloneEditorData(value.StrokeColor)
+	value.FillColor = cloneEditorData(value.FillColor)
+	value.Clips = cloneEditorData(value.Clips)
+	value.Actions = cloneEditorData(value.Actions)
+	return value
+}
+
+// copyEditorImageObject 复制ImageObject的可变字段，保留内部只读状态
+// 入参: value 原值
+// 返回: ImageObject 独立副本
+func copyEditorImageObject(value ImageObject) ImageObject {
+	if value.DashOffset != nil {
+		copied := *value.DashOffset
+		value.DashOffset = &copied
+	}
+	if value.Alpha != nil {
+		copied := *value.Alpha
+		value.Alpha = &copied
+	}
+	if value.Visible != nil {
+		copied := *value.Visible
+		value.Visible = &copied
+	}
+	value.Border = cloneEditorData(value.Border)
+	value.Clips = cloneEditorData(value.Clips)
+	value.Actions = cloneEditorData(value.Actions)
+	return value
+}
+
+// copyEditorCompositeGraphicUnit 复制CompositeGraphicUnit的可变字段，保留内部只读状态
+// 入参: value 原值
+// 返回: CompositeGraphicUnit 独立副本
+func copyEditorCompositeGraphicUnit(value CompositeGraphicUnit) CompositeGraphicUnit {
+	if value.DashOffset != nil {
+		copied := *value.DashOffset
+		value.DashOffset = &copied
+	}
+	if value.Alpha != nil {
+		copied := *value.Alpha
+		value.Alpha = &copied
+	}
+	if value.Visible != nil {
+		copied := *value.Visible
+		value.Visible = &copied
+	}
+	hasTyped := len(value.TextObject)+len(value.PathObject)+len(value.ImageObject)+len(value.CompositeGraphicUnit) != 0
+	if len(value.Objects) != 0 {
+		value.Objects = slices.Clone(value.Objects)
+		for i := range value.Objects {
+			value.Objects[i] = copyEditorGraphicObject(value.Objects[i])
+		}
+		if hasTyped {
+			fillTypedObjects(value.Objects, &value.TextObject, &value.PathObject, &value.ImageObject, &value.CompositeGraphicUnit)
+		} else {
+			value.TextObject, value.PathObject, value.ImageObject, value.CompositeGraphicUnit = nil, nil, nil, nil
+		}
+	} else {
+		value.Objects = nil
+		value.TextObject = slices.Clone(value.TextObject)
+		for i := range value.TextObject {
+			value.TextObject[i] = copyEditorTextObject(value.TextObject[i])
+		}
+		value.PathObject = slices.Clone(value.PathObject)
+		for i := range value.PathObject {
+			value.PathObject[i] = copyEditorPathObject(value.PathObject[i])
+		}
+		value.ImageObject = slices.Clone(value.ImageObject)
+		for i := range value.ImageObject {
+			value.ImageObject[i] = copyEditorImageObject(value.ImageObject[i])
+		}
+		value.CompositeGraphicUnit = slices.Clone(value.CompositeGraphicUnit)
+		for i := range value.CompositeGraphicUnit {
+			value.CompositeGraphicUnit[i] = copyEditorCompositeGraphicUnit(value.CompositeGraphicUnit[i])
+		}
+	}
+	value.Clips = cloneEditorData(value.Clips)
+	value.Actions = cloneEditorData(value.Actions)
+	return value
+}
+
+// copyEditorPageContent 复制PageContent的可变字段，保留内部只读状态
+// 入参: value 原值
+// 返回: PageContent 独立副本
+func copyEditorPageContent(value PageContent) PageContent {
+	value.Template = slices.Clone(value.Template)
+	value.PageRes = slices.Clone(value.PageRes)
+	value.Content.Layer = slices.Clone(value.Content.Layer)
+	for i := range value.Content.Layer {
+		value.Content.Layer[i] = copyEditorLayer(value.Content.Layer[i])
+	}
+	value.Actions = cloneEditorData(value.Actions)
+	return value
+}
+
+// copyEditorLayer 复制Layer的可变字段，保留内部只读状态
+// 入参: value 原值
+// 返回: Layer 独立副本
+func copyEditorLayer(value Layer) Layer {
+	hasTyped := len(value.TextObject)+len(value.PathObject)+len(value.ImageObject)+len(value.CompositeGraphicUnit) != 0
+	if len(value.Objects) != 0 {
+		value.Objects = slices.Clone(value.Objects)
+		for i := range value.Objects {
+			value.Objects[i] = copyEditorGraphicObject(value.Objects[i])
+		}
+		if hasTyped {
+			fillTypedObjects(value.Objects, &value.TextObject, &value.PathObject, &value.ImageObject, &value.CompositeGraphicUnit)
+		} else {
+			value.TextObject, value.PathObject, value.ImageObject, value.CompositeGraphicUnit = nil, nil, nil, nil
+		}
+		return value
+	}
+	value.Objects = nil
+	value.TextObject = slices.Clone(value.TextObject)
+	for i := range value.TextObject {
+		value.TextObject[i] = copyEditorTextObject(value.TextObject[i])
+	}
+	value.PathObject = slices.Clone(value.PathObject)
+	for i := range value.PathObject {
+		value.PathObject[i] = copyEditorPathObject(value.PathObject[i])
+	}
+	value.ImageObject = slices.Clone(value.ImageObject)
+	for i := range value.ImageObject {
+		value.ImageObject[i] = copyEditorImageObject(value.ImageObject[i])
+	}
+	value.CompositeGraphicUnit = slices.Clone(value.CompositeGraphicUnit)
+	for i := range value.CompositeGraphicUnit {
+		value.CompositeGraphicUnit[i] = copyEditorCompositeGraphicUnit(value.CompositeGraphicUnit[i])
+	}
+	return value
+}
+
+// fillTypedObjects 从已克隆的图形对象列表轻量填充分类对象切片，避免二次深拷贝
+// 入参: objects 已隔离的图形对象切片, texts 文本切片指针, paths 路径切片指针, images 图像切片指针, composites 复合图元切片指针
+func fillTypedObjects(objects []GraphicObject, texts *[]TextObject, paths *[]PathObject, images *[]ImageObject, composites *[]CompositeGraphicUnit) {
+	var nText, nPath, nImage, nComposite int
+	for i := range objects {
+		switch objects[i].Type {
+		case "TextObject", "Text":
+			nText++
+		case "PathObject", "Path":
+			nPath++
+		case "ImageObject":
+			nImage++
+		case "CompositeObject", "CompositeGraphicUnit":
+			nComposite++
+		}
+	}
+	var textSlice []TextObject
+	var pathSlice []PathObject
+	var imageSlice []ImageObject
+	var compositeSlice []CompositeGraphicUnit
+	if nText != 0 {
+		textSlice = make([]TextObject, 0, nText)
+	}
+	if nPath != 0 {
+		pathSlice = make([]PathObject, 0, nPath)
+	}
+	if nImage != 0 {
+		imageSlice = make([]ImageObject, 0, nImage)
+	}
+	if nComposite != 0 {
+		compositeSlice = make([]CompositeGraphicUnit, 0, nComposite)
+	}
+	for i := range objects {
+		switch objects[i].Type {
+		case "TextObject", "Text":
+			textSlice = append(textSlice, objects[i].TextObject)
+		case "PathObject", "Path":
+			pathSlice = append(pathSlice, objects[i].PathObject)
+		case "ImageObject":
+			imageSlice = append(imageSlice, objects[i].ImageObject)
+		case "CompositeObject", "CompositeGraphicUnit":
+			compositeSlice = append(compositeSlice, objects[i].CompositeGraphicUnit)
+		}
+	}
+	*texts, *paths, *images, *composites = textSlice, pathSlice, imageSlice, compositeSlice
+}
+
+// clonePageContentWithTyped 深拷贝页面内容并同步分类对象切片，仅克隆一次Objects
+// 入参: ctx 取消上下文, value 原页面内容
+// 返回: PageContent 独立隔离的页面内容副本, error 取消错误
+func clonePageContentWithTyped(ctx context.Context, value PageContent) (PageContent, error) {
+	if err := ctx.Err(); err != nil {
+		return PageContent{}, err
+	}
+	copied := value
+	copied.Template = slices.Clone(value.Template)
+	copied.PageRes = slices.Clone(value.PageRes)
+	copied.Actions = cloneEditorData(value.Actions)
+	if len(value.Content.Layer) != 0 {
+		layers := make([]Layer, len(value.Content.Layer))
+		for i, srcLayer := range value.Content.Layer {
+			if err := ctx.Err(); err != nil {
+				return PageContent{}, err
+			}
+			layer := Layer{ID: srcLayer.ID, Type: srcLayer.Type, DrawParam: srcLayer.DrawParam}
+			if len(srcLayer.Objects) != 0 {
+				objects := make([]GraphicObject, len(srcLayer.Objects))
+				for j, object := range srcLayer.Objects {
+					if j&255 == 0 {
+						if err := ctx.Err(); err != nil {
+							return PageContent{}, err
+						}
+					}
+					objects[j] = copyEditorGraphicObject(object)
+				}
+				layer.Objects = objects
+				fillTypedObjects(layer.Objects, &layer.TextObject, &layer.PathObject, &layer.ImageObject, &layer.CompositeGraphicUnit)
+			} else {
+				layer = copyEditorLayer(srcLayer)
+			}
+			layers[i] = layer
+		}
+		copied.Content.Layer = layers
+	} else {
+		copied.Content.Layer = nil
+	}
+	return copied, ctx.Err()
+}
+
+// copyStrokeFlags 在XML反序列化后保留图元显式零值描边与字形属性标志
+// 入参: dst 目标图元指针, src 来源图元
+func copyStrokeFlags(dst *GraphicObject, src GraphicObject) {
+	dst.TextObject.LineWidthSet = src.TextObject.LineWidthSet
+	dst.TextObject.MiterLimitSet = src.TextObject.MiterLimitSet
+	dst.TextObject.WeightSet = src.TextObject.WeightSet
+	dst.TextObject.ItalicSet = src.TextObject.ItalicSet
+	dst.TextObject.DashPatternSet = src.TextObject.DashPatternSet
+	dst.PathObject.LineWidthSet = src.PathObject.LineWidthSet
+	dst.PathObject.MiterLimitSet = src.PathObject.MiterLimitSet
+	dst.PathObject.DashPatternSet = src.PathObject.DashPatternSet
+	dst.ImageObject.LineWidthSet = src.ImageObject.LineWidthSet
+	dst.ImageObject.MiterLimitSet = src.ImageObject.MiterLimitSet
+	dst.ImageObject.DashPatternSet = src.ImageObject.DashPatternSet
+}
+
 // copiedObjectStyle 保留复杂路径的原始颜色引用，普通对象沿用有效样式快照
 // 入参: object 原对象, layer 图层绘制参数
 // 返回: GraphicObject 复制快照, error 错误信息
@@ -81,6 +667,9 @@ func (e *Editor) copyObjectOrigin(before, after GraphicObject, maximum *uint64) 
 			if id := editorResourceID(child.attr("ID")); id != "" {
 				if ids[id] != "" {
 					return fmt.Errorf("duplicate object ID %q", id)
+				}
+				if *maximum >= maxUnitID {
+					return fmt.Errorf("ofdgo: MaxUnitID exceeds uint32 range")
 				}
 				*maximum += 1
 				ids[id] = formatUnitID(*maximum)
@@ -133,6 +722,7 @@ func (e *Editor) copyObjectOrigin(before, after GraphicObject, maximum *uint64) 
 		return GraphicObject{}, nil, err
 	}
 	result.TextObject.layout = after.TextObject.layout
+	copyStrokeFlags(&result, after)
 	result.state = after.state
 	result.CompositeGraphicUnit.states = remapCompositeStates(after.CompositeGraphicUnit.states, ids)
 	root.parent = origin.node.parent
@@ -303,7 +893,10 @@ func (e *Editor) promoteScopedResource(id, kind string, srcScope, dstScope []*pa
 		if err := xml.Unmarshal(standalone, &f); err != nil {
 			return "", false, err
 		}
-		newID = e.nextID()
+		newID, err = e.nextID()
+		if err != nil {
+			return "", false, err
+		}
 		f.ID = newID
 		var res editorResource
 		if loc := strings.TrimSpace(f.FontFile); loc != "" {
@@ -333,7 +926,10 @@ func (e *Editor) promoteScopedResource(id, kind string, srcScope, dstScope []*pa
 		if err := xml.Unmarshal(standalone, &m); err != nil {
 			return "", false, err
 		}
-		newID = e.nextID()
+		newID, err = e.nextID()
+		if err != nil {
+			return "", false, err
+		}
 		m.ID = newID
 		mediaPath := resolveResourcePath(srcFile, baseLoc, strings.TrimSpace(m.MediaFile))
 		mediaBytes, readErr := reader.readFile(mediaPath)
@@ -357,7 +953,10 @@ func (e *Editor) promoteScopedResource(id, kind string, srcScope, dstScope []*pa
 		if err := xml.Unmarshal(standalone, &cs); err != nil {
 			return "", false, err
 		}
-		newID = e.nextID()
+		newID, err = e.nextID()
+		if err != nil {
+			return "", false, err
+		}
 		cs.ID = newID
 		cs.Palette = slices.Clone(cs.Palette)
 		res := editorResource{space: &cs}
@@ -659,9 +1258,7 @@ func (e *Editor) remapCopiedObject(object GraphicObject, origin *editorObjectOri
 		return GraphicObject{}, nil, err
 	}
 	result.TextObject.layout = object.TextObject.layout
-	result.ImageObject.LineWidthSet = object.ImageObject.LineWidthSet
-	result.ImageObject.MiterLimitSet = object.ImageObject.MiterLimitSet
-	result.ImageObject.dashPatternSet = object.ImageObject.dashPatternSet
+	copyStrokeFlags(&result, object)
 	result.state = object.state
 	result.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
 	if origin == nil {
@@ -673,433 +1270,4 @@ func (e *Editor) remapCopiedObject(object GraphicObject, origin *editorObjectOri
 	}
 	newRoot.parent = origin.node.parent
 	return result, &editorObjectOrigin{page: targetSource, data: remapped, node: newRoot, object: result}, nil
-}
-
-// editorXMLRemapIDs 仅重写标准标识和指向副本内部的引用，保留扩展、文字和XML结构
-// 入参: data 独立片段, root 根节点, ids 原标识与新标识
-// 返回: []byte 修改后的片段, error 错误信息
-func editorXMLRemapIDs(data []byte, root *editorXML, ids map[string]string) ([]byte, error) {
-	return remapEditorXMLIDs(data, root, ids, true)
-}
-
-// editorObjectReference 判断对象内可按ST_RefID重映射的标准属性
-// 入参: name 属性名
-// 返回: bool 是否为标识引用
-func editorObjectReference(name string) bool {
-	switch name {
-	case "Font", "ResourceID", "Substitution", "ImageMask", "Relative", "DrawParam", "ColorSpace", "Thumbnail", "TemplateID", "PageID", "PageRef", "RefId":
-		return true
-	}
-	return false
-}
-
-// editorXMLRemapOnlyIDs 仅重写XML节点树上的ID属性而不触碰外部资源引用属性
-// 入参: data 独立片段, root 根节点, ids 原标识与新标识映射
-// 返回: []byte 修改后的片段, error 编码错误
-func editorXMLRemapOnlyIDs(data []byte, root *editorXML, ids map[string]string) ([]byte, error) {
-	return remapEditorXMLIDs(data, root, ids, false)
-}
-
-// remapEditorXMLIDs 遍历重写标准节点的标识属性及可选的内部引用
-// 入参: data 独立片段, root 根节点, ids 原标识与新标识映射, includeRefs 是否同时重写引用属性和文本节点
-// 返回: []byte 修改后的片段, error 编码错误
-func remapEditorXMLIDs(data []byte, root *editorXML, ids map[string]string, includeRefs bool) ([]byte, error) {
-	var patches []editorXMLPatch
-	var visit func(*editorXML) error
-	visit = func(node *editorXML) error {
-		if classifyOFDNamespace(node.name.Space) != ofdXMLUnknown {
-			decoder := xml.NewDecoder(bytes.NewReader(data[node.start:node.open]))
-			token, err := decoder.RawToken()
-			if err != nil {
-				return err
-			}
-			start := token.(xml.StartElement)
-			changed := false
-			for i := range start.Attr {
-				attr := &start.Attr[i]
-				if attr.Name.Space != "" {
-					continue
-				}
-				if attr.Name.Local == "ID" || includeRefs && editorObjectReference(attr.Name.Local) {
-					if value := ids[editorResourceID(attr.Value)]; value != "" {
-						attr.Value, changed = value, true
-					}
-				}
-			}
-			if changed {
-				value, err := encodeStartElementToken(start, node.open == node.end)
-				if err != nil {
-					return err
-				}
-				patches = append(patches, editorXMLPatch{node.start, node.open, value})
-			}
-			if includeRefs && (node.name.Local == "Font" || node.name.Local == "Substitution" || node.name.Local == "Thumbnail") {
-				if value := ids[editorResourceID(editorImportText(data, node))]; value != "" {
-					patches = append(patches, editorXMLContent(data, node, []byte(value)))
-				}
-			}
-		}
-		for _, child := range node.children {
-			if err := visit(child); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := visit(root); err != nil {
-		return nil, err
-	}
-	return editorPatchXML(data, patches), nil
-}
-
-// encodeStartElementToken 序列化保留原前缀的起始标签Token
-// 入参: start 起始标签, selfClosing 是否自闭合
-// 返回: []byte 标签字节切片, error 编码错误
-func encodeStartElementToken(start xml.StartElement, selfClosing bool) ([]byte, error) {
-	if start.Name.Space != "" {
-		start.Name.Local = start.Name.Space + ":" + start.Name.Local
-		start.Name.Space = ""
-	}
-	for i := range start.Attr {
-		attr := &start.Attr[i]
-		if attr.Name.Space != "" {
-			attr.Name.Local = attr.Name.Space + ":" + attr.Name.Local
-			attr.Name.Space = ""
-		}
-	}
-	var header bytes.Buffer
-	encoder := xml.NewEncoder(&header)
-	if err := encoder.EncodeToken(start); err != nil {
-		return nil, err
-	}
-	if err := encoder.Flush(); err != nil {
-		return nil, err
-	}
-	value := header.Bytes()
-	if selfClosing {
-		value = append(value[:len(value)-1], '/', '>')
-	}
-	return value, nil
-}
-
-// editorScopedResourceAttrKind 判断属性是否为资源表引用并返回预期资源类别
-// 入参: elem 元素局部名, attr 属性局部名
-// 返回: string 期望资源类别, bool 是否为资源表引用属性
-func editorScopedResourceAttrKind(elem, attr string) (string, bool) {
-	switch attr {
-	case "Font":
-		return "Font", true
-	case "DrawParam", "Relative":
-		return "DrawParam", true
-	case "ColorSpace":
-		return "ColorSpace", true
-	case "ImageMask", "Substitution", "Thumbnail":
-		return "Image", true
-	case "ResourceID":
-		switch elem {
-		case "ImageObject":
-			return "Image", true
-		case "Sound":
-			return "Audio", true
-		case "Movie":
-			return "Video", true
-		case "DrawParam":
-			return "DrawParam", true
-		case "CompositeObject", "CompositeGraphicUnit":
-			return "CompositeGraphicUnit", true
-		}
-		return "", true
-	}
-	return "", false
-}
-
-// cloneEditorData 深复制编辑快照，未导出的排版及原文来源保持不可变共享
-// 入参: value 原值
-// 返回: T 独立副本
-func cloneEditorData[T any](value T) T {
-	switch source := any(value).(type) {
-	case GraphicObject:
-		return any(copyEditorGraphicObject(source)).(T)
-	case TextObject:
-		return any(copyEditorTextObject(source)).(T)
-	case PathObject:
-		return any(copyEditorPathObject(source)).(T)
-	case ImageObject:
-		return any(copyEditorImageObject(source)).(T)
-	case CompositeGraphicUnit:
-		return any(copyEditorCompositeGraphicUnit(source)).(T)
-	case PageContent:
-		return any(copyEditorPageContent(source)).(T)
-	case Layer:
-		return any(copyEditorLayer(source)).(T)
-	}
-	source := reflect.ValueOf(value)
-	if !source.IsValid() {
-		return value
-	}
-	return cloneEditorValue(source).Interface().(T)
-}
-
-// cloneEditorValue 复制公开指针、切片及数组，纯值数据不创建额外结构
-// 入参: value 原值
-// 返回: reflect.Value 独立副本
-func cloneEditorValue(value reflect.Value) reflect.Value {
-	if !value.IsValid() || !editorCloneMutable(value.Type()) {
-		return value
-	}
-	switch value.Kind() {
-	case reflect.Pointer:
-		if value.IsNil() {
-			return value
-		}
-		result := reflect.New(value.Type().Elem())
-		cloneEditorInto(result.Elem(), value.Elem())
-		return result
-	case reflect.Slice:
-		if value.IsNil() {
-			return value
-		}
-		result := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
-		if !editorCloneMutable(value.Type().Elem()) {
-			reflect.Copy(result, value)
-		} else {
-			for i := range value.Len() {
-				cloneEditorInto(result.Index(i), value.Index(i))
-			}
-		}
-		return result
-	default:
-		result := reflect.New(value.Type()).Elem()
-		cloneEditorInto(result, value)
-		return result
-	}
-}
-
-// cloneEditorInto 直接填充目标结构，避免指针及切片成员的二次结构分配
-// 入参: target 可写目标, source 原值
-func cloneEditorInto(target, source reflect.Value) {
-	switch source.Kind() {
-	case reflect.Struct:
-		target.Set(source)
-		for _, i := range editorCloneFields(source.Type()) {
-			cloneEditorInto(target.Field(i), source.Field(i))
-		}
-	case reflect.Array:
-		target.Set(source)
-		if editorCloneMutable(source.Type().Elem()) {
-			for i := range source.Len() {
-				cloneEditorInto(target.Index(i), source.Index(i))
-			}
-		}
-	default:
-		target.Set(cloneEditorValue(source))
-	}
-}
-
-// editorCloneMutable 判断类型是否含有需要隔离的公开可变成员
-// 入参: kind 数据类型
-// 返回: bool 是否需要独立复制
-func editorCloneMutable(kind reflect.Type) bool {
-	switch kind.Kind() {
-	case reflect.Pointer, reflect.Slice:
-		return true
-	case reflect.Array:
-		return editorCloneMutable(kind.Elem())
-	case reflect.Struct:
-		return len(editorCloneFields(kind)) != 0
-	}
-	return false
-}
-
-// editorCloneFields 按类型复用公开可变字段，索引发布后保持只读
-// 入参: kind 结构类型
-// 返回: []int 可变字段索引
-func editorCloneFields(kind reflect.Type) []int {
-	if cached, ok := editorClonePlans.Load(kind); ok {
-		return cached.([]int)
-	}
-	var fields []int
-	for i := range kind.NumField() {
-		field := kind.Field(i)
-		if field.IsExported() && editorCloneMutable(field.Type) {
-			fields = append(fields, i)
-		}
-	}
-	actual, _ := editorClonePlans.LoadOrStore(kind, fields)
-	return actual.([]int)
-}
-
-// copyEditorGraphicObject 复制GraphicObject的可变字段，保留内部只读状态
-// 入参: value 原值
-// 返回: GraphicObject 独立副本
-func copyEditorGraphicObject(value GraphicObject) GraphicObject {
-	value.TextObject = copyEditorTextObject(value.TextObject)
-	value.PathObject = copyEditorPathObject(value.PathObject)
-	value.ImageObject = copyEditorImageObject(value.ImageObject)
-	value.CompositeGraphicUnit = copyEditorCompositeGraphicUnit(value.CompositeGraphicUnit)
-	return value
-}
-
-// copyEditorTextObject 复制TextObject的可变字段，保留内部只读状态
-// 入参: value 原值
-// 返回: TextObject 独立副本
-func copyEditorTextObject(value TextObject) TextObject {
-	if value.DashOffset != nil {
-		copied := *value.DashOffset
-		value.DashOffset = &copied
-	}
-	if value.Alpha != nil {
-		copied := *value.Alpha
-		value.Alpha = &copied
-	}
-	if value.Visible != nil {
-		copied := *value.Visible
-		value.Visible = &copied
-	}
-	if value.Fill != nil {
-		copied := *value.Fill
-		value.Fill = &copied
-	}
-	if value.Stroke != nil {
-		copied := *value.Stroke
-		value.Stroke = &copied
-	}
-	value.StrokeColor = cloneEditorData(value.StrokeColor)
-	value.FillColor = cloneEditorData(value.FillColor)
-	value.CGTransform = slices.Clone(value.CGTransform)
-	value.TextCode = slices.Clone(value.TextCode)
-	value.Clips = cloneEditorData(value.Clips)
-	value.Actions = cloneEditorData(value.Actions)
-	return value
-}
-
-// copyEditorPathObject 复制PathObject的可变字段，保留内部只读状态
-// 入参: value 原值
-// 返回: PathObject 独立副本
-func copyEditorPathObject(value PathObject) PathObject {
-	if value.DashOffset != nil {
-		copied := *value.DashOffset
-		value.DashOffset = &copied
-	}
-	if value.Alpha != nil {
-		copied := *value.Alpha
-		value.Alpha = &copied
-	}
-	if value.Visible != nil {
-		copied := *value.Visible
-		value.Visible = &copied
-	}
-	if value.Stroke != nil {
-		copied := *value.Stroke
-		value.Stroke = &copied
-	}
-	if value.Fill != nil {
-		copied := *value.Fill
-		value.Fill = &copied
-	}
-	value.StrokeColor = cloneEditorData(value.StrokeColor)
-	value.FillColor = cloneEditorData(value.FillColor)
-	value.Clips = cloneEditorData(value.Clips)
-	value.Actions = cloneEditorData(value.Actions)
-	return value
-}
-
-// copyEditorImageObject 复制ImageObject的可变字段，保留内部只读状态
-// 入参: value 原值
-// 返回: ImageObject 独立副本
-func copyEditorImageObject(value ImageObject) ImageObject {
-	if value.DashOffset != nil {
-		copied := *value.DashOffset
-		value.DashOffset = &copied
-	}
-	if value.Alpha != nil {
-		copied := *value.Alpha
-		value.Alpha = &copied
-	}
-	if value.Visible != nil {
-		copied := *value.Visible
-		value.Visible = &copied
-	}
-	value.Border = cloneEditorData(value.Border)
-	value.Clips = cloneEditorData(value.Clips)
-	value.Actions = cloneEditorData(value.Actions)
-	return value
-}
-
-// copyEditorCompositeGraphicUnit 复制CompositeGraphicUnit的可变字段，保留内部只读状态
-// 入参: value 原值
-// 返回: CompositeGraphicUnit 独立副本
-func copyEditorCompositeGraphicUnit(value CompositeGraphicUnit) CompositeGraphicUnit {
-	if value.Alpha != nil {
-		copied := *value.Alpha
-		value.Alpha = &copied
-	}
-	if value.Visible != nil {
-		copied := *value.Visible
-		value.Visible = &copied
-	}
-	value.Objects = slices.Clone(value.Objects)
-	for i := range value.Objects {
-		value.Objects[i] = copyEditorGraphicObject(value.Objects[i])
-	}
-	value.TextObject = slices.Clone(value.TextObject)
-	for i := range value.TextObject {
-		value.TextObject[i] = copyEditorTextObject(value.TextObject[i])
-	}
-	value.PathObject = slices.Clone(value.PathObject)
-	for i := range value.PathObject {
-		value.PathObject[i] = copyEditorPathObject(value.PathObject[i])
-	}
-	value.ImageObject = slices.Clone(value.ImageObject)
-	for i := range value.ImageObject {
-		value.ImageObject[i] = copyEditorImageObject(value.ImageObject[i])
-	}
-	value.CompositeGraphicUnit = slices.Clone(value.CompositeGraphicUnit)
-	for i := range value.CompositeGraphicUnit {
-		value.CompositeGraphicUnit[i] = copyEditorCompositeGraphicUnit(value.CompositeGraphicUnit[i])
-	}
-	value.Clips = cloneEditorData(value.Clips)
-	value.Actions = cloneEditorData(value.Actions)
-	return value
-}
-
-// copyEditorPageContent 复制PageContent的可变字段，保留内部只读状态
-// 入参: value 原值
-// 返回: PageContent 独立副本
-func copyEditorPageContent(value PageContent) PageContent {
-	value.Template = slices.Clone(value.Template)
-	value.PageRes = slices.Clone(value.PageRes)
-	value.Content.Layer = slices.Clone(value.Content.Layer)
-	for i := range value.Content.Layer {
-		value.Content.Layer[i] = copyEditorLayer(value.Content.Layer[i])
-	}
-	value.Actions = cloneEditorData(value.Actions)
-	return value
-}
-
-// copyEditorLayer 复制Layer的可变字段，保留内部只读状态
-// 入参: value 原值
-// 返回: Layer 独立副本
-func copyEditorLayer(value Layer) Layer {
-	value.Objects = slices.Clone(value.Objects)
-	for i := range value.Objects {
-		value.Objects[i] = copyEditorGraphicObject(value.Objects[i])
-	}
-	value.TextObject = slices.Clone(value.TextObject)
-	for i := range value.TextObject {
-		value.TextObject[i] = copyEditorTextObject(value.TextObject[i])
-	}
-	value.PathObject = slices.Clone(value.PathObject)
-	for i := range value.PathObject {
-		value.PathObject[i] = copyEditorPathObject(value.PathObject[i])
-	}
-	value.ImageObject = slices.Clone(value.ImageObject)
-	for i := range value.ImageObject {
-		value.ImageObject[i] = copyEditorImageObject(value.ImageObject[i])
-	}
-	value.CompositeGraphicUnit = slices.Clone(value.CompositeGraphicUnit)
-	for i := range value.CompositeGraphicUnit {
-		value.CompositeGraphicUnit[i] = copyEditorCompositeGraphicUnit(value.CompositeGraphicUnit[i])
-	}
-	return value
 }

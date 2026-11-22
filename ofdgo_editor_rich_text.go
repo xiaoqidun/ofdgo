@@ -38,6 +38,298 @@ const richTextTagType = "OFDGo.RichText"
 // richTextNamespace 标识富文本编辑语义的命名空间，版本仅随不兼容的语义变更升级
 const richTextNamespace = "https://ofdgo.aite.me/ns/rich-text/1"
 
+// richTextMetadata 不保存字体编号，以标准主文字对象序号恢复当前文档字体
+type richTextMetadata struct {
+	Version int        `json:"version"`
+	Value   RichText   `json:"value"`
+	Frame   Box        `json:"frame"`
+	Extent  Box        `json:"extent"`
+	Offset  [2]float64 `json:"offset"`
+	Anchors []int      `json:"anchors"`
+	Digest  string     `json:"digest"`
+}
+
+// richTextSnapshot 保存对象及嵌套成员的不可变编辑语义，成员按绘制顺序定位
+type richTextSnapshot struct {
+	metadata *richTextMetadata
+	children map[int]*richTextSnapshot
+}
+
+// richTextEntry 保存标引入口及延迟报告的损坏诊断
+type richTextEntry struct {
+	index     int
+	aggregate bool
+	metadata  richTextMetadata
+	err       error
+}
+
+// textLayoutEntry 保存普通文字的标引入口与可恢复排版语义
+type textLayoutEntry struct {
+	index    int
+	metadata textMetadata
+}
+
+// richTextIndex 缓存当前文档修订的标引，不创建页面预览快照
+type richTextIndex struct {
+	source        *editorSource
+	revision      uint64
+	remaps        map[string]int
+	entries       map[string]richTextEntry
+	layouts       map[string]textLayoutEntry
+	objectLayouts map[string]textLayoutEntry
+	ambiguousObjs map[string]bool
+	err           error
+}
+
+// textLayoutGroup 聚合相同普通文字排版语义的页面对象引用
+type textLayoutGroup struct {
+	metadata string
+	refs     []StructureReference
+}
+
+// isRichTextAggregateRoot 判断富文本标引根节点是否采用多条目聚合结构
+// 入参: root 标引根节点
+// 返回: bool 是否为聚合格式
+func isRichTextAggregateRoot(root *StructureNode) bool {
+	if root == nil || strings.TrimSpace(root.Text) != "" || len(root.Children) == 0 {
+		return false
+	}
+	for _, child := range root.Children {
+		if child.Name == "ObjectRef" && child.Namespace == richTextNamespace {
+			return false
+		}
+	}
+	return true
+}
+
+// parseRichTextMetadata 解码并校验单条富文本语义JSON
+// 入参: text 原始JSON文本, meta 输出结构
+// 返回: error 解码或字段范围错误
+func parseRichTextMetadata(text string, meta *richTextMetadata) error {
+	if err := json.Unmarshal([]byte(text), meta); err != nil {
+		return err
+	}
+	if meta.Version != 1 || meta.Frame.X != 0 || meta.Frame.Y != 0 || !finite(meta.Frame.W) || !finite(meta.Frame.H) || meta.Frame.W <= 0 || meta.Frame.H <= 0 || len(meta.Digest) != 64 {
+		return fmt.Errorf("invalid rich text metadata version or frame")
+	}
+	if meta.Extent.X != 0 || meta.Extent.Y != 0 || !finite(meta.Extent.W) || !finite(meta.Extent.H) || meta.Extent.W <= 0 || meta.Extent.H <= 0 || !finite(meta.Offset[0]) || !finite(meta.Offset[1]) || meta.Offset[0] < 0 || meta.Offset[1] < 0 || meta.Offset[0] > meta.Extent.W || meta.Offset[1] > meta.Extent.H || len(meta.Anchors) != len(meta.Value.Runs) {
+		return fmt.Errorf("invalid rich text metadata extent or anchors")
+	}
+	return nil
+}
+
+// encodeRichTextEntryFragment 编码聚合富文本标引内的单条Entry片段
+// 入参: pageID 页面标识, objectID 对象标识, payload 序列化后的元数据JSON
+// 返回: []byte Entry XML片段, error 转义错误
+func encodeRichTextEntryFragment(pageID, objectID string, payload []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.Grow(len(payload) + 96)
+	buf.WriteString("<Entry>")
+	if err := xml.EscapeText(&buf, payload); err != nil {
+		return nil, err
+	}
+	buf.WriteString(`<ObjectRef PageRef="`)
+	if err := xml.EscapeText(&buf, []byte(pageID)); err != nil {
+		return nil, err
+	}
+	buf.WriteString(`">`)
+	if err := xml.EscapeText(&buf, []byte(objectID)); err != nil {
+		return nil, err
+	}
+	buf.WriteString("</ObjectRef></Entry>")
+	return buf.Bytes(), nil
+}
+
+// richTextPlacement 根据局部逻辑坐标确定物理组合边界，负向装饰不会被资源裁剪
+// 入参: meta 编辑框与资源尺寸, matrix 逻辑坐标到页面变换
+// 返回: CompositeGraphicUnit 组合几何
+func richTextPlacement(meta richTextMetadata, matrix Matrix) CompositeGraphicUnit {
+	matrix = matrix.Multiply(TranslationMatrix(-meta.Offset[0], -meta.Offset[1]))
+	box := matrix.TransformBox(meta.Extent)
+	return CompositeGraphicUnit{Boundary: editorBoxString(box), CTM: TranslationMatrix(-box.X, -box.Y).Multiply(matrix).String()}
+}
+
+// richTextDigest 对已编码图元计算不含字体、颜色空间和字形编号的内容摘要
+// 入参: objects 标准子对象
+// 返回: string 稳定内容摘要
+func richTextDigest(objects []GraphicObject) string {
+	copy := cloneEditorData(objects)
+	for i := range copy {
+		o := &copy[i]
+		o.origin = nil
+		o.state = editorCompositeState{}
+		o.TextObject.ID = ""
+		o.TextObject.Font = ""
+		o.TextObject.CGTransform = nil
+		o.TextObject.layout = nil
+		o.PathObject.ID = ""
+		if o.TextObject.FillColor != nil {
+			o.TextObject.FillColor.ColorSpace = ""
+		}
+		if o.TextObject.StrokeColor != nil {
+			o.TextObject.StrokeColor.ColorSpace = ""
+		}
+		if o.PathObject.FillColor != nil {
+			o.PathObject.FillColor.ColorSpace = ""
+		}
+		if o.PathObject.StrokeColor != nil {
+			o.PathObject.StrokeColor.ColorSpace = ""
+		}
+	}
+	data, _ := json.Marshal(copy)
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])
+}
+
+// buildTextLayoutNode 构造独立命名空间下的普通文字自定义标引树
+// 入参: group 聚合标引组
+// 返回: StructureNode 标引根节点
+func buildTextLayoutNode(group textLayoutGroup) StructureNode {
+	children := make([]StructureNode, 0, len(group.refs))
+	for _, ref := range group.refs {
+		children = append(children, StructureNode{
+			Name:       "ObjectRef",
+			Namespace:  textNamespace,
+			Attributes: []StructureAttribute{{Name: "PageRef", Value: ref.PageID}},
+			Text:       strings.Join(ref.ObjectIDs, " "),
+		})
+	}
+	return StructureNode{Name: "Text", Namespace: textNamespace, Text: group.metadata, Children: children}
+}
+
+// richTextTagsFontSafe 仅允许完整识别且不含资源编号的本库标引通过字体重绑定检查
+// 入参: ctx 取消上下文, reader 包阅读器, index 文档索引
+// 返回: bool 是否可以排除字体引用, error 读取或取消错误
+func richTextTagsFontSafe(ctx context.Context, reader *Reader, index int) (bool, error) {
+	view, err := editorDocumentViewContext(ctx, reader, index)
+	if err != nil {
+		return false, err
+	}
+	defer view.Close()
+	tags, err := view.CustomTagsContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, tag := range tags {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if tag.TypeID == textTagType && tag.NameSpace == textNamespace {
+			if tag.SchemaLoc != "" {
+				return false, nil
+			}
+			structure, err := view.readStructureContext(ctx, tag)
+			if err != nil {
+				return false, err
+			}
+			root := structure.Root
+			if root.Name != "Text" || root.Namespace != textNamespace || len(root.Attributes) != 0 || !textMetadataFontSafe(root.Text) {
+				return false, nil
+			}
+			for _, child := range root.Children {
+				if child.Name != "ObjectRef" || child.Namespace != textNamespace || len(child.Children) != 0 || len(child.Attributes) != 1 || child.Attributes[0].Namespace != "" || child.Attributes[0].Name != "PageRef" {
+					return false, nil
+				}
+			}
+			continue
+		}
+		if tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace {
+			if tag.SchemaLoc != "" {
+				return false, nil
+			}
+			structure, err := view.readStructureContext(ctx, tag)
+			if err != nil {
+				return false, err
+			}
+			root := structure.Root
+			if root.Name != "RichText" || root.Namespace != richTextNamespace || len(root.Attributes) != 0 {
+				return false, nil
+			}
+			if isRichTextAggregateRoot(root) {
+				for _, item := range root.Children {
+					if item.Name != "Entry" || item.Namespace != richTextNamespace || len(item.Attributes) != 0 || !richTextMetadataFontSafe(item.Text) {
+						return false, nil
+					}
+					for _, child := range item.Children {
+						if child.Name != "ObjectRef" || child.Namespace != richTextNamespace || len(child.Children) != 0 || len(child.Attributes) != 1 || child.Attributes[0].Namespace != "" || child.Attributes[0].Name != "PageRef" {
+							return false, nil
+						}
+					}
+				}
+				continue
+			}
+			if !richTextMetadataFontSafe(root.Text) {
+				return false, nil
+			}
+			for _, child := range root.Children {
+				if child.Name != "ObjectRef" || child.Namespace != richTextNamespace || len(child.Children) != 0 || len(child.Attributes) != 1 || child.Attributes[0].Namespace != "" || child.Attributes[0].Name != "PageRef" {
+					return false, nil
+				}
+			}
+			continue
+		}
+		if strings.TrimSpace(tag.FileLoc) == "" || !isKnownResourceSafeTagMeta(tag) {
+			return false, nil
+		}
+		if tag.SchemaLoc != "" {
+			schemaFile, err := view.openFile(view.ResPath(tag.SchemaLoc))
+			if err != nil {
+				return false, nil
+			}
+			_ = schemaFile.Close()
+		}
+		structure, err := view.readStructureContext(ctx, tag)
+		if err != nil {
+			return false, ctx.Err()
+		}
+		if !knownResourceSafeCustomTag(tag, structure.Root) {
+			return false, nil
+		}
+	}
+	return true, ctx.Err()
+}
+
+// textMetadataFontSafe 核对本库普通文字元数据不包含字体资源编号或未知字段
+// 入参: value 元数据JSON
+// 返回: bool 是否可由标准图元完整统计字体引用
+func textMetadataFontSafe(value string) bool {
+	var plain textMetadata
+	decoder := json.NewDecoder(bytes.NewBufferString(value))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&plain); err != nil {
+		return false
+	}
+	if decoder.Decode(new(any)) != io.EOF || len(plain.Digest) != 64 {
+		return false
+	}
+	return validateRichLayout(plain.Layout) == nil && structureXMLText(plain.Text)
+}
+
+// richTextMetadataFontSafe 核对本库富文本元数据不包含字体资源编号或未知字段
+// 入参: value 元数据JSON
+// 返回: bool 是否可由标准图元完整统计字体引用
+func richTextMetadataFontSafe(value string) bool {
+	var meta richTextMetadata
+	decoder := json.NewDecoder(bytes.NewBufferString(value))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&meta); err != nil {
+		return false
+	}
+	if decoder.Decode(new(any)) != io.EOF || meta.Version != 1 {
+		return false
+	}
+	for i := range meta.Value.Runs {
+		if meta.Value.Runs[i].Format.Font != "" {
+			return false
+		}
+		meta.Value.Runs[i].Format.Font = "1"
+	}
+	if err := meta.Value.Validate(); err != nil {
+		return false
+	}
+	return true
+}
+
 // AddRichText 原子添加标准组合及持久化编辑标引，成功时只产生一条历史
 // 按给定宽度排版，高度随内容自适应
 // 入参: page 页面索引, box 页面编辑框, value 富文本内容
@@ -359,55 +651,6 @@ func (e *Editor) LayoutTextFrame(page int, path ObjectPath, options TextLayout, 
 	index := path.Children[len(path.Children)-1]
 	path.Children = path.Children[:len(path.Children)-1]
 	return e.updateCompositeRichText(page, path, index, value, offset, width, true)
-}
-
-// richTextMetadata 不保存字体编号，以标准主文字对象序号恢复当前文档字体
-type richTextMetadata struct {
-	Version int        `json:"version"`
-	Value   RichText   `json:"value"`
-	Frame   Box        `json:"frame"`
-	Extent  Box        `json:"extent"`
-	Offset  [2]float64 `json:"offset"`
-	Anchors []int      `json:"anchors"`
-	Digest  string     `json:"digest"`
-}
-
-// richTextSnapshot 保存对象及嵌套成员的不可变编辑语义，成员按绘制顺序定位
-type richTextSnapshot struct {
-	metadata *richTextMetadata
-	children map[int]*richTextSnapshot
-}
-
-// richTextEntry 保存标引入口及延迟报告的损坏诊断
-type richTextEntry struct {
-	index     int
-	aggregate bool
-	metadata  richTextMetadata
-	err       error
-}
-
-// textLayoutEntry 保存普通文字的标引入口与可恢复排版语义
-type textLayoutEntry struct {
-	index    int
-	metadata textMetadata
-}
-
-// richTextIndex 缓存当前文档修订的标引，不创建页面预览快照
-type richTextIndex struct {
-	source        *editorSource
-	revision      uint64
-	remaps        map[string]int
-	entries       map[string]richTextEntry
-	layouts       map[string]textLayoutEntry
-	objectLayouts map[string]textLayoutEntry
-	ambiguousObjs map[string]bool
-	err           error
-}
-
-// textLayoutGroup 聚合相同普通文字排版语义的页面对象引用
-type textLayoutGroup struct {
-	metadata string
-	refs     []StructureReference
 }
 
 // updateRichTextFrame 统一提交正文或编辑框变化，width为零时沿用原宽度模式
@@ -882,59 +1125,6 @@ func (e *Editor) putRichTextMetadata(page int, id string, meta richTextMetadata,
 		}
 	}
 	return e.appendRichTextAggregateMetadata(page, id, data)
-}
-
-// isRichTextAggregateRoot 判断富文本标引根节点是否采用多条目聚合结构
-// 入参: root 标引根节点
-// 返回: bool 是否为聚合格式
-func isRichTextAggregateRoot(root *StructureNode) bool {
-	if root == nil || strings.TrimSpace(root.Text) != "" || len(root.Children) == 0 {
-		return false
-	}
-	for _, child := range root.Children {
-		if child.Name == "ObjectRef" && child.Namespace == richTextNamespace {
-			return false
-		}
-	}
-	return true
-}
-
-// parseRichTextMetadata 解码并校验单条富文本语义JSON
-// 入参: text 原始JSON文本, meta 输出结构
-// 返回: error 解码或字段范围错误
-func parseRichTextMetadata(text string, meta *richTextMetadata) error {
-	if err := json.Unmarshal([]byte(text), meta); err != nil {
-		return err
-	}
-	if meta.Version != 1 || meta.Frame.X != 0 || meta.Frame.Y != 0 || !finite(meta.Frame.W) || !finite(meta.Frame.H) || meta.Frame.W <= 0 || meta.Frame.H <= 0 || len(meta.Digest) != 64 {
-		return fmt.Errorf("invalid rich text metadata version or frame")
-	}
-	if meta.Extent.X != 0 || meta.Extent.Y != 0 || !finite(meta.Extent.W) || !finite(meta.Extent.H) || meta.Extent.W <= 0 || meta.Extent.H <= 0 || !finite(meta.Offset[0]) || !finite(meta.Offset[1]) || meta.Offset[0] < 0 || meta.Offset[1] < 0 || meta.Offset[0] > meta.Extent.W || meta.Offset[1] > meta.Extent.H || len(meta.Anchors) != len(meta.Value.Runs) {
-		return fmt.Errorf("invalid rich text metadata extent or anchors")
-	}
-	return nil
-}
-
-// encodeRichTextEntryFragment 编码聚合富文本标引内的单条Entry片段
-// 入参: pageID 页面标识, objectID 对象标识, payload 序列化后的元数据JSON
-// 返回: []byte Entry XML片段, error 转义错误
-func encodeRichTextEntryFragment(pageID, objectID string, payload []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	buf.Grow(len(payload) + 96)
-	buf.WriteString("<Entry>")
-	if err := xml.EscapeText(&buf, payload); err != nil {
-		return nil, err
-	}
-	buf.WriteString(`<ObjectRef PageRef="`)
-	if err := xml.EscapeText(&buf, []byte(pageID)); err != nil {
-		return nil, err
-	}
-	buf.WriteString(`">`)
-	if err := xml.EscapeText(&buf, []byte(objectID)); err != nil {
-		return nil, err
-	}
-	buf.WriteString("</ObjectRef></Entry>")
-	return buf.Bytes(), nil
 }
 
 // findRichTextAggregateTag 查找并缓存当前文档的统一内部富文本聚合标引文件
@@ -1822,8 +2012,8 @@ func (e *Editor) collectTextLayoutGroups(ctx context.Context, pages []PageConten
 				}
 			}
 		}
-		if e != nil && e.source != nil && (len(e.source.reader.Annots[page.ID]) != 0 || len(e.source.reader.pageAnnotFiles) != 0 || e.source.document.Annotations != "") {
-			annots := e.source.reader.Annots[page.ID]
+		if e != nil && e.source != nil && (len(e.source.reader.annots[page.ID]) != 0 || len(e.source.reader.pageAnnotFiles) != 0 || e.source.document.Annotations != "") {
+			annots := e.source.reader.annots[page.ID]
 			if !e.source.reader.pageAnnotsLoaded[page.ID] {
 				if annotReader == nil {
 					annotReader = cloneEditorReader(e.source.reader)
@@ -2675,194 +2865,4 @@ func (e *Editor) copyImportedTextLayouts(ctx context.Context, source *Editor, so
 		}
 	}
 	return ctx.Err()
-}
-
-// richTextPlacement 根据局部逻辑坐标确定物理组合边界，负向装饰不会被资源裁剪
-// 入参: meta 编辑框与资源尺寸, matrix 逻辑坐标到页面变换
-// 返回: CompositeGraphicUnit 组合几何
-func richTextPlacement(meta richTextMetadata, matrix Matrix) CompositeGraphicUnit {
-	matrix = matrix.Multiply(TranslationMatrix(-meta.Offset[0], -meta.Offset[1]))
-	box := matrix.TransformBox(meta.Extent)
-	return CompositeGraphicUnit{Boundary: editorBoxString(box), CTM: TranslationMatrix(-box.X, -box.Y).Multiply(matrix).String()}
-}
-
-// richTextDigest 对已编码图元计算不含字体、颜色空间和字形编号的内容摘要
-// 入参: objects 标准子对象
-// 返回: string 稳定内容摘要
-func richTextDigest(objects []GraphicObject) string {
-	copy := cloneEditorData(objects)
-	for i := range copy {
-		o := &copy[i]
-		o.origin = nil
-		o.state = editorCompositeState{}
-		o.TextObject.ID = ""
-		o.TextObject.Font = ""
-		o.TextObject.CGTransform = nil
-		o.TextObject.layout = nil
-		o.PathObject.ID = ""
-		if o.TextObject.FillColor != nil {
-			o.TextObject.FillColor.ColorSpace = ""
-		}
-		if o.TextObject.StrokeColor != nil {
-			o.TextObject.StrokeColor.ColorSpace = ""
-		}
-		if o.PathObject.FillColor != nil {
-			o.PathObject.FillColor.ColorSpace = ""
-		}
-		if o.PathObject.StrokeColor != nil {
-			o.PathObject.StrokeColor.ColorSpace = ""
-		}
-	}
-	data, _ := json.Marshal(copy)
-	hash := sha256.Sum256(data)
-	return hex.EncodeToString(hash[:])
-}
-
-// buildTextLayoutNode 构造独立命名空间下的普通文字自定义标引树
-// 入参: group 聚合标引组
-// 返回: StructureNode 标引根节点
-func buildTextLayoutNode(group textLayoutGroup) StructureNode {
-	children := make([]StructureNode, 0, len(group.refs))
-	for _, ref := range group.refs {
-		children = append(children, StructureNode{
-			Name:       "ObjectRef",
-			Namespace:  textNamespace,
-			Attributes: []StructureAttribute{{Name: "PageRef", Value: ref.PageID}},
-			Text:       strings.Join(ref.ObjectIDs, " "),
-		})
-	}
-	return StructureNode{Name: "Text", Namespace: textNamespace, Text: group.metadata, Children: children}
-}
-
-// richTextTagsFontSafe 仅允许完整识别且不含资源编号的本库标引通过字体重绑定检查
-// 入参: ctx 取消上下文, reader 包阅读器, index 文档索引
-// 返回: bool 是否可以排除字体引用, error 读取或取消错误
-func richTextTagsFontSafe(ctx context.Context, reader *Reader, index int) (bool, error) {
-	view, err := editorDocumentViewContext(ctx, reader, index)
-	if err != nil {
-		return false, err
-	}
-	defer view.Close()
-	tags, err := view.CustomTagsContext(ctx)
-	if err != nil {
-		return false, err
-	}
-	for _, tag := range tags {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		if tag.TypeID == textTagType && tag.NameSpace == textNamespace {
-			if tag.SchemaLoc != "" {
-				return false, nil
-			}
-			structure, err := view.readStructureContext(ctx, tag)
-			if err != nil {
-				return false, err
-			}
-			root := structure.Root
-			if root.Name != "Text" || root.Namespace != textNamespace || len(root.Attributes) != 0 || !textMetadataFontSafe(root.Text) {
-				return false, nil
-			}
-			for _, child := range root.Children {
-				if child.Name != "ObjectRef" || child.Namespace != textNamespace || len(child.Children) != 0 || len(child.Attributes) != 1 || child.Attributes[0].Namespace != "" || child.Attributes[0].Name != "PageRef" {
-					return false, nil
-				}
-			}
-			continue
-		}
-		if tag.TypeID == richTextTagType && tag.NameSpace == richTextNamespace {
-			if tag.SchemaLoc != "" {
-				return false, nil
-			}
-			structure, err := view.readStructureContext(ctx, tag)
-			if err != nil {
-				return false, err
-			}
-			root := structure.Root
-			if root.Name != "RichText" || root.Namespace != richTextNamespace || len(root.Attributes) != 0 {
-				return false, nil
-			}
-			if isRichTextAggregateRoot(root) {
-				for _, item := range root.Children {
-					if item.Name != "Entry" || item.Namespace != richTextNamespace || len(item.Attributes) != 0 || !richTextMetadataFontSafe(item.Text) {
-						return false, nil
-					}
-					for _, child := range item.Children {
-						if child.Name != "ObjectRef" || child.Namespace != richTextNamespace || len(child.Children) != 0 || len(child.Attributes) != 1 || child.Attributes[0].Namespace != "" || child.Attributes[0].Name != "PageRef" {
-							return false, nil
-						}
-					}
-				}
-				continue
-			}
-			if !richTextMetadataFontSafe(root.Text) {
-				return false, nil
-			}
-			for _, child := range root.Children {
-				if child.Name != "ObjectRef" || child.Namespace != richTextNamespace || len(child.Children) != 0 || len(child.Attributes) != 1 || child.Attributes[0].Namespace != "" || child.Attributes[0].Name != "PageRef" {
-					return false, nil
-				}
-			}
-			continue
-		}
-		if strings.TrimSpace(tag.FileLoc) == "" || !isKnownResourceSafeTagMeta(tag) {
-			return false, nil
-		}
-		if tag.SchemaLoc != "" {
-			schemaFile, err := view.openFile(view.ResPath(tag.SchemaLoc))
-			if err != nil {
-				return false, nil
-			}
-			_ = schemaFile.Close()
-		}
-		structure, err := view.readStructureContext(ctx, tag)
-		if err != nil {
-			return false, ctx.Err()
-		}
-		if !knownResourceSafeCustomTag(tag, structure.Root) {
-			return false, nil
-		}
-	}
-	return true, ctx.Err()
-}
-
-// textMetadataFontSafe 核对本库普通文字元数据不包含字体资源编号或未知字段
-// 入参: value 元数据JSON
-// 返回: bool 是否可由标准图元完整统计字体引用
-func textMetadataFontSafe(value string) bool {
-	var plain textMetadata
-	decoder := json.NewDecoder(bytes.NewBufferString(value))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&plain); err != nil {
-		return false
-	}
-	if decoder.Decode(new(any)) != io.EOF || len(plain.Digest) != 64 {
-		return false
-	}
-	return validateRichLayout(plain.Layout) == nil && structureXMLText(plain.Text)
-}
-
-// richTextMetadataFontSafe 核对本库富文本元数据不包含字体资源编号或未知字段
-// 入参: value 元数据JSON
-// 返回: bool 是否可由标准图元完整统计字体引用
-func richTextMetadataFontSafe(value string) bool {
-	var meta richTextMetadata
-	decoder := json.NewDecoder(bytes.NewBufferString(value))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&meta); err != nil {
-		return false
-	}
-	if decoder.Decode(new(any)) != io.EOF || meta.Version != 1 {
-		return false
-	}
-	for i := range meta.Value.Runs {
-		if meta.Value.Runs[i].Format.Font != "" {
-			return false
-		}
-		meta.Value.Runs[i].Format.Font = "1"
-	}
-	if err := meta.Value.Validate(); err != nil {
-		return false
-	}
-	return true
 }

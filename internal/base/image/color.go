@@ -31,6 +31,18 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// colorImage 保留源采样及独立的十六位显示像素
+type colorImage struct {
+	*image.NRGBA64
+	source image.Image
+}
+
+// pngColor 保存PNG校准空间及缺省sRGB传递函数
+type pngColor struct {
+	space      *pdfgo.ColorSpace
+	linearSRGB bool
+}
+
 // TransformRGBA 按八位预乘颜色变换同范围像素，源和目标可为同一图像
 // 入参: target 目标缓冲, source 同范围源图像, transform 单像素颜色变换
 func TransformRGBA(target *image.RGBA, source image.Image, transform func(color.RGBA) color.RGBA) {
@@ -62,44 +74,6 @@ func TransformRGBA(target *image.RGBA, source image.Image, transform func(color.
 		}
 	}
 	transformRGBARows(target, source, transform, rect.Min.Y, rect.Max.Y)
-}
-
-// colorImage 保留源采样及独立的十六位显示像素
-type colorImage struct {
-	*image.NRGBA64
-	source image.Image
-}
-
-// pngColor 保存PNG校准空间及缺省sRGB传递函数
-type pngColor struct {
-	space      *pdfgo.ColorSpace
-	linearSRGB bool
-}
-
-// cmykGrayAt 从原始四色采样计算蒙版灰度，不应用显示配置
-// 入参: x 横坐标, y 纵坐标
-// 返回: color.Gray 蒙版灰度
-func (p *planarTIFFImage) cmykGrayAt(x, y int) color.Gray {
-	if !image.Pt(x, y).In(p.bounds) {
-		return color.Gray{}
-	}
-	ink := p.inksAt(x, y)
-	maximum := uint32(65535)
-	if p.alpha == 1 {
-		maximum = uint32(ink[4])
-		if maximum == 0 {
-			return color.Gray{}
-		}
-	}
-	black := maximum - min(uint32(ink[3]), maximum)
-	var rgb [3]uint32
-	for i := range rgb {
-		rgb[i] = (maximum - min(uint32(ink[i]), maximum)) * black / maximum
-		if p.alpha != 1 {
-			rgb[i] = rgb[i] * uint32(ink[4]) / 65535
-		}
-	}
-	return color.Gray{Y: uint8((19595*rgb[0] + 38470*rgb[1] + 7471*rgb[2] + 1<<15) >> 24)}
 }
 
 // transformRGBARows 按具体像素切片紧凑转换指定行区间，避免逐像素类型分发
@@ -505,4 +479,30 @@ func jpegDisplayImage(ctx context.Context, source image.Image, profile *pdfgo.Co
 // 返回: uint16 十六位分量
 func colorWord(value float64) uint16 {
 	return uint16(math.Round(max(0, min(1, value)) * 65535))
+}
+
+// cmykGrayAt 从原始四色采样计算蒙版灰度，不应用显示配置
+// 入参: x 横坐标, y 纵坐标
+// 返回: color.Gray 蒙版灰度
+func (p *planarTIFFImage) cmykGrayAt(x, y int) color.Gray {
+	if !image.Pt(x, y).In(p.bounds) {
+		return color.Gray{}
+	}
+	ink := p.inksAt(x, y)
+	maximum := uint32(65535)
+	if p.alpha == 1 {
+		maximum = uint32(ink[4])
+		if maximum == 0 {
+			return color.Gray{}
+		}
+	}
+	black := maximum - min(uint32(ink[3]), maximum)
+	var rgb [3]uint32
+	for i := range rgb {
+		rgb[i] = (maximum - min(uint32(ink[i]), maximum)) * black / maximum
+		if p.alpha != 1 {
+			rgb[i] = rgb[i] * uint32(ink[4]) / 65535
+		}
+	}
+	return color.Gray{Y: uint8((19595*rgb[0] + 38470*rgb[1] + 7471*rgb[2] + 1<<15) >> 24)}
 }

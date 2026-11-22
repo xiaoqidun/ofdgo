@@ -89,16 +89,17 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64, pare
 			if childClip.Empty() {
 				continue
 			}
-			pageRenderer := *session.renderer
-			pageRenderer.DPI = r.DPI
+			pageRenderer := session.renderer
+			prevDPI, prevPrinting, prevDecodeImages, prevPageCtx, prevRenderErr := pageRenderer.dpi, pageRenderer.printing, pageRenderer.decodeImages, pageRenderer.pageContext, pageRenderer.renderError
+			pageRenderer.dpi = r.dpi
 			pageRenderer.printing = r.printing
 			pageRenderer.decodeImages = r.decodeImages
 			pageRenderer.pageContext = pageContext
 			pageRenderer.renderError = nil
 			if scale := max(s.Box.W/sealBox.W, s.Box.H/sealBox.H); scale > 1 {
 				limit := 4096 * 25.4 / max(sealBox.W, sealBox.H)
-				if pageRenderer.DPI < limit {
-					pageRenderer.DPI = min(pageRenderer.DPI*scale, limit)
+				if pageRenderer.dpi < limit {
+					pageRenderer.dpi = min(pageRenderer.dpi*scale, limit)
 				}
 			}
 			ctx.Push()
@@ -106,6 +107,7 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64, pare
 			ctx.Scale(s.Box.W/sealBox.W, s.Box.H/sealBox.H)
 			err = pageRenderer.renderCanvasPageClipped(ctx, content, false, childClip)
 			ctx.Pop()
+			pageRenderer.dpi, pageRenderer.printing, pageRenderer.decodeImages, pageRenderer.pageContext, pageRenderer.renderError = prevDPI, prevPrinting, prevDecodeImages, prevPageCtx, prevRenderErr
 			if err != nil {
 				r.renderError = err
 				return
@@ -122,7 +124,7 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64, pare
 			if decodeErr != nil {
 				return nil, 0, decodeErr
 			}
-			return decoded, baseimage.StorageCost(decoded, cache.limit), nil
+			return wrapEncodedImage(decoded), baseimage.StorageCost(decoded, cache.limit), nil
 		})
 		if err != nil {
 			r.renderError = err
@@ -147,8 +149,8 @@ func (r *Renderer) loadStampOFD(ctx context.Context, data []byte) (*cachedStampS
 	shared, err := cache.load(ctx, digest, func() (*cachedStampOFD, int, error) {
 		cloned := bytes.Clone(data)
 		var opts []ReaderOption
-		if r.Reader != nil && r.Reader.resources != nil {
-			opts = append(opts, WithResources(r.Reader.resources))
+		if r.reader != nil && r.reader.resources != nil {
+			opts = append(opts, WithResources(r.reader.resources))
 		}
 		reader, openErr := NewReader(&Input{reader: bytes.NewReader(cloned), size: int64(len(cloned))}, opts...)
 		if openErr != nil {
@@ -189,7 +191,7 @@ func (r *Renderer) loadStampOFD(ctx context.Context, data []byte) (*cachedStampS
 		return nil, forkErr
 	}
 	child := r.childRenderer(forkReader)
-	child.TransparentBackground = true
+	child.transparentBackground = true
 	session := &cachedStampSession{renderer: child, pages: shared.pages, boxes: shared.boxes}
 	state.stampSessions[digest] = session
 	return session, nil

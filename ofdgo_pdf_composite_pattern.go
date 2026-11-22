@@ -32,6 +32,35 @@ type pdfCompositePattern struct {
 	transferOpaque  bool
 }
 
+// pdfShadingSourceKey 区分图案的使用几何及填充或描边
+type pdfShadingSourceKey struct {
+	pattern  *pdfgo.ShadingPattern
+	geometry pdfCompositeKey
+}
+
+// pdfCompositePatternCell 合并互不重叠单元的覆盖贡献，避免相邻抗锯齿边缘重复混合
+// 入参: target 图案累计结果, initial 原始背景, source 单元结果, disjoint 单元边界是否互不重叠
+func pdfCompositePatternCell(target *pdfCompositePixel, initial, source pdfCompositePixel, disjoint bool) {
+	if source.Shape == 0 {
+		return
+	}
+	if disjoint {
+		alpha := math.Max(0, math.Min(1, target.Alpha+source.Alpha-initial.Alpha))
+		if alpha != 0 {
+			for i := range target.Values {
+				target.Values[i] = (target.Values[i]*target.Alpha + source.Values[i]*source.Alpha - initial.Values[i]*initial.Alpha) / alpha
+			}
+		}
+		target.Alpha = alpha
+		target.Effect = math.Min(1, target.Effect+source.Effect)
+		target.Shape = math.Min(1, target.Shape+source.Shape)
+	} else {
+		target.Values, target.Alpha = source.Values, source.Alpha
+		target.Effect += source.Effect * (1 - target.Effect)
+		target.Shape += source.Shape * (1 - target.Shape)
+	}
+}
+
 // opaqueTransfer 复用图案不透明性检查，图案内部函数不提前作用于源颜色
 // 返回: bool 是否允许使用外层设备函数, error 单元解析错误
 func (p *pdfCompositePattern) opaqueTransfer() (bool, error) {
@@ -49,12 +78,6 @@ func (p *pdfCompositePattern) opaqueTransfer() (bool, error) {
 		p.transferChecked, p.transferOpaque = true, true
 	}
 	return p.transferOpaque, nil
-}
-
-// pdfShadingSourceKey 区分图案的使用几何及填充或描边
-type pdfShadingSourceKey struct {
-	pattern  *pdfgo.ShadingPattern
-	geometry pdfCompositeKey
 }
 
 // tiling 将图案作为非隔离组绘制，保留背景贡献及单元间隙
@@ -189,29 +212,6 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 	}
 	complete = true
 	return result, nil
-}
-
-// pdfCompositePatternCell 合并互不重叠单元的覆盖贡献，避免相邻抗锯齿边缘重复混合
-// 入参: target 图案累计结果, initial 原始背景, source 单元结果, disjoint 单元边界是否互不重叠
-func pdfCompositePatternCell(target *pdfCompositePixel, initial, source pdfCompositePixel, disjoint bool) {
-	if source.Shape == 0 {
-		return
-	}
-	if disjoint {
-		alpha := math.Max(0, math.Min(1, target.Alpha+source.Alpha-initial.Alpha))
-		if alpha != 0 {
-			for i := range target.Values {
-				target.Values[i] = (target.Values[i]*target.Alpha + source.Values[i]*source.Alpha - initial.Values[i]*initial.Alpha) / alpha
-			}
-		}
-		target.Alpha = alpha
-		target.Effect = math.Min(1, target.Effect+source.Effect)
-		target.Shape = math.Min(1, target.Shape+source.Shape)
-	} else {
-		target.Values, target.Alpha = source.Values, source.Alpha
-		target.Effect += source.Effect * (1 - target.Effect)
-		target.Shape += source.Shape * (1 - target.Shape)
-	}
 }
 
 // compositePattern 复用图案单元解析及几何上下文，供检查和局部合成共同使用

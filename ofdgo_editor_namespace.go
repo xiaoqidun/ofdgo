@@ -20,47 +20,6 @@ import (
 	"strconv"
 )
 
-// matchesOFD 匹配OFD节点，兼容与父节点一致的未知命名空间
-// 入参: name 节点名称
-// 返回: bool 是否匹配
-func (n *editorXML) matchesOFD(name string) bool {
-	if n.name.Local != name {
-		return false
-	}
-	if n.parent == nil {
-		return classifyOFDNamespace(n.name.Space) != ofdXMLUnknown
-	}
-	return ofdXMLChild(n.parent.name, n.name)
-}
-
-// textXML 按所在节点的命名空间编码文本节点
-// 入参: name 节点名称, value 文本
-// 返回: []byte XML片段
-func (n *editorXML) textXML(name, value string) []byte {
-	var content bytes.Buffer
-	_ = xml.EscapeText(&content, []byte(value))
-	data, _ := n.containerXML(name, nil, content.Bytes())
-	return data
-}
-
-// containerXML 按所在节点的命名空间封装子节点，不改写子节点原文
-// 入参: name 节点名称, attrs 属性, content 子节点XML
-// 返回: []byte XML片段, error 编码错误
-func (n *editorXML) containerXML(name string, attrs ofdAttrs, content []byte) ([]byte, error) {
-	var output bytes.Buffer
-	if n.name.Space == "" {
-		attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "xmlns"}, Value: ""})
-	} else {
-		name = "ofd:" + name
-		attrs.add("xmlns:ofd", n.name.Space)
-	}
-	value := struct {
-		Content []byte `xml:",innerxml"`
-	}{content}
-	err := xml.NewEncoder(&output).EncodeElement(value, xml.StartElement{Name: xml.Name{Local: name}, Attr: attrs})
-	return output.Bytes(), err
-}
-
 // editorXMLGenerated 将自产标准片段用于指定命名空间，已标准化的旧版裁剪保持2016语义
 // 入参: data 自产XML片段，不含待保留的源文件原文, namespace 目标命名空间
 // 返回: []byte XML片段, error 解析错误
@@ -179,4 +138,45 @@ func editorXMLNamespacePrefix(node *editorXML, base string) string {
 		prefix = base + strconv.Itoa(index)
 	}
 	return prefix
+}
+
+// matchesOFD 匹配OFD节点，兼容与父节点一致的未知命名空间
+// 入参: name 节点名称
+// 返回: bool 是否匹配
+func (n *editorXML) matchesOFD(name string) bool {
+	if n.name.Local != name {
+		return false
+	}
+	if n.parent == nil {
+		return classifyOFDNamespace(n.name.Space) != ofdXMLUnknown
+	}
+	return ofdXMLChild(n.parent.name, n.name)
+}
+
+// textXML 按所在节点的命名空间编码文本节点
+// 入参: name 节点名称, value 文本
+// 返回: []byte XML片段
+func (n *editorXML) textXML(name, value string) []byte {
+	var content bytes.Buffer
+	_ = xml.EscapeText(&content, []byte(value))
+	data, _ := n.containerXML(name, nil, content.Bytes())
+	return data
+}
+
+// containerXML 按所在节点的命名空间封装子节点，不改写子节点原文
+// 入参: name 节点名称, attrs 属性, content 子节点XML
+// 返回: []byte XML片段, error 编码错误
+func (n *editorXML) containerXML(name string, attrs ofdAttrs, content []byte) ([]byte, error) {
+	var output bytes.Buffer
+	if n.name.Space == "" {
+		attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "xmlns"}, Value: ""})
+	} else {
+		name = "ofd:" + name
+		attrs.add("xmlns:ofd", n.name.Space)
+	}
+	value := struct {
+		Content []byte `xml:",innerxml"`
+	}{content}
+	err := xml.NewEncoder(&output).EncodeElement(value, xml.StartElement{Name: xml.Name{Local: name}, Attr: attrs})
+	return output.Bytes(), err
 }

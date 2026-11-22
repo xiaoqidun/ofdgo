@@ -35,6 +35,109 @@ type LinkAnnotation struct {
 	Creator string
 }
 
+// buildLinkAnnotation 根据链接参数构造带点击跳转动作的标准链接注解
+// 入参: item 链接注解参数
+// 返回: Annotation 链接注解, error 校验错误
+func buildLinkAnnotation(item LinkAnnotation) (Annotation, error) {
+	if err := validateCreationBox(item.Box); err != nil {
+		return Annotation{}, err
+	}
+	if _, err := annotationLinkXML(item.Target); err != nil {
+		return Annotation{}, err
+	}
+	object, err := NewShape(ShapeRectangle, Box{W: item.Box.W, H: item.Box.H})
+	if err != nil {
+		return Annotation{}, err
+	}
+	no := false
+	object.Fill, object.Stroke = &no, &no
+	action := Action{Event: "CLICK", URI: cloneEditorData(item.Target.URI)}
+	if item.Target.Dest != nil {
+		action.Goto = &Goto{Dest: cloneEditorData(item.Target.Dest)}
+	}
+	object.Actions = []Action{action}
+	return Annotation{
+		Type:    "Link",
+		Creator: item.Creator,
+		Appearance: Appearance{
+			Boundary: editorBoxString(item.Box),
+			Objects:  []GraphicObject{{Type: "PathObject", PathObject: object}},
+		},
+	}, nil
+}
+
+// collectActionReferences 收集播放动作引用的音视频资源
+// 入参: actions 动作列表, used 引用集合
+func collectActionReferences(actions []Action, used map[string]bool) {
+	for _, action := range actions {
+		if action.Sound != nil {
+			used[action.Sound.ResourceID] = true
+		}
+		if action.Movie != nil {
+			used[action.Movie.ResourceID] = true
+		}
+	}
+}
+
+// annotationLinkNodes 获取外观内的点击跳转和基本对象，不进入私有扩展
+// 入参: root 注解根节点
+// 返回: []*editorXML 跳转目标, []*editorXML 基本对象
+func annotationLinkNodes(root *editorXML) ([]*editorXML, []*editorXML) {
+	var targets, objects []*editorXML
+	var walk func(*editorXML)
+	walk = func(n *editorXML) {
+		if n.name.Space != root.name.Space {
+			return
+		}
+		if n.name.Local == "Action" && n.attr("Event") == "CLICK" {
+			for _, child := range n.children {
+				if child.name.Space == n.name.Space && (child.name.Local == "URI" || child.name.Local == "Goto") {
+					targets = append(targets, child)
+				}
+			}
+		}
+		if slices.Contains([]string{"TextObject", "PathObject", "ImageObject"}, n.name.Local) {
+			objects = append(objects, n)
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	if appearance := root.child("Appearance"); appearance != nil {
+		walk(appearance)
+	}
+	return targets, objects
+}
+
+// annotationLinkXML 序列化标准跳转目标，不改写其他动作或命名空间
+// 入参: target 跳转目标
+// 返回: []byte 独立XML片段, error 错误信息
+func annotationLinkXML(target AnnotationLink) ([]byte, error) {
+	if (target.URI == nil) == (target.Dest == nil) {
+		return nil, fmt.Errorf("specify one URI or destination")
+	}
+	var data []byte
+	var err error
+	if target.URI != nil {
+		attrs := ofdAttrs{{Name: xml.Name{Local: "URI"}, Value: target.URI.URI}}
+		attrs.add("Base", target.URI.Base)
+		attrs.add("Target", target.URI.Target)
+		data, err = editorXMLContainer("URI", attrs, nil)
+	} else {
+		dest := target.Dest
+		var attrs ofdAttrs
+		attrs, err = dest.attributes()
+		if err != nil {
+			return nil, err
+		}
+		data, err = editorXMLContainer("Dest", attrs, nil)
+		if err == nil {
+			data, err = editorXMLContainer("Goto", nil, bytes.TrimPrefix(data, []byte(xml.Header)))
+		}
+	}
+	return bytes.TrimPrefix(data, []byte(xml.Header)), err
+}
+
 // SetObjectLink 修改对象的单个点击链接，保留其他事件和点击区域，nil移除链接
 // 入参: page 页面索引, ids 对象标识, link 链接目标，不检查可达性
 // 返回: error 错误信息
@@ -304,107 +407,4 @@ func (e *Editor) UpdateAnnotationLink(page int, id string, target AnnotationLink
 		}
 		return editorAnnotationDate(data)
 	})
-}
-
-// buildLinkAnnotation 根据链接参数构造带点击跳转动作的标准链接注解
-// 入参: item 链接注解参数
-// 返回: Annotation 链接注解, error 校验错误
-func buildLinkAnnotation(item LinkAnnotation) (Annotation, error) {
-	if err := validateCreationBox(item.Box); err != nil {
-		return Annotation{}, err
-	}
-	if _, err := annotationLinkXML(item.Target); err != nil {
-		return Annotation{}, err
-	}
-	object, err := NewShape(ShapeRectangle, Box{W: item.Box.W, H: item.Box.H})
-	if err != nil {
-		return Annotation{}, err
-	}
-	no := false
-	object.Fill, object.Stroke = &no, &no
-	action := Action{Event: "CLICK", URI: cloneEditorData(item.Target.URI)}
-	if item.Target.Dest != nil {
-		action.Goto = &Goto{Dest: cloneEditorData(item.Target.Dest)}
-	}
-	object.Actions = []Action{action}
-	return Annotation{
-		Type:    "Link",
-		Creator: item.Creator,
-		Appearance: Appearance{
-			Boundary: editorBoxString(item.Box),
-			Objects:  []GraphicObject{{Type: "PathObject", PathObject: object}},
-		},
-	}, nil
-}
-
-// collectActionReferences 收集播放动作引用的音视频资源
-// 入参: actions 动作列表, used 引用集合
-func collectActionReferences(actions []Action, used map[string]bool) {
-	for _, action := range actions {
-		if action.Sound != nil {
-			used[action.Sound.ResourceID] = true
-		}
-		if action.Movie != nil {
-			used[action.Movie.ResourceID] = true
-		}
-	}
-}
-
-// annotationLinkNodes 获取外观内的点击跳转和基本对象，不进入私有扩展
-// 入参: root 注解根节点
-// 返回: []*editorXML 跳转目标, []*editorXML 基本对象
-func annotationLinkNodes(root *editorXML) ([]*editorXML, []*editorXML) {
-	var targets, objects []*editorXML
-	var walk func(*editorXML)
-	walk = func(n *editorXML) {
-		if n.name.Space != root.name.Space {
-			return
-		}
-		if n.name.Local == "Action" && n.attr("Event") == "CLICK" {
-			for _, child := range n.children {
-				if child.name.Space == n.name.Space && (child.name.Local == "URI" || child.name.Local == "Goto") {
-					targets = append(targets, child)
-				}
-			}
-		}
-		if slices.Contains([]string{"TextObject", "PathObject", "ImageObject"}, n.name.Local) {
-			objects = append(objects, n)
-		}
-		for _, child := range n.children {
-			walk(child)
-		}
-	}
-	if appearance := root.child("Appearance"); appearance != nil {
-		walk(appearance)
-	}
-	return targets, objects
-}
-
-// annotationLinkXML 序列化标准跳转目标，不改写其他动作或命名空间
-// 入参: target 跳转目标
-// 返回: []byte 独立XML片段, error 错误信息
-func annotationLinkXML(target AnnotationLink) ([]byte, error) {
-	if (target.URI == nil) == (target.Dest == nil) {
-		return nil, fmt.Errorf("specify one URI or destination")
-	}
-	var data []byte
-	var err error
-	if target.URI != nil {
-		attrs := ofdAttrs{{Name: xml.Name{Local: "URI"}, Value: target.URI.URI}}
-		attrs.add("Base", target.URI.Base)
-		attrs.add("Target", target.URI.Target)
-		data, err = editorXMLContainer("URI", attrs, nil)
-	} else {
-		dest := target.Dest
-		var attrs ofdAttrs
-		attrs, err = dest.attributes()
-		if err != nil {
-			return nil, err
-		}
-		data, err = editorXMLContainer("Dest", attrs, nil)
-		if err == nil {
-			data, err = editorXMLContainer("Goto", nil, bytes.TrimPrefix(data, []byte(xml.Header)))
-		}
-	}
-	return bytes.TrimPrefix(data, []byte(xml.Header)), err
 }

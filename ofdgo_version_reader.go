@@ -21,6 +21,18 @@ import (
 	"fmt"
 )
 
+// versionSignatureScope 保存多版本签章归属判定的文件与页面索引
+type versionSignatureScope struct {
+	listPath          string
+	listInVersion     bool
+	versionLoc        string
+	versionDocRoot    string
+	versionFiles      map[string]bool
+	versionPages      map[string]bool
+	otherVersionRoots map[string]bool
+	hasExplicitSig    bool
+}
+
 // DocumentRoot 获取当前阅读入口的包内路径，不改写OFD中的主入口
 // 未显式选择时使用唯一的Current版本；没有默认版本时使用主入口，多个默认版本返回错误
 // 返回: string 阅读入口, error 版本选择或描述错误
@@ -42,7 +54,7 @@ func (r *Reader) DocumentRootContext(ctx context.Context) (string, error) {
 	if r.documentIndex < 0 || r.documentIndex >= r.DocumentCount() {
 		return "", fmt.Errorf("no docbody found")
 	}
-	body := r.OFD.DocBody[r.documentIndex]
+	body := r.ofd.DocBody[r.documentIndex]
 	if r.selectedVersion != nil && *r.selectedVersion == "" || !body.versioned && r.selectedVersion == nil {
 		root, err := versionFileLocation("OFD.xml", body.DocRoot)
 		if err == nil {
@@ -122,6 +134,7 @@ func (r *Reader) DocumentVersionContext(ctx context.Context, id string) (*Reader
 	if _, err := next.DocContext(ctx); err != nil {
 		return nil, err
 	}
+	next.bindEncryptionHold()
 	return next, nil
 }
 
@@ -180,7 +193,7 @@ func (r *Reader) ExtractVersionContext(ctx context.Context, id string) (*Reader,
 	if err != nil {
 		return nil, err
 	}
-	next := &Reader{Path: r.Path, sourceFile: r.sourceFile, files: map[string][]byte{"OFD.xml": root}, encryption: r.encryption, resources: r.resources}
+	next := &Reader{path: r.path, sourceFile: r.sourceFile, files: map[string][]byte{"OFD.xml": root}, encryption: r.encryption, resources: r.resources}
 	for name := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -191,17 +204,20 @@ func (r *Reader) ExtractVersionContext(ctx context.Context, id string) (*Reader,
 			}
 		}
 	}
-	if r.Zip != nil {
-		next.Zip = &zip.Reader{Comment: r.Zip.Comment}
-		for _, file := range r.Zip.File {
+	if r.zip != nil {
+		var kept []*zip.File
+		for _, file := range r.zip.File {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
 			name := cleanPackagePath(file.Name)
 			if name != "OFD.xml" && files[name] && !file.FileInfo().IsDir() {
-				next.Zip.File = append(next.Zip.File, file)
+				kept = append(kept, file)
 			}
 		}
+		next.zip = &zip.Reader{Comment: r.zip.Comment, File: kept}
+		next.archiveID = nextReaderArchiveID.Add(1)
+		next.maxIDCache = &archiveMaxIDCache{}
 	}
 	if src := r.encryptedSource(); src != nil {
 		keep := make(map[string]bool, len(files))
@@ -218,19 +234,8 @@ func (r *Reader) ExtractVersionContext(ctx context.Context, id string) (*Reader,
 	if _, err := next.docStructureContext(ctx); err != nil {
 		return nil, err
 	}
+	next.bindEncryptionHold()
 	return next, nil
-}
-
-// versionSignatureScope 保存多版本签章归属判定的文件与页面索引
-type versionSignatureScope struct {
-	listPath          string
-	listInVersion     bool
-	versionLoc        string
-	versionDocRoot    string
-	versionFiles      map[string]bool
-	versionPages      map[string]bool
-	otherVersionRoots map[string]bool
-	hasExplicitSig    bool
 }
 
 // documentEntryContext 解析指定文档的阅读入口，当前文档保留显式选择
@@ -364,8 +369,8 @@ func (r *Reader) buildVersionSignatureScope(ctx context.Context, listPath string
 			}
 		}
 	}
-	if r.OFD != nil && r.documentIndex >= 0 && r.documentIndex < len(r.OFD.DocBody) {
-		if mainDoc := r.OFD.DocBody[r.documentIndex].DocRoot; mainDoc != "" {
+	if r.ofd != nil && r.documentIndex >= 0 && r.documentIndex < len(r.ofd.DocBody) {
+		if mainDoc := r.ofd.DocBody[r.documentIndex].DocRoot; mainDoc != "" {
 			if dr := cleanPackagePath(resolveResourcePath("OFD.xml", "", mainDoc)); validPackagePath(dr) && dr != versionDocRoot {
 				scope.otherVersionRoots[dr] = true
 			}

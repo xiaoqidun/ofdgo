@@ -28,18 +28,25 @@ import (
 // maxCompressedFloats 限制单个带g数组展开后的最大元素数量
 const maxCompressedFloats = 1 << 20
 
-// IdentityMatrix 单位矩阵
-var IdentityMatrix = Matrix{1, 0, 0, 1, 0, 0}
-
 // Box 矩形区域
-type Box = basegeom.Box
+type Box struct {
+	X, Y, W, H float64
+}
 
 // Point 平面坐标点
-type Point = basegeom.Point
+type Point struct {
+	X, Y float64
+}
 
 // Matrix 2D仿射变换矩阵
 type Matrix struct {
 	a, b, c, d, e, f float64
+}
+
+// IdentityMatrix 返回2D单位仿射变换矩阵
+// 返回: Matrix 单位矩阵
+func IdentityMatrix() Matrix {
+	return Matrix{1, 0, 0, 1, 0, 0}
 }
 
 // ParseBox 解析Box字符串
@@ -78,7 +85,7 @@ func MatrixFromValues(values [6]float64) Matrix {
 func NewMatrix(s string) Matrix {
 	floats := parseFloats(s)
 	if len(floats) != 6 {
-		return IdentityMatrix
+		return IdentityMatrix()
 	}
 	return Matrix{
 		a: floats[0], b: floats[1],
@@ -94,56 +101,7 @@ func TranslationMatrix(x, y float64) Matrix {
 	return MatrixFromValues(basegeom.TranslationMatrix(x, y).Values())
 }
 
-// Values 返回a、b、c、d、e、f的独立副本，保留原始浮点精度
-// 返回: [6]float64 矩阵分量
-func (m Matrix) Values() [6]float64 {
-	return [6]float64{m.a, m.b, m.c, m.d, m.e, m.f}
-}
-
-// Multiply 矩阵乘法 (m * o)
-// 入参: o 右侧矩阵
-// 返回: Matrix 结果矩阵
-func (m Matrix) Multiply(o Matrix) Matrix {
-	return MatrixFromValues(basegeom.MatrixFromValues(m.Values()).Multiply(basegeom.MatrixFromValues(o.Values())).Values())
-}
-
-// Transform 应用变换矩阵
-// 入参: x X坐标, y Y坐标
-// 返回: float64 变换后X, float64 变换后Y
-func (m Matrix) Transform(x, y float64) (float64, float64) {
-	return basegeom.MatrixFromValues(m.Values()).Transform(x, y)
-}
-
-// TransformBox 获取矩形经仿射变换后的轴对齐边界
-// 入参: box 原始矩形范围
-// 返回: Box 变换后的轴对齐边界
-func (m Matrix) TransformBox(box Box) Box {
-	return basegeom.MatrixFromValues(m.Values()).TransformBox(box)
-}
-
-// String 返回标准CTM属性值
-// 返回: string 六个空格分隔的矩阵分量
-func (m Matrix) String() string {
-	return fmt.Sprintf("%s %s %s %s %s %s", ofdNumber(m.a), ofdNumber(m.b), ofdNumber(m.c), ofdNumber(m.d), ofdNumber(m.e), ofdNumber(m.f))
-}
-
-// Invert 求仿射矩阵的逆变换
-// 返回: Matrix 逆矩阵，失败时返回单位矩阵, bool 是否存在有限逆矩阵
-func (m Matrix) Invert() (Matrix, bool) {
-	result, ok := basegeom.MatrixFromValues(m.Values()).Invert()
-	if !ok {
-		return IdentityMatrix, false
-	}
-	return MatrixFromValues(result.Values()), true
-}
-
-// YScale 获取Y轴缩放比例
-// 返回: float64 缩放比例
-func (m Matrix) YScale() float64 {
-	return basegeom.MatrixFromValues(m.Values()).YScale()
-}
-
-// parseFloats 解析浮点数数组
+// parseFloats 解析浮点数数组，支持空格与逗号分隔并过滤非有限数
 // 入参: s 字符串
 // 返回: []float64 浮点数数组
 func parseFloats(s string) []float64 {
@@ -157,18 +115,19 @@ func parseFloats(s string) []float64 {
 	parts := strings.Fields(s)
 	result := make([]float64, 0, len(parts))
 	for _, p := range parts {
-		if v, err := strconv.ParseFloat(p, 64); err == nil {
+		if v, err := strconv.ParseFloat(p, 64); err == nil && finite(v) {
 			result = append(result, v)
 		}
 	}
 	return result
 }
 
-// parseFloatsWithG 解析带g的压缩浮点数数组
+// parseFloatsWithG 解析带g的压缩浮点数数组，支持空格与逗号分隔并过滤非有限数
 // 入参: s 字符串
 // 返回: []float64 浮点数数组
 func parseFloatsWithG(s string) []float64 {
 	var result []float64
+	s = strings.ReplaceAll(s, ",", " ")
 	gFlag := false
 	gCount := 0
 	for p := range strings.FieldsSeq(s) {
@@ -189,7 +148,7 @@ func parseFloatsWithG(s string) []float64 {
 			continue
 		}
 		if gCount > 0 {
-			if v, err := strconv.ParseFloat(p, 64); err == nil {
+			if v, err := strconv.ParseFloat(p, 64); err == nil && finite(v) {
 				count := min(gCount, maxCompressedFloats-len(result))
 				result = slices.Grow(result, count)
 				for j := 0; j < count; j++ {
@@ -198,7 +157,7 @@ func parseFloatsWithG(s string) []float64 {
 			}
 			gCount = 0
 		} else {
-			if v, err := strconv.ParseFloat(p, 64); err == nil {
+			if v, err := strconv.ParseFloat(p, 64); err == nil && finite(v) {
 				result = append(result, v)
 			}
 		}
@@ -234,4 +193,53 @@ func parsePageAreaBox(area PageArea) (Box, error) {
 		return Box{}, fmt.Errorf("invalid page box: %s", raw)
 	}
 	return box, nil
+}
+
+// Values 返回a、b、c、d、e、f的独立副本，保留原始浮点精度
+// 返回: [6]float64 矩阵分量
+func (m Matrix) Values() [6]float64 {
+	return [6]float64{m.a, m.b, m.c, m.d, m.e, m.f}
+}
+
+// Multiply 矩阵乘法 (m * o)
+// 入参: o 右侧矩阵
+// 返回: Matrix 结果矩阵
+func (m Matrix) Multiply(o Matrix) Matrix {
+	return MatrixFromValues(basegeom.MatrixFromValues(m.Values()).Multiply(basegeom.MatrixFromValues(o.Values())).Values())
+}
+
+// Transform 应用变换矩阵
+// 入参: x X坐标, y Y坐标
+// 返回: float64 变换后X, float64 变换后Y
+func (m Matrix) Transform(x, y float64) (float64, float64) {
+	return basegeom.MatrixFromValues(m.Values()).Transform(x, y)
+}
+
+// TransformBox 获取矩形经仿射变换后的轴对齐边界
+// 入参: box 原始矩形范围
+// 返回: Box 变换后的轴对齐边界
+func (m Matrix) TransformBox(box Box) Box {
+	return Box(basegeom.MatrixFromValues(m.Values()).TransformBox(basegeom.Box(box)))
+}
+
+// String 返回标准CTM属性值
+// 返回: string 六个空格分隔的矩阵分量
+func (m Matrix) String() string {
+	return fmt.Sprintf("%s %s %s %s %s %s", ofdNumber(m.a), ofdNumber(m.b), ofdNumber(m.c), ofdNumber(m.d), ofdNumber(m.e), ofdNumber(m.f))
+}
+
+// Invert 求仿射矩阵的逆变换
+// 返回: Matrix 逆矩阵，失败时返回单位矩阵, bool 是否存在有限逆矩阵
+func (m Matrix) Invert() (Matrix, bool) {
+	result, ok := basegeom.MatrixFromValues(m.Values()).Invert()
+	if !ok {
+		return IdentityMatrix(), false
+	}
+	return MatrixFromValues(result.Values()), true
+}
+
+// YScale 获取Y轴缩放比例
+// 返回: float64 缩放比例
+func (m Matrix) YScale() float64 {
+	return basegeom.MatrixFromValues(m.Values()).YScale()
 }

@@ -28,6 +28,26 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// pdfAnnotationType 将具有静态外观的PDF注解类别对应到OFD注解类别
+// 入参: subtype PDF注解类别
+// 返回: string OFD注解类别，空字符串表示需单独处理
+func pdfAnnotationType(subtype pdfgo.Name) string {
+	switch subtype {
+	case "Stamp":
+		return "Stamp"
+	case "Watermark":
+		return "Watermark"
+	case "Highlight", "Underline", "Squiggly", "StrikeOut":
+		return "Highlight"
+	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link", "Popup", "Widget", "PrinterMark", "TrapNet", "3D", "RichMedia", "Redact", "Projection":
+		return "Path"
+	}
+	if !(pdfgo.Annotation{Subtype: subtype}).IsStandard() {
+		return "Path"
+	}
+	return ""
+}
+
 // recoverAnnotationAuxiliary 仅在存在有效正常外观时保留辅助错误，外观仍由调用方实际绘制
 // 入参: ctx 取消上下文, annotation 原始注解, name 辅助字段名, object 原始对象, cause 辅助错误
 // 返回: error 严格模式、缺少有效外观或不可恢复错误
@@ -451,26 +471,6 @@ func (p *pdfImporter) commitAnnotations() error {
 	}
 	p.annotationData, p.annotationBindings = nil, nil
 	return nil
-}
-
-// pdfAnnotationType 将具有静态外观的PDF注解类别对应到OFD注解类别
-// 入参: subtype PDF注解类别
-// 返回: string OFD注解类别，空字符串表示需单独处理
-func pdfAnnotationType(subtype pdfgo.Name) string {
-	switch subtype {
-	case "Stamp":
-		return "Stamp"
-	case "Watermark":
-		return "Watermark"
-	case "Highlight", "Underline", "Squiggly", "StrikeOut":
-		return "Highlight"
-	case "Text", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Caret", "Ink", "FileAttachment", "Sound", "Movie", "Screen", "Link", "Popup", "Widget", "PrinterMark", "TrapNet", "3D", "RichMedia", "Redact", "Projection":
-		return "Path"
-	}
-	if !(pdfgo.Annotation{Subtype: subtype}).IsStandard() {
-		return "Path"
-	}
-	return ""
 }
 
 // formWidget 将表单当前外观转换为注解并报告交互语义差异

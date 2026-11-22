@@ -37,6 +37,164 @@ type LayerInfo struct {
 	ObjectIDs   []string
 }
 
+// editorLayerInfos 将页面图层投影为不共享可变容器的管理清单
+// 入参: p 已读取的页面
+// 返回: []LayerInfo 图层清单
+func editorLayerInfos(p *PageContent) []LayerInfo {
+	result := make([]LayerInfo, 0, len(p.Content.Layer))
+	orders := make(map[string]int)
+	for _, layer := range p.Content.Layer {
+		kind := editorLayerType(layer.Type)
+		ids := make([]string, len(layer.Objects))
+		for i, object := range layer.Objects {
+			ids[i] = editorObjectID(object)
+		}
+		result = append(result, LayerInfo{ID: layer.ID, Type: kind, DrawParam: layer.DrawParam, Order: orders[kind], ObjectCount: len(ids), ObjectIDs: ids})
+		orders[kind]++
+	}
+	return result
+}
+
+// editorLayerType 将标准省略类型规范化，不改变已明确指定的类型
+// 入参: value 原类型
+// 返回: string 有效类型
+func editorLayerType(value string) string {
+	if value == "" {
+		return "Body"
+	}
+	return value
+}
+
+// validEditorLayerType 按正文表15校验可管理的图层类型
+// 入参: value 类型值
+// 返回: bool 是否为支持的标准类型
+func validEditorLayerType(value string) bool {
+	return value == "Body" || value == "Background" || value == "Foreground"
+}
+
+// editorStructureChildren 仅枚举当前标准命名空间中的直接子元素
+// 入参: root 容器节点, kind 子元素名称
+// 返回: []*editorXML 文件顺序节点清单
+func editorStructureChildren(root *editorXML, kind string) []*editorXML {
+	var nodes []*editorXML
+	if root != nil {
+		for _, node := range root.children {
+			if node.matchesOFD(kind) {
+				nodes = append(nodes, node)
+			}
+		}
+	}
+	return nodes
+}
+
+// editorFindStructureID 按数值标识查找唯一直接子元素，拒绝缺失及歧义标识
+// 入参: root 容器节点, kind 元素名称, attribute 标识属性名, id 标识值
+// 返回: *editorXML 唯一节点, error 标识错误
+func editorFindStructureID(root *editorXML, kind, attribute, id string) (*editorXML, error) {
+	var found *editorXML
+	if editorResourceID(id) == "" {
+		return nil, fmt.Errorf("invalid %s ID %q", kind, id)
+	}
+	for _, node := range editorStructureChildren(root, kind) {
+		if sameResourceID(node.attr(attribute), id) {
+			if found != nil {
+				return nil, fmt.Errorf("ambiguous %s ID %q", kind, id)
+			}
+			found = node
+		}
+	}
+	if found == nil {
+		return nil, fmt.Errorf("%s %q not found", kind, id)
+	}
+	return found, nil
+}
+
+// editorStructureAttribute 局部替换或删除无命名空间属性，保留扩展及其余原文
+// 入参: data 原文, node 目标节点, name 属性名, value 新值，空值删除属性
+// 返回: []byte 更新后的完整原文, error XML错误
+func editorStructureAttribute(data []byte, node *editorXML, name, value string) ([]byte, error) {
+	var desired *string
+	if value != "" {
+		desired = &value
+	}
+	patch, err := editorXMLAttributeChange(data, node, name, desired)
+	if err != nil {
+		return nil, err
+	}
+	return editorPatchXML(data, []editorXMLPatch{patch}), nil
+}
+
+// editorAppendStructure 向普通或自闭合容器追加已绑定命名空间的元素
+// 入参: data 原文, node 容器节点, fragment 待追加片段
+// 返回: []byte 更新后的完整原文
+func editorAppendStructure(data []byte, node *editorXML, fragment []byte) []byte {
+	if node.open == node.end {
+		return editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, node, fragment)})
+	}
+	return editorPatchXML(data, []editorXMLPatch{{node.close, node.close, fragment}})
+}
+
+// editorMoveStructure 在指定同类节点位置间移动完整原文，不触及夹杂的扩展元素
+// 入参: data 原文, nodes 同类节点, node 被移动节点, order 目标零基顺序
+// 返回: []byte 更新后的完整原文, error 顺序错误
+func editorMoveStructure(data []byte, nodes []*editorXML, node *editorXML, order int) ([]byte, error) {
+	if order < 0 || order >= len(nodes) {
+		return nil, fmt.Errorf("order %d out of range", order)
+	}
+	from := slices.Index(nodes, node)
+	if from == order {
+		return data, nil
+	}
+	ordered := slices.Clone(nodes)
+	moveEditorItem(ordered, from, order)
+	patches := make([]editorXMLPatch, len(nodes))
+	for i, old := range nodes {
+		next := ordered[i]
+		patches[i] = editorXMLPatch{old.start, old.end, data[next.start:next.end]}
+	}
+	return editorPatchXML(data, patches), nil
+}
+
+// patchFastMaxUnitID 在标准Document头部快速替换MaxUnitID，遇非标准结构回退完整XML解析
+// 入参: data 文档XML原文, maxID 目标最大标识
+// 返回: []byte 更新后的XML原文, bool 是否命中快路径
+func patchFastMaxUnitID(data []byte, maxID uint64) ([]byte, bool) {
+	limit := min(len(data), 8192)
+	head := data[:limit]
+	if bytes.Contains(head, []byte("<!--")) || bytes.Contains(head, []byte("<![CDATA[")) {
+		return nil, false
+	}
+	for _, tags := range [][2][]byte{
+		{[]byte("<ofd:MaxUnitID>"), []byte("</ofd:MaxUnitID>")},
+		{[]byte("<MaxUnitID>"), []byte("</MaxUnitID>")},
+	} {
+		start := bytes.Index(head, tags[0])
+		if start < 0 {
+			continue
+		}
+		valStart := start + len(tags[0])
+		relEnd := bytes.Index(head[valStart:], tags[1])
+		if relEnd < 0 {
+			return nil, false
+		}
+		valEnd := valStart + relEnd
+		current, ok := parseFastUint32(head[valStart:valEnd])
+		if !ok {
+			return nil, false
+		}
+		if maxID <= current {
+			return data, true
+		}
+		encoded := []byte(formatUnitID(maxID))
+		out := make([]byte, 0, len(data)-(valEnd-valStart)+len(encoded))
+		out = append(out, data[:valStart]...)
+		out = append(out, encoded...)
+		out = append(out, data[valEnd:]...)
+		return out, true
+	}
+	return nil, false
+}
+
 // Layers 按文件顺序返回普通页面图层，省略的类型规范化为Body，不包含模板图层
 // 入参: page 零基页面索引
 // 返回: []LayerInfo 独立图层清单, error 页面读取错误
@@ -64,7 +222,11 @@ func (e *Editor) AddLayer(page int, layerType, drawParam string) (string, error)
 		if err := e.prepareSourceIDs(); err != nil {
 			return nil, err
 		}
-		id = e.nextID()
+		var err error
+		id, err = e.nextID()
+		if err != nil {
+			return nil, err
+		}
 		attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: id}, {Name: xml.Name{Local: "Type"}, Value: layerType}}
 		attrs.add("DrawParam", drawParam)
 		content := root.child("Content")
@@ -281,41 +443,6 @@ func (r *Reader) Layers(page int) ([]LayerInfo, error) {
 	return editorLayerInfos(p), nil
 }
 
-// editorLayerInfos 将页面图层投影为不共享可变容器的管理清单
-// 入参: p 已读取的页面
-// 返回: []LayerInfo 图层清单
-func editorLayerInfos(p *PageContent) []LayerInfo {
-	result := make([]LayerInfo, 0, len(p.Content.Layer))
-	orders := make(map[string]int)
-	for _, layer := range p.Content.Layer {
-		kind := editorLayerType(layer.Type)
-		ids := make([]string, len(layer.Objects))
-		for i, object := range layer.Objects {
-			ids[i] = editorObjectID(object)
-		}
-		result = append(result, LayerInfo{ID: layer.ID, Type: kind, DrawParam: layer.DrawParam, Order: orders[kind], ObjectCount: len(ids), ObjectIDs: ids})
-		orders[kind]++
-	}
-	return result
-}
-
-// editorLayerType 将标准省略类型规范化，不改变已明确指定的类型
-// 入参: value 原类型
-// 返回: string 有效类型
-func editorLayerType(value string) string {
-	if value == "" {
-		return "Body"
-	}
-	return value
-}
-
-// validEditorLayerType 按正文表15校验可管理的图层类型
-// 入参: value 类型值
-// 返回: bool 是否为支持的标准类型
-func validEditorLayerType(value string) bool {
-	return value == "Body" || value == "Background" || value == "Foreground"
-}
-
 // validateLayerDrawParam 在目标页面资源环境中核验完整绘制参数继承链
 // 入参: page 页面索引, id 绘制参数标识
 // 返回: error 页面或资源错误
@@ -380,7 +507,7 @@ func (e *Editor) editLayerPageMode(page int, appendOnly bool, edit func(*Reader,
 			return err
 		}
 		parts := map[string][]byte{name: next}
-		rootDir := strings.TrimPrefix(strings.ReplaceAll(r.RootDir, "\\", "/"), "/")
+		rootDir := strings.TrimPrefix(strings.ReplaceAll(r.rootDir, "\\", "/"), "/")
 		shared := slices.ContainsFunc(doc.CommonData.TemplatePage, func(ref TemplatePage) bool { return resPathFast(r, rootDir, ref.BaseLoc) == name })
 		if !shared {
 			for i, ref := range doc.Pages.Page {
@@ -413,89 +540,6 @@ func (e *Editor) editLayerPageMode(page int, appendOnly bool, edit func(*Reader,
 		}
 		return e.commitLayerTemplatePartsMode(r, parts, false)
 	})
-}
-
-// editorStructureChildren 仅枚举当前标准命名空间中的直接子元素
-// 入参: root 容器节点, kind 子元素名称
-// 返回: []*editorXML 文件顺序节点清单
-func editorStructureChildren(root *editorXML, kind string) []*editorXML {
-	var nodes []*editorXML
-	if root != nil {
-		for _, node := range root.children {
-			if node.matchesOFD(kind) {
-				nodes = append(nodes, node)
-			}
-		}
-	}
-	return nodes
-}
-
-// editorFindStructureID 按数值标识查找唯一直接子元素，拒绝缺失及歧义标识
-// 入参: root 容器节点, kind 元素名称, attribute 标识属性名, id 标识值
-// 返回: *editorXML 唯一节点, error 标识错误
-func editorFindStructureID(root *editorXML, kind, attribute, id string) (*editorXML, error) {
-	var found *editorXML
-	if editorResourceID(id) == "" {
-		return nil, fmt.Errorf("invalid %s ID %q", kind, id)
-	}
-	for _, node := range editorStructureChildren(root, kind) {
-		if sameResourceID(node.attr(attribute), id) {
-			if found != nil {
-				return nil, fmt.Errorf("ambiguous %s ID %q", kind, id)
-			}
-			found = node
-		}
-	}
-	if found == nil {
-		return nil, fmt.Errorf("%s %q not found", kind, id)
-	}
-	return found, nil
-}
-
-// editorStructureAttribute 局部替换或删除无命名空间属性，保留扩展及其余原文
-// 入参: data 原文, node 目标节点, name 属性名, value 新值，空值删除属性
-// 返回: []byte 更新后的完整原文, error XML错误
-func editorStructureAttribute(data []byte, node *editorXML, name, value string) ([]byte, error) {
-	var desired *string
-	if value != "" {
-		desired = &value
-	}
-	patch, err := editorXMLAttributeChange(data, node, name, desired)
-	if err != nil {
-		return nil, err
-	}
-	return editorPatchXML(data, []editorXMLPatch{patch}), nil
-}
-
-// editorAppendStructure 向普通或自闭合容器追加已绑定命名空间的元素
-// 入参: data 原文, node 容器节点, fragment 待追加片段
-// 返回: []byte 更新后的完整原文
-func editorAppendStructure(data []byte, node *editorXML, fragment []byte) []byte {
-	if node.open == node.end {
-		return editorPatchXML(data, []editorXMLPatch{editorXMLContent(data, node, fragment)})
-	}
-	return editorPatchXML(data, []editorXMLPatch{{node.close, node.close, fragment}})
-}
-
-// editorMoveStructure 在指定同类节点位置间移动完整原文，不触及夹杂的扩展元素
-// 入参: data 原文, nodes 同类节点, node 被移动节点, order 目标零基顺序
-// 返回: []byte 更新后的完整原文, error 顺序错误
-func editorMoveStructure(data []byte, nodes []*editorXML, node *editorXML, order int) ([]byte, error) {
-	if order < 0 || order >= len(nodes) {
-		return nil, fmt.Errorf("order %d out of range", order)
-	}
-	from := slices.Index(nodes, node)
-	if from == order {
-		return data, nil
-	}
-	ordered := slices.Clone(nodes)
-	moveEditorItem(ordered, from, order)
-	patches := make([]editorXMLPatch, len(nodes))
-	for i, old := range nodes {
-		next := ordered[i]
-		patches[i] = editorXMLPatch{old.start, old.end, data[next.start:next.end]}
-	}
-	return editorPatchXML(data, patches), nil
 }
 
 // commitLayerTemplateParts 持久化结构与已注册资源，隔离共享文件并恢复未变图元的会话编辑状态
@@ -671,7 +715,7 @@ func (e *Editor) commitLayerPartsIncremental(ctx context.Context, reader *Reader
 		nextParts = make(map[string][]byte)
 	}
 	docData := nextParts[docRoot]
-	needMaxID := e.maxID > uint64(base.document.CommonData.MaxUnitID)
+	needMaxID := e.maxID > base.document.CommonData.MaxUnitID
 	if docData != nil || needMaxID {
 		if docData == nil {
 			var err error
@@ -751,7 +795,7 @@ func (e *Editor) commitLayerPartsIncremental(ctx context.Context, reader *Reader
 			dirtyTemplates[id] = true
 		}
 	}
-	rootDir := strings.TrimPrefix(strings.ReplaceAll(newReader.RootDir, "\\", "/"), "/")
+	rootDir := strings.TrimPrefix(strings.ReplaceAll(newReader.rootDir, "\\", "/"), "/")
 	var dirtyPages []int
 	for i := range e.pages {
 		pageID := e.pages[i].ID
@@ -785,10 +829,11 @@ func (e *Editor) commitLayerPartsIncremental(ctx context.Context, reader *Reader
 	if len(dirtyPages) == 0 {
 		return nil
 	}
-	if e.transactionChanges == nil {
-		e.source.pages = maps.Clone(e.source.pages)
-		e.source.origins = maps.Clone(e.source.origins)
-	}
+	nextSource := *e.source
+	nextSource.pages = maps.Clone(e.source.pages)
+	nextSource.origins = maps.Clone(e.source.origins)
+	e.source = &nextSource
+	e.pages = slices.Clone(e.pages)
 	for _, idx := range dirtyPages {
 		pageID := e.pages[idx].ID
 		oldSource := e.source.pages[pageID]
@@ -832,44 +877,4 @@ func (e *Editor) commitLayerPartsIncremental(ctx context.Context, reader *Reader
 		}
 	}
 	return nil
-}
-
-// patchFastMaxUnitID 在标准Document头部快速替换MaxUnitID，遇非标准结构回退完整XML解析
-// 入参: data 文档XML原文, maxID 目标最大标识
-// 返回: []byte 更新后的XML原文, bool 是否命中快路径
-func patchFastMaxUnitID(data []byte, maxID uint64) ([]byte, bool) {
-	limit := min(len(data), 8192)
-	head := data[:limit]
-	if bytes.Contains(head, []byte("<!--")) || bytes.Contains(head, []byte("<![CDATA[")) {
-		return nil, false
-	}
-	for _, tags := range [][2][]byte{
-		{[]byte("<ofd:MaxUnitID>"), []byte("</ofd:MaxUnitID>")},
-		{[]byte("<MaxUnitID>"), []byte("</MaxUnitID>")},
-	} {
-		start := bytes.Index(head, tags[0])
-		if start < 0 {
-			continue
-		}
-		valStart := start + len(tags[0])
-		relEnd := bytes.Index(head[valStart:], tags[1])
-		if relEnd < 0 {
-			return nil, false
-		}
-		valEnd := valStart + relEnd
-		current, ok := parseFastUint32(head[valStart:valEnd])
-		if !ok {
-			return nil, false
-		}
-		if maxID <= current {
-			return data, true
-		}
-		encoded := []byte(formatUnitID(maxID))
-		out := make([]byte, 0, len(data)-(valEnd-valStart)+len(encoded))
-		out = append(out, data[:valStart]...)
-		out = append(out, encoded...)
-		out = append(out, data[valEnd:]...)
-		return out, true
-	}
-	return nil, false
 }

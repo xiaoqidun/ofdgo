@@ -99,6 +99,25 @@ type U3DLight struct {
 	SpotAngle, Intensity float32
 }
 
+// u3dBlock 保存校验后的块边界，数据切片仅在解码期间引用输入
+type u3dBlock struct {
+	kind       uint32
+	data, meta []byte
+}
+
+// u3dDecoder 保存单次解码预算及场景索引，不跨调用缓存输入
+type u3dDecoder struct {
+	ctx       context.Context
+	model     U3DModel
+	remaining uint64
+	plain     bool
+	meshes    map[string]*u3dMeshDeclaration
+	meshOrder []string
+	nodes     map[string]int
+	palettes  map[uint32]map[string]bool
+	textures  map[string]int
+}
+
 // DecodeU3D 按ECMA-363解码静态几何、骨架、场景节点及材质、纹理图像等资源
 // 保留动作轨道和动画修饰器，不在解码时求值；绘制能力由RenderU3D另行校验
 // 渐进网格尚未支持
@@ -212,23 +231,29 @@ func DecodeU3D(ctx context.Context, data []byte, options U3DOptions) (*U3DModel,
 	return &d.model, nil
 }
 
-// u3dBlock 保存校验后的块边界，数据切片仅在解码期间引用输入
-type u3dBlock struct {
-	kind       uint32
-	data, meta []byte
-}
-
-// u3dDecoder 保存单次解码预算及场景索引，不跨调用缓存输入
-type u3dDecoder struct {
-	ctx       context.Context
-	model     U3DModel
-	remaining uint64
-	plain     bool
-	meshes    map[string]*u3dMeshDeclaration
-	meshOrder []string
-	nodes     map[string]int
-	palettes  map[uint32]map[string]bool
-	textures  map[string]int
+// u3dReadBlock 按64位长度计算校验块数据与零填充，避免长度溢出
+// 入参: data 块序列, offset 块起点
+// 返回: u3dBlock 块, int 下一块起点, error 边界或填充错误
+func u3dReadBlock(data []byte, offset int) (u3dBlock, int, error) {
+	if offset < 0 || offset > len(data) || len(data)-offset < 12 {
+		return u3dBlock{}, 0, io.ErrUnexpectedEOF
+	}
+	header := data[offset : offset+12]
+	size, meta := uint64(binary.LittleEndian.Uint32(header[4:])), uint64(binary.LittleEndian.Uint32(header[8:]))
+	start := uint64(offset) + 12
+	metaStart := start + ((size + 3) &^ 3)
+	end := metaStart + ((meta + 3) &^ 3)
+	if end > uint64(len(data)) {
+		return u3dBlock{}, 0, io.ErrUnexpectedEOF
+	}
+	for _, padding := range [][]byte{data[start+size : metaStart], data[metaStart+meta : end]} {
+		for _, value := range padding {
+			if value != 0 {
+				return u3dBlock{}, 0, fmt.Errorf("invalid U3D padding")
+			}
+		}
+	}
+	return u3dBlock{binary.LittleEndian.Uint32(header), data[start : start+size], data[metaStart : metaStart+meta]}, int(end), nil
 }
 
 // reserve 在分配解码数组前检查总预算及取消状态
@@ -652,29 +677,4 @@ func (d *u3dDecoder) checkParents() error {
 		}
 	}
 	return nil
-}
-
-// u3dReadBlock 按64位长度计算校验块数据与零填充，避免长度溢出
-// 入参: data 块序列, offset 块起点
-// 返回: u3dBlock 块, int 下一块起点, error 边界或填充错误
-func u3dReadBlock(data []byte, offset int) (u3dBlock, int, error) {
-	if offset < 0 || offset > len(data) || len(data)-offset < 12 {
-		return u3dBlock{}, 0, io.ErrUnexpectedEOF
-	}
-	header := data[offset : offset+12]
-	size, meta := uint64(binary.LittleEndian.Uint32(header[4:])), uint64(binary.LittleEndian.Uint32(header[8:]))
-	start := uint64(offset) + 12
-	metaStart := start + ((size + 3) &^ 3)
-	end := metaStart + ((meta + 3) &^ 3)
-	if end > uint64(len(data)) {
-		return u3dBlock{}, 0, io.ErrUnexpectedEOF
-	}
-	for _, padding := range [][]byte{data[start+size : metaStart], data[metaStart+meta : end]} {
-		for _, value := range padding {
-			if value != 0 {
-				return u3dBlock{}, 0, fmt.Errorf("invalid U3D padding")
-			}
-		}
-	}
-	return u3dBlock{binary.LittleEndian.Uint32(header), data[start : start+size], data[metaStart : metaStart+meta]}, int(end), nil
 }

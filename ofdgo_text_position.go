@@ -30,6 +30,27 @@ type TextPositioner struct {
 	started          bool
 }
 
+// textPositionValues 按需读取定位数值及重复位移，不展开重复数组
+type textPositionValues struct {
+	data       string
+	value      float64
+	repeat     int
+	compressed bool
+	present    bool
+}
+
+// textLineScanner 顺序判断文本段换行，复用继承坐标和字符到字形的变换
+type textLineScanner struct {
+	size       float64
+	enabled    bool
+	started    bool
+	firstX     string
+	previous   TextCode
+	offset     int
+	pending    []CGTransform
+	transforms map[int][2]int
+}
+
 // NewTextPositioner 创建单个TextCode的定位器，按阅读方向应用增量位移
 // 入参: code 文本定位数据, direction 阅读方向角度
 // 返回: TextPositioner 字形定位器
@@ -50,201 +71,11 @@ func NewTextPositioner(code TextCode, direction int) TextPositioner {
 	}
 }
 
-// Next 根据坐标与位移返回下一个字形原点
-// 返回: Point 字形原点
-func (p *TextPositioner) Next() Point {
-	if p.started {
-		if p.dxs.repeat > 0 || p.dxs.data != "" {
-			p.dxs.next()
-		}
-		if p.dys.repeat > 0 || p.dys.data != "" {
-			p.dys.next()
-		}
-		if p.dxs.present {
-			p.current.X += p.xSign * p.dxs.value
-		}
-		if p.dys.present {
-			p.current.Y += p.ySign * p.dys.value
-		}
-	}
-	if p.xs.repeat > 0 || p.xs.data != "" {
-		if x, ok := p.xs.next(); ok {
-			p.current.X = x
-		}
-	}
-	if p.ys.repeat > 0 || p.ys.data != "" {
-		if y, ok := p.ys.next(); ok {
-			p.current.Y = y
-		}
-	}
-	p.started = true
-	return p.current
-}
-
-// textPositionValues 按需读取定位数值及重复位移，不展开重复数组
-type textPositionValues struct {
-	data       string
-	value      float64
-	repeat     int
-	compressed bool
-	present    bool
-}
-
-// next 读取下一个定位数值
-// 返回: float64 数值, bool 是否存在
-func (v *textPositionValues) next() (float64, bool) {
-	if v.repeat > 0 {
-		v.repeat--
-		return v.value, true
-	}
-	if v.data == "" {
-		return v.value, false
-	}
-	return v.read()
-}
-
-// read 解析剩余定位字段并保存重复计数
-// 返回: float64 数值, bool 是否存在
-func (v *textPositionValues) read() (float64, bool) {
-	count, pending := 0, false
-	for field := v.field(); field != ""; field = v.field() {
-		if v.compressed && field == "g" {
-			pending = true
-			continue
-		}
-		if pending {
-			var err error
-			count, err = strconv.Atoi(field)
-			if err != nil {
-				count = 0
-			}
-			pending = false
-			continue
-		}
-		value, err := strconv.ParseFloat(field, 64)
-		if count > 0 {
-			v.value, v.repeat, v.present = value, count-1, true
-			return value, true
-		}
-		if err == nil {
-			v.value, v.present = value, true
-			return value, true
-		}
-	}
-	return v.value, false
-}
-
-// field 读取定位数组中的下一个字段
-// 返回: string 数值或重复标记，无剩余字段时为空
-func (v *textPositionValues) field() string {
-	start := -1
-	for end, r := range v.data {
-		if unicode.IsSpace(r) || !v.compressed && r == ',' {
-			if start >= 0 {
-				field := v.data[start:end]
-				v.data = v.data[end:]
-				return field
-			}
-		} else if start < 0 {
-			start = end
-		}
-	}
-	var field string
-	if start >= 0 {
-		field = v.data[start:]
-	}
-	v.data = ""
-	return field
-}
-
-// textLineScanner 顺序判断文本段换行，复用继承坐标和字符到字形的变换
-type textLineScanner struct {
-	size       float64
-	enabled    bool
-	started    bool
-	firstX     string
-	previous   TextCode
-	offset     int
-	pending    []CGTransform
-	transforms map[int][2]int
-}
-
 // newTextLineScanner 创建独立的换行扫描器，不修改文字对象
 // 入参: obj 定位文字
 // 返回: textLineScanner 扫描状态
 func newTextLineScanner(obj TextObject) textLineScanner {
 	return textLineScanner{size: obj.Size, enabled: len(obj.TextCode) > 1 && obj.ReadDirection == 0 && obj.CharDirection == 0, previous: TextCode{X: "0", Y: "0"}, pending: obj.CGTransform}
-}
-
-// glyphCount 首次需要字形范围时解析变换，后续文本段复用结果
-// 入参: code 文本段, offset 对象内字符起点
-// 返回: int 字形数量
-func (s *textLineScanner) glyphCount(code TextCode, offset int) int {
-	if len(s.pending) != 0 {
-		s.transforms = make(map[int][2]int, len(s.pending))
-	}
-	for _, transform := range s.pending {
-		if transform.CodePosition < 0 {
-			continue
-		}
-		glyphs := len(parseInts(transform.Glyphs))
-		if transform.GlyphCount > 0 {
-			glyphs = min(glyphs, transform.GlyphCount)
-		}
-		if glyphs > 0 {
-			s.transforms[transform.CodePosition] = [2]int{max(1, transform.CodeCount), glyphs}
-		}
-	}
-	s.pending = nil
-	return textCodeGlyphCount(code, offset, s.transforms)
-}
-
-// next 继承文本段原点并根据实际字形范围判断是否换行
-// 入参: code 按文档顺序传入的文本段
-// 返回: bool 当前段前是否换行
-func (s *textLineScanner) next(code TextCode) bool {
-	if !s.enabled {
-		return false
-	}
-	previous, offset := s.previous, s.offset
-	if s.started && (len(s.pending) != 0 || len(s.transforms) != 0) {
-		s.offset += textCodeRuneCount(previous.Value)
-	}
-	if code.X == "" {
-		code.X = previous.X
-	}
-	if code.Y == "" {
-		code.Y = previous.Y
-	}
-	s.previous = code
-	if !s.started {
-		s.started, s.firstX = true, code.X
-		return false
-	}
-	x, ex := strconv.ParseFloat(code.X, 64)
-	start, es := strconv.ParseFloat(s.firstX, 64)
-	y, ey := strconv.ParseFloat(code.Y, 64)
-	prev, ep := strconv.ParseFloat(previous.Y, 64)
-	if ex != nil || es != nil || ey != nil || ep != nil {
-		return false
-	}
-	if x == start && y != prev {
-		return true
-	}
-	left, err := strconv.ParseFloat(previous.X, 64)
-	if err != nil || s.size <= 0 || y-prev < s.size/2 || previous.DeltaY != "" || code.DeltaY != "" {
-		return false
-	}
-	count := s.glyphCount(previous, offset)
-	if count == 0 {
-		return false
-	}
-	right := left + s.size
-	positioner := NewTextPositioner(previous, 0)
-	for range count {
-		right = math.Max(right, positioner.Next().X+s.size)
-	}
-	return x <= right
 }
 
 // textCodeOrigins 按标准继承文本段原点，首段缺失坐标时以零横坐标和字体上升高度容错恢复
@@ -325,4 +156,178 @@ func textCodeGlyphCount(code TextCode, offset int, transforms map[int][2]int) in
 		}
 	}
 	return glyphs
+}
+
+// Next 根据坐标与位移返回下一个字形原点
+// 返回: Point 字形原点
+func (p *TextPositioner) Next() Point {
+	if p.started {
+		if p.dxs.repeat > 0 || p.dxs.data != "" {
+			p.dxs.next()
+		}
+		if p.dys.repeat > 0 || p.dys.data != "" {
+			p.dys.next()
+		}
+		if p.dxs.present {
+			p.current.X += p.xSign * p.dxs.value
+		}
+		if p.dys.present {
+			p.current.Y += p.ySign * p.dys.value
+		}
+	}
+	if p.xs.repeat > 0 || p.xs.data != "" {
+		if x, ok := p.xs.next(); ok {
+			p.current.X = x
+		}
+	}
+	if p.ys.repeat > 0 || p.ys.data != "" {
+		if y, ok := p.ys.next(); ok {
+			p.current.Y = y
+		}
+	}
+	p.started = true
+	return p.current
+}
+
+// next 读取下一个定位数值
+// 返回: float64 数值, bool 是否存在
+func (v *textPositionValues) next() (float64, bool) {
+	if v.repeat > 0 {
+		v.repeat--
+		return v.value, true
+	}
+	if v.data == "" {
+		return v.value, false
+	}
+	return v.read()
+}
+
+// read 解析剩余定位字段并保存重复计数
+// 返回: float64 数值, bool 是否存在
+func (v *textPositionValues) read() (float64, bool) {
+	count, pending := 0, false
+	for field := v.field(); field != ""; field = v.field() {
+		if v.compressed && field == "g" {
+			pending = true
+			continue
+		}
+		if pending {
+			var err error
+			count, err = strconv.Atoi(field)
+			if err != nil {
+				count = 0
+			}
+			pending = false
+			continue
+		}
+		value, err := strconv.ParseFloat(field, 64)
+		if count > 0 {
+			repeat := count
+			count = 0
+			if err == nil && finite(value) {
+				v.value, v.repeat, v.present = value, repeat-1, true
+				return value, true
+			}
+			continue
+		}
+		if err == nil && finite(value) {
+			v.value, v.present = value, true
+			return value, true
+		}
+	}
+	return v.value, false
+}
+
+// field 读取定位数组中的下一个字段
+// 返回: string 数值或重复标记，无剩余字段时为空
+func (v *textPositionValues) field() string {
+	start := -1
+	for end, r := range v.data {
+		if unicode.IsSpace(r) || r == ',' {
+			if start >= 0 {
+				field := v.data[start:end]
+				v.data = v.data[end:]
+				return field
+			}
+		} else if start < 0 {
+			start = end
+		}
+	}
+	var field string
+	if start >= 0 {
+		field = v.data[start:]
+	}
+	v.data = ""
+	return field
+}
+
+// glyphCount 首次需要字形范围时解析变换，后续文本段复用结果
+// 入参: code 文本段, offset 对象内字符起点
+// 返回: int 字形数量
+func (s *textLineScanner) glyphCount(code TextCode, offset int) int {
+	if len(s.pending) != 0 {
+		s.transforms = make(map[int][2]int, len(s.pending))
+	}
+	for _, transform := range s.pending {
+		if transform.CodePosition < 0 {
+			continue
+		}
+		glyphs := len(parseInts(transform.Glyphs))
+		if transform.GlyphCount > 0 {
+			glyphs = min(glyphs, transform.GlyphCount)
+		}
+		if glyphs > 0 {
+			s.transforms[transform.CodePosition] = [2]int{max(1, transform.CodeCount), glyphs}
+		}
+	}
+	s.pending = nil
+	return textCodeGlyphCount(code, offset, s.transforms)
+}
+
+// next 继承文本段原点并根据实际字形范围判断是否换行
+// 入参: code 按文档顺序传入的文本段
+// 返回: bool 当前段前是否换行
+func (s *textLineScanner) next(code TextCode) bool {
+	if !s.enabled {
+		return false
+	}
+	previous, offset := s.previous, s.offset
+	if s.started && (len(s.pending) != 0 || len(s.transforms) != 0) {
+		s.offset += textCodeRuneCount(previous.Value)
+	}
+	if code.X == "" {
+		code.X = previous.X
+	}
+	if code.Y == "" {
+		code.Y = previous.Y
+	}
+	s.previous = code
+	if !s.started {
+		s.started, s.firstX = true, code.X
+		return false
+	}
+	x, ex := strconv.ParseFloat(code.X, 64)
+	start, es := strconv.ParseFloat(s.firstX, 64)
+	y, ey := strconv.ParseFloat(code.Y, 64)
+	prev, ep := strconv.ParseFloat(previous.Y, 64)
+	if ex != nil || es != nil || ey != nil || ep != nil {
+		return false
+	}
+	if x == start && y != prev {
+		return true
+	}
+	left, err := strconv.ParseFloat(previous.X, 64)
+	if err != nil || s.size <= 0 || y-prev < s.size/2 || previous.DeltaY != "" || code.DeltaY != "" {
+		return false
+	}
+	count := s.glyphCount(previous, offset)
+	if count == 0 {
+		return false
+	}
+	right := left + s.size
+	positioner := NewTextPositioner(previous, 0)
+	for range count {
+		right = math.Max(right, positioner.Next().X+s.size)
+	}
+	return x <= right
 }

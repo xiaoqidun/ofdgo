@@ -155,43 +155,18 @@ type SignatureReferenceVerify struct {
 // SignatureVerifyOption 签名验证选项函数
 type SignatureVerifyOption func(*signatureVerifyOptions)
 
-// IntegrityValid 判断签名完整性是否有效
-// 返回: bool 是否有效
-func (report SignatureVerifyReport) IntegrityValid() bool {
-	sealOK := report.Type == SignTypeSign && !report.SealChecked || report.SealChecked && report.SealOK
-	return report.Error == "" && report.DigestOK && referencesOK(report.References) &&
-		(!report.CoverageChecked || report.CoverageOK) &&
-		report.DataHashChecked && report.DataHashOK && report.SignedValueChecked && report.SignedValueOK &&
-		sealOK && report.SealMatchOK && report.CertChecked && report.CertOK
-}
-
-// TrustedValid 判断签名是否可信有效
-// 返回: bool 签名完整性、时间语义、证书信任及证书有效期是否均验证通过
-func (report SignatureVerifyReport) TrustedValid() bool {
-	if !report.IntegrityValid() || !report.certificatePolicyOK() || !report.CertTrustChecked || !report.CertTrustOK || !report.CertTimeChecked || !report.CertTimeOK {
-		return false
-	}
-	for _, ts := range report.Timestamps {
-		if !ts.Valid || !ts.CertTrustChecked || !ts.CertTrustOK {
-			return false
-		}
-	}
-	return true
-}
-
-// HasFailure 判断已完成的签名检查是否存在失败
-// 返回: bool 是否存在失败（未完成检查时仍需判断Valid和Error）
-func (report SignatureVerifyReport) HasFailure() bool {
-	for _, ref := range report.References {
-		if ref.Checked && !ref.OK {
-			return true
-		}
-	}
-	return report.DataHashChecked && !report.DataHashOK ||
-		report.SignedValueChecked && !report.SignedValueOK ||
-		report.SealChecked && !report.SealOK ||
-		report.SealMatchChecked && !report.SealMatchOK ||
-		report.CertChecked && !report.CertOK || !report.certificatePolicyOK()
+// signatureVerifyOptions 签名验证选项
+type signatureVerifyOptions struct {
+	SignCerts   [][]byte
+	TrustCerts  [][]byte
+	VerifyTime  *time.Time
+	Policy      *SignaturePolicy
+	Timestamp   *SignatureTimestampOptions
+	Revocation  *SignatureRevocationOptions
+	DocIndex    int
+	VersionID   string
+	DocRoot     string
+	digestCache map[[2]string][]byte
 }
 
 // WithSignatureCert 添加数字签名验证证书
@@ -241,650 +216,31 @@ func WithSignatureVerifyTime(t time.Time) SignatureVerifyOption {
 	}
 }
 
-// VerifySignatures 验证文档签名
-// 入参: opts 签名验证选项
-// 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
-func (r *Reader) VerifySignatures(opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
-	return r.VerifySignaturesContext(context.Background(), opts...)
-}
-
-// VerifySignaturesContext 验证全部文档签名并在读取与流式摘要阶段响应取消
-// 入参: ctx 取消上下文, opts 签名验证选项
-// 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
-func (r *Reader) VerifySignaturesContext(ctx context.Context, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if r.OFD == nil || len(r.OFD.DocBody) == 0 {
-		return nil, fmt.Errorf("no docbody found")
-	}
-	if _, err := r.DocContext(ctx); err != nil {
-		return nil, err
-	}
-	cache := make(map[[2]string][]byte)
-	withCache := append([]SignatureVerifyOption{withSignatureDigestCache(cache)}, opts...)
-	var reports []SignatureVerifyReport
-	for i := range r.OFD.DocBody {
-		items, err := r.VerifyDocumentSignaturesContext(ctx, i, withCache...)
-		reports = append(reports, items...)
-		if err != nil {
-			return reports, fmt.Errorf("document %d: %w", i, err)
-		}
-	}
-	return reports, nil
-}
-
-// VerifyDocumentSignatures 验证指定DocBody的签名且不切换阅读器当前文档
-// 入参: index 从0开始的文档索引, opts 签名验证选项
-// 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
-func (r *Reader) VerifyDocumentSignatures(index int, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
-	return r.VerifyDocumentSignaturesContext(context.Background(), index, opts...)
-}
-
-// VerifyDocumentSignaturesContext 验证指定文档签名并在读取和摘要阶段响应取消
-// 入参: ctx 取消上下文, index 文档索引, opts 验证选项
-// 返回: []SignatureVerifyReport 验证报告, error 验证或取消错误
-func (r *Reader) VerifyDocumentSignaturesContext(ctx context.Context, index int, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
-	var selectedVersion *string
-	if index == r.documentIndex {
-		selectedVersion = r.selectedVersion
-	}
-	return r.verifyDocumentSignaturesContext(ctx, index, selectedVersion, opts...)
-}
-
-// VerifyDocumentVersionSignatures 验证指定文档指定版本的签名且不切换阅读器当前文档
-// 入参: docIndex 从0开始的文档索引, versionID 版本标识，空值选择主入口, opts 签名验证选项
-// 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
-func (r *Reader) VerifyDocumentVersionSignatures(docIndex int, versionID string, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
-	return r.VerifyDocumentVersionSignaturesContext(context.Background(), docIndex, versionID, opts...)
-}
-
-// VerifyDocumentVersionSignaturesContext 验证指定文档指定版本的签名并在读取和摘要阶段响应取消
-// 入参: ctx 取消上下文, docIndex 从0开始的文档索引, versionID 版本标识，空值选择主入口, opts 签名验证选项
-// 返回: []SignatureVerifyReport 签名验证报告, error 验证或取消错误
-func (r *Reader) VerifyDocumentVersionSignaturesContext(ctx context.Context, docIndex int, versionID string, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
-	id := versionID
-	return r.verifyDocumentSignaturesContext(ctx, docIndex, &id, opts...)
-}
-
-// VerifySignatures 验证输入源中的OFD签名，不接管输入源生命周期
+// VerifySignatures 验证明文OFD输入源中的签名，不接管输入源生命周期
+// 加密文档请先使用WithCredentials通过NewReaderContext打开后再调用Reader验签方法
 // 入参: input 输入源, opts 签名验证选项
 // 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
 func VerifySignatures(input *Input, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
 	return VerifySignaturesContext(context.Background(), input, opts...)
 }
 
-// VerifySignaturesContext 验证输入源中的OFD签名并响应取消，不接管输入源生命周期
-// 入参: ctx 取消上下文, input 输入源, opts 签名验证选项
+// VerifySignaturesContext 验证明文OFD输入源中的签名并响应取消，不接管输入源生命周期
+// 加密文档请先使用WithCredentials通过NewReaderContext打开后再调用Reader验签方法
+// 入参: ctx 取消上下文，nil使用后台上下文, input 输入源, opts 签名验证选项
 // 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
 func VerifySignaturesContext(ctx context.Context, input *Input, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	reader, err := NewReader(input)
+	reader, err := NewReaderContext(ctx, input)
 	if err != nil {
 		return nil, err
 	}
 	defer reader.Close()
 	return reader.VerifySignaturesContext(ctx, opts...)
-}
-
-// signatureVerifyOptions 签名验证选项
-type signatureVerifyOptions struct {
-	SignCerts   [][]byte
-	TrustCerts  [][]byte
-	VerifyTime  *time.Time
-	Policy      *SignaturePolicy
-	Timestamp   *SignatureTimestampOptions
-	Revocation  *SignatureRevocationOptions
-	DocIndex    int
-	VersionID   string
-	DocRoot     string
-	digestCache map[[2]string][]byte
-}
-
-// verifyDocumentSignaturesContext 按指定文档索引与版本选择执行签名验证
-// 入参: ctx 取消上下文, index 文档索引, selectedVersion 显式版本选择，nil表示按默认规则选择, opts 签名验证选项
-// 返回: []SignatureVerifyReport 签名验证报告, error 验证或取消错误
-func (r *Reader) verifyDocumentSignaturesContext(ctx context.Context, index int, selectedVersion *string, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if r.OFD == nil || index < 0 || index >= len(r.OFD.DocBody) {
-		return nil, fmt.Errorf("document index out of range: %d", index)
-	}
-	options := signatureVerifyOptions{}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&options)
-		}
-	}
-	if options.digestCache == nil {
-		options.digestCache = make(map[[2]string][]byte)
-	}
-	body := r.OFD.DocBody[index]
-	var view *Reader
-	var docRoot string
-	var err error
-	sameVersion := r.selectedVersion == nil && selectedVersion == nil || r.selectedVersion != nil && selectedVersion != nil && *r.selectedVersion == *selectedVersion
-	if index == r.documentIndex && sameVersion && r.doc != nil && r.fileIndex != nil && r.fileNames != nil {
-		if r.doc.Signatures == "" {
-			return nil, nil
-		}
-		snapshot := *r
-		docRoot = snapshot.documentRoot
-		if docRoot == "" {
-			docRoot, err = snapshot.DocumentRootContext(ctx)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if snapshot.RootDir == "" {
-			snapshot.RootDir = path.Dir(docRoot)
-		}
-		view = &snapshot
-	} else {
-		view = r.deriveView(nil, index, selectedVersion)
-		if r.fileIndex != nil && r.fileNames != nil && r.OFD != nil {
-			view.fileIndex, view.fileNames, view.OFD = r.fileIndex, r.fileNames, r.OFD
-		} else if err := view.initRootContext(ctx); err != nil {
-			return nil, err
-		}
-		docRoot, err = view.DocumentRootContext(ctx)
-		if err != nil {
-			return nil, err
-		}
-		data, err := view.readFileViewContext(ctx, docRoot)
-		if err != nil {
-			return nil, err
-		}
-		var doc Document
-		if err := xml.Unmarshal(data, &doc); err != nil {
-			return nil, err
-		}
-		view.doc, view.RootDir = &doc, path.Dir(docRoot)
-		doc.Signatures = view.versionSignaturesContext(ctx, body.Signatures)
-		if doc.Signatures == "" {
-			return nil, nil
-		}
-	}
-	options.DocIndex, options.DocRoot = index, docRoot
-	if view.versionInfo != nil {
-		options.VersionID = view.versionInfo.ID
-	}
-	sigListPath := view.ResPath(view.doc.Signatures)
-	data, err := view.readFileViewContext(ctx, sigListPath)
-	if err != nil {
-		return nil, err
-	}
-	var signatures Signatures
-	if err := xml.Unmarshal(data, &signatures); err != nil {
-		return nil, err
-	}
-	var scope *versionSignatureScope
-	if view.versionInfo != nil {
-		scope, err = view.buildVersionSignatureScope(ctx, sigListPath, signatures)
-		if err != nil {
-			return nil, err
-		}
-	}
-	reports := make([]SignatureVerifyReport, 0, len(signatures.List))
-	for _, sigRef := range signatures.List {
-		if err := ctx.Err(); err != nil {
-			return reports, err
-		}
-		if scope != nil && !view.versionSignatureMatches(ctx, scope, sigRef) {
-			continue
-		}
-		reports = append(reports, view.verifySignature(ctx, sigListPath, sigRef, &options))
-	}
-	return reports, ctx.Err()
-}
-
-// applySignatureCertificatePolicy 分别按签署校验时间与印章制章时间验证签署证书和制章证书
-// 入参: options 验证选项, signerCerts 签署证书列表, sealCert 制章证书, extraCerts 辅助证书池, trustedTimestamp 已验证信任链的可信时间戳时间
-func (report *SignatureVerifyReport) applySignatureCertificatePolicy(options *signatureVerifyOptions, signerCerts [][]byte, sealCert []byte, extraCerts [][]byte, trustedTimestamp *time.Time) {
-	signerCerts = compactSignatureCerts(signerCerts)
-	verifyTime := options.VerifyTime
-	if verifyTime == nil && trustedTimestamp != nil {
-		verifyTime = trustedTimestamp
-	}
-	if verifyTime == nil && len(options.TrustCerts) != 0 {
-		now := time.Now()
-		verifyTime = &now
-	}
-	sealTime := report.SealInfo.CreateTime
-	if len(sealCert) != 0 && !sealTime.IsZero() && !signatureCertsValidAt([][]byte{sealCert}, sealTime) && !report.SignatureTime.IsZero() && signatureCertsValidAt([][]byte{sealCert}, report.SignatureTime) {
-		sealTime = report.SignatureTime
-	}
-	if sealTime.IsZero() && !report.SignatureTime.IsZero() {
-		sealTime = report.SignatureTime
-	}
-	if sealTime.IsZero() && verifyTime != nil {
-		sealTime = *verifyTime
-	}
-	if verifyTime != nil {
-		report.CertTimeChecked = true
-		report.CertTimeOK = signatureCertsValidAt(signerCerts, *verifyTime)
-		if len(sealCert) != 0 {
-			report.CertTimeOK = report.CertTimeOK && !sealTime.IsZero() && signatureCertsValidAt([][]byte{sealCert}, sealTime)
-		}
-	}
-	if len(options.TrustCerts) != 0 {
-		report.CertTrustChecked = true
-		report.CertTrustOK = true
-		pool := append([][]byte{}, options.TrustCerts...)
-		pool = append(pool, options.SignCerts...)
-		pool = append(pool, extraCerts...)
-		pool = compactSignatureCerts(pool)
-		for _, cert := range signerCerts {
-			if err := verifySignatureCertificateTrust(cert, pool, options.TrustCerts, *verifyTime); err != nil {
-				report.CertTrustOK = false
-				report.CertTrustError = err.Error()
-				break
-			}
-		}
-		if report.CertTrustOK && len(sealCert) != 0 {
-			if err := verifySignatureCertificateTrust(sealCert, pool, options.TrustCerts, sealTime); err != nil {
-				report.CertTrustOK = false
-				report.CertTrustError = err.Error()
-			}
-		}
-		if len(signerCerts) == 0 && len(sealCert) == 0 {
-			report.CertTrustOK = false
-			report.CertTrustError = "signature certificate missing"
-		}
-	}
-}
-
-// applySignatureTimePolicy 应用签名时间、印章有效期与制章时间策略
-func (report *SignatureVerifyReport) applySignatureTimePolicy() {
-	if !report.SignatureTime.IsZero() {
-		if len(report.signerCerts) > 0 {
-			report.SignatureTimeChecked = true
-			report.SignatureTimeOK = signatureCertsValidAt(report.signerCerts, report.SignatureTime)
-		} else if !report.SignCert.NotBefore.IsZero() && !report.SignCert.NotAfter.IsZero() {
-			report.SignatureTimeChecked = true
-			report.SignatureTimeOK = timeInRange(report.SignatureTime, report.SignCert.NotBefore, report.SignCert.NotAfter)
-		}
-	}
-	if !report.SealCert.NotBefore.IsZero() && !report.SealCert.NotAfter.IsZero() && (!report.SealInfo.CreateTime.IsZero() || !report.SignatureTime.IsZero()) {
-		report.SealCertTimeChecked = true
-		validAtCreate := !report.SealInfo.CreateTime.IsZero() && timeInRange(report.SealInfo.CreateTime, report.SealCert.NotBefore, report.SealCert.NotAfter)
-		validAtSign := !report.SignatureTime.IsZero() && timeInRange(report.SignatureTime, report.SealCert.NotBefore, report.SealCert.NotAfter)
-		report.SealCertTimeOK = validAtCreate || validAtSign
-	}
-	if !report.SignatureTime.IsZero() && (!report.SealInfo.ValidStart.IsZero() || !report.SealInfo.ValidEnd.IsZero()) {
-		report.SealTimeChecked = true
-		if report.SealInfo.ValidStart.IsZero() || report.SealInfo.ValidEnd.IsZero() {
-			report.SealTimeOK = false
-		} else {
-			report.SealTimeOK = timeInRange(report.SignatureTime, report.SealInfo.ValidStart, report.SealInfo.ValidEnd)
-			if !report.SealInfo.CreateTime.IsZero() && report.SignatureTime.Before(report.SealInfo.CreateTime) {
-				report.SealTimeOK = false
-			}
-		}
-	}
-}
-
-// certificatePolicyOK 判断证书策略是否通过
-// 返回: bool 是否通过
-func (report SignatureVerifyReport) certificatePolicyOK() bool {
-	if report.PolicyChecked && !report.PolicyOK || report.CoverageChecked && !report.CoverageOK ||
-		report.TimestampChecked && !report.TimestampOK || report.RevocationChecked && !report.RevocationOK {
-		return false
-	}
-	if report.SignatureTimeChecked && !report.SignatureTimeOK {
-		return false
-	}
-	if report.SealCertTimeChecked && !report.SealCertTimeOK {
-		return false
-	}
-	if report.SealTimeChecked && !report.SealTimeOK {
-		return false
-	}
-	if report.CertTimeChecked && !report.CertTimeOK {
-		return false
-	}
-	if report.CertTrustChecked && !report.CertTrustOK {
-		return false
-	}
-	return true
-}
-
-// verifySignature 验证单个签名
-// 入参: ctx 取消上下文, sigListPath 签名列表路径, sigRef 签名引用, options 验证选项
-// 返回: SignatureVerifyReport 签名验证报告
-func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigRef Signature, options *signatureVerifyOptions) SignatureVerifyReport {
-	sigPath := signatureRefPath(sigListPath, sigRef.BaseLoc)
-	report := SignatureVerifyReport{
-		DocIndex:    options.DocIndex,
-		VersionID:   options.VersionID,
-		DocRoot:     options.DocRoot,
-		ID:          sigRef.ID,
-		BaseLoc:     sigRef.BaseLoc,
-		Type:        sigRef.Type,
-		SealMatchOK: true,
-	}
-	if report.Type == "" {
-		report.Type = SignTypeSeal
-	}
-	if !validPackagePath(sigPath) {
-		report.Error = fmt.Sprintf("invalid signature path: %s", sigRef.BaseLoc)
-		return report
-	}
-	sigData, err := r.readFileViewContext(ctx, sigPath)
-	if err != nil {
-		report.Error = err.Error()
-		return report
-	}
-	sigFile, err := parseSignatureFile(sigData)
-	if err != nil {
-		report.Error = err.Error()
-		return report
-	}
-	report.Provider = sigFile.SignedInfo.Provider
-	report.SignatureMethod = strings.TrimSpace(sigFile.SignedInfo.SignatureMethod)
-	report.SignatureDateTime = sigFile.SignedInfo.SignatureDateTime
-	report.DigestMethod = sigFile.SignedInfo.References.CheckMethod
-	if report.DigestMethod == "" {
-		report.DigestMethod = "MD5"
-	}
-	report.References = r.verifySignatureReferences(ctx, sigPath, sigFile.SignedInfo.References, options.digestCache)
-	report.Stamps = append(report.Stamps, sigFile.SignedInfo.StampAnnot...)
-	report.StampPositions, err = r.SignatureStampPositions(report.Stamps)
-	if err != nil {
-		report.StampPositionError = err.Error()
-	}
-	report.DigestOK = referencesOK(report.References)
-	r.applySignatureCoverage(&report, sigListPath, options)
-	report.applySignaturePolicy(options, r.OFD.Version, 0, report.SignatureMethod, report.DigestMethod)
-	signedValuePath := signatureRefPath(sigPath, sigFile.SignedValue)
-	if !validPackagePath(signedValuePath) {
-		report.Error = fmt.Sprintf("invalid signed value path: %s", sigFile.SignedValue)
-		return report
-	}
-	signedValue, err := r.readFileViewContext(ctx, signedValuePath)
-	if err != nil {
-		report.Error = err.Error()
-		return report
-	}
-	switch report.Type {
-	case SignTypeSign:
-		if strings.TrimSpace(sigFile.SignedInfo.Seal.BaseLoc) != "" {
-			report.SealChecked = true
-			report.SealOK = false
-			report.Error = "digital signature cannot contain seal"
-			return report
-		}
-		result, err := verifyDigitalSignature(report.SignatureMethod, report.DigestMethod, signedValue, sigData, options)
-		if result != nil {
-			if report.SignatureMethod == "" {
-				report.SignatureMethod = strings.TrimSpace(result.SignatureMethod)
-				if report.SignatureMethod != "" {
-					report.applySignaturePolicy(options, r.OFD.Version, 0, report.SignatureMethod, report.DigestMethod)
-				}
-			}
-			report.signerCerts = result.SignerCerts
-			report.DataHashChecked = result.DataHashChecked
-			report.DataHashOK = result.DataHashOK
-			report.SignedValueChecked = result.SignedChecked
-			report.SignedValueOK = result.SignedOK
-			report.CertChecked = result.CertChecked
-			report.CertOK = result.CertOK
-			report.SignCert = result.CertInfo
-			report.Signer = result.CertInfo.CommonName
-		}
-		if report.SignatureMethod == "" && options.Policy != nil && len(options.Policy.SignatureMethods) != 0 {
-			report.applySignaturePolicyError(rejectSignaturePolicy("signature algorithm rejected: %s", report.SignatureMethod))
-		}
-		if err != nil {
-			report.applySignaturePolicyError(err)
-			report.Error = err.Error()
-			return report
-		}
-		report.SealOK = true
-		if strings.TrimSpace(report.SignatureDateTime) != "" {
-			sigTime, timeErr := parseSignatureDateTime(report.SignatureDateTime)
-			if timeErr != nil {
-				report.SignatureTimeChecked = true
-				report.SignatureTimeOK = false
-				report.Error = timeErr.Error()
-				return report
-			}
-			report.SignatureTime = sigTime
-		}
-		report.applySignatureTimePolicy()
-		trustedTime := report.applySignatureTimestamps(options, signedValue, result.Timestamps)
-		report.applySignatureCertificatePolicy(options, result.SignerCerts, nil, result.Certs, trustedTime)
-		report.applySignatureRevocation(options, result.SignerCerts, result.Certs)
-		report.Valid = report.IntegrityValid() && report.certificatePolicyOK()
-		return report
-	case SignTypeSeal:
-	default:
-		report.Error = fmt.Sprintf("unsupported signature type: %s", report.Type)
-		return report
-	}
-	sesResult, err := verifySESSignature(signedValue, sigData, options)
-	if sesResult != nil {
-		if report.SignatureMethod == "" {
-			report.SignatureMethod = strings.TrimSpace(sesResult.SignatureMethod)
-		}
-		report.signerCerts = [][]byte{sesResult.SignCertRaw}
-		report.DataHashChecked = sesResult.DataHashChecked
-		report.DataHashOK = sesResult.DataHashOK
-		report.SignedValueChecked = sesResult.SignedChecked
-		report.SignedValueOK = sesResult.SignedOK
-		report.SealChecked = sesResult.SealChecked
-		report.SealOK = sesResult.SealOK
-		report.CertChecked = sesResult.CertChecked
-		report.CertOK = sesResult.CertOK
-		report.SignCert = sesResult.SignCert
-		report.SealCert = sesResult.SealCert
-		report.SealInfo = sesResult.SealInfo
-		report.SealType = sesResult.SealType
-		report.SignatureTime = sesResult.SignatureTime
-		report.Signer = sesResult.SignCert.CommonName
-	}
-	if err != nil {
-		if strings.Contains(err.Error(), "signature time") {
-			report.SignatureTimeChecked = true
-			report.SignatureTimeOK = false
-		}
-		report.applySignaturePolicyError(err)
-		report.Error = err.Error()
-		return report
-	}
-	if report.SignatureMethod != "" && !signatureAlgorithmEquivalent(report.SignatureMethod, sesResult.SignatureMethod, "SM3") {
-		report.Error = "signature method does not match SES"
-		return report
-	}
-	var dateTimeErr error
-	if strings.TrimSpace(report.SignatureDateTime) != "" {
-		var parsedTime time.Time
-		parsedTime, dateTimeErr = parseSignatureDateTime(report.SignatureDateTime)
-		if dateTimeErr == nil && report.SignatureTime.IsZero() {
-			report.SignatureTime = parsedTime
-		}
-	}
-	report.applySignaturePolicy(options, r.OFD.Version, sesResult.SealInfo.Version, sesResult.SignatureMethod, "SM3")
-	report.applySignatureTimePolicy()
-	if dateTimeErr != nil {
-		report.SignatureTimeChecked = true
-		report.SignatureTimeOK = false
-	}
-	trustedTime := report.applySignatureTimestamps(options, signedValue, sesResult.Timestamps)
-	report.applySignatureCertificatePolicy(options, [][]byte{sesResult.SignCertRaw}, sesResult.SealCertRaw, sesResult.Certs, trustedTime)
-	report.applySignatureRevocation(options, [][]byte{sesResult.SignCertRaw, sesResult.SealCertRaw}, sesResult.Certs)
-	if sigFile.SignedInfo.Seal.BaseLoc != "" {
-		sealPath := signatureRefPath(sigPath, sigFile.SignedInfo.Seal.BaseLoc)
-		if !validPackagePath(sealPath) {
-			report.Error = fmt.Sprintf("invalid seal path: %s", sigFile.SignedInfo.Seal.BaseLoc)
-			return report
-		}
-		sealData, err := r.readFileViewContext(ctx, sealPath)
-		if err != nil {
-			report.Error = err.Error()
-			return report
-		}
-		report.SealMatchChecked = true
-		report.SealMatchOK = bytes.Equal(sealData, sesResult.SealRaw)
-	}
-	if dateTimeErr != nil && report.Error == "" {
-		report.Error = dateTimeErr.Error()
-	}
-	report.Valid = report.IntegrityValid() && report.certificatePolicyOK()
-	return report
-}
-
-// verifySignatureReferences 验证签名保护文件列表，引用较多时使用有限并发计算摘要
-// 入参: ctx 取消上下文, sigPath 签名文件路径, refs 签名保护文件列表, cache 共享摘要缓存
-// 返回: []SignatureReferenceVerify 保护文件验证结果
-func (r *Reader) verifySignatureReferences(ctx context.Context, sigPath string, refs SignatureReferences, cache map[[2]string][]byte) []SignatureReferenceVerify {
-	count := len(refs.Reference)
-	workers := min(runtime.GOMAXPROCS(0), 4)
-	if r.resources != nil && r.resources.options.Parallelism > 0 && r.resources.options.Parallelism < workers {
-		workers = r.resources.options.Parallelism
-	}
-	if workers <= 1 || count < 4 {
-		results := make([]SignatureReferenceVerify, 0, count)
-		for _, ref := range refs.Reference {
-			if ctx.Err() != nil {
-				break
-			}
-			results = append(results, r.verifySignatureReference(ctx, sigPath, refs.CheckMethod, ref, cache, nil))
-		}
-		return results
-	}
-	if workers > count {
-		workers = count
-	}
-	results := make([]SignatureReferenceVerify, count)
-	completed := make([]bool, count)
-	var cacheMu sync.Mutex
-	var next atomic.Int64
-	var wg sync.WaitGroup
-	wg.Add(workers)
-	for range workers {
-		go func() {
-			defer wg.Done()
-			for {
-				idx := int(next.Add(1) - 1)
-				if idx >= count || ctx.Err() != nil {
-					return
-				}
-				results[idx] = r.verifySignatureReference(ctx, sigPath, refs.CheckMethod, refs.Reference[idx], cache, &cacheMu)
-				completed[idx] = true
-			}
-		}()
-	}
-	wg.Wait()
-	if ctx.Err() == nil {
-		return results
-	}
-	out := make([]SignatureReferenceVerify, 0, count)
-	for i := range count {
-		if completed[i] {
-			out = append(out, results[i])
-		}
-	}
-	return out
-}
-
-// verifySignatureReference 验证签名保护文件并在单次会话内复用流式哈希结果
-// 入参: ctx 取消上下文, sigPath 签名文件路径, method 摘要算法, ref 保护文件引用, cache 共享摘要缓存, cacheMu 缓存互斥锁
-// 返回: SignatureReferenceVerify 保护文件验证结果
-func (r *Reader) verifySignatureReference(ctx context.Context, sigPath, method string, ref SignatureReference, cache map[[2]string][]byte, cacheMu *sync.Mutex) SignatureReferenceVerify {
-	refPath := signatureRefPath(sigPath, ref.FileRef)
-	result := SignatureReferenceVerify{
-		FileRef: ref.FileRef,
-		Path:    refPath,
-	}
-	if !validPackagePath(refPath) {
-		result.Error = fmt.Sprintf("invalid reference path: %s", ref.FileRef)
-		return result
-	}
-	checkValue, err := base64.StdEncoding.DecodeString(strings.TrimSpace(ref.CheckValue))
-	if err != nil {
-		result.Error = err.Error()
-		return result
-	}
-	algKey, ok := canonicalSignatureDigestKey(method)
-	if !ok {
-		result.Error = fmt.Sprintf("unsupported digest method: %s", method)
-		return result
-	}
-	cleanPath := cleanPackagePath(refPath)
-	cacheKey := [2]string{cleanPath, algKey}
-	var actual []byte
-	if cache != nil {
-		if cacheMu != nil {
-			cacheMu.Lock()
-		}
-		if cached, found := cache[cacheKey]; found {
-			actual = bytes.Clone(cached)
-		}
-		if cacheMu != nil {
-			cacheMu.Unlock()
-		}
-	}
-	if actual == nil {
-		actual, err = r.streamSignatureDigest(ctx, method, refPath)
-		if err != nil {
-			result.Error = err.Error()
-			return result
-		}
-		if cache != nil {
-			cloned := bytes.Clone(actual)
-			if cacheMu != nil {
-				cacheMu.Lock()
-			}
-			cache[cacheKey] = cloned
-			if cacheMu != nil {
-				cacheMu.Unlock()
-			}
-		}
-	}
-	result.CheckValue = checkValue
-	result.Actual = actual
-	result.Checked = true
-	result.OK = subtle.ConstantTimeCompare(checkValue, actual) == 1
-	return result
-}
-
-// streamSignatureDigest 流式计算包内文件摘要，避免大文件整块驻留内存
-// 入参: ctx 取消上下文, method 摘要算法, refPath 包内路径
-// 返回: []byte 摘要值, error 读取、不支持算法或取消错误
-func (r *Reader) streamSignatureDigest(ctx context.Context, method, refPath string) ([]byte, error) {
-	var digest hash.Hash
-	switch {
-	case strings.TrimSpace(method) == "":
-		digest = md5.New()
-	case isSM3DigestMethod(method):
-		digest = sm3.New()
-	default:
-		algorithm, ok := signatureDigestHash(method)
-		if !ok {
-			return nil, fmt.Errorf("unsupported digest method: %s", method)
-		}
-		digest = algorithm.New()
-	}
-	input, err := r.openFile(refPath)
-	if err != nil {
-		return nil, err
-	}
-	_, err = io.Copy(digest, imageInput{ReadCloser: input, ctx: ctx})
-	closeErr := input.Close()
-	if err != nil {
-		return nil, err
-	}
-	if closeErr != nil {
-		return nil, closeErr
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return digest.Sum(nil), nil
 }
 
 // withSignatureDigestCache 注入单次批量验签共享的引用摘要缓存
@@ -1407,4 +763,659 @@ func parseSignatureCerts(data []byte) [][]byte {
 		return nil
 	}
 	return [][]byte{append([]byte(nil), data...)}
+}
+
+// IntegrityValid 判断签名完整性是否有效
+// 返回: bool 是否有效
+func (report SignatureVerifyReport) IntegrityValid() bool {
+	sealOK := report.Type == SignTypeSign && !report.SealChecked || report.SealChecked && report.SealOK
+	return report.Error == "" && report.DigestOK && referencesOK(report.References) &&
+		(!report.CoverageChecked || report.CoverageOK) &&
+		report.DataHashChecked && report.DataHashOK && report.SignedValueChecked && report.SignedValueOK &&
+		sealOK && report.SealMatchOK && report.CertChecked && report.CertOK
+}
+
+// TrustedValid 判断签名是否可信有效
+// 返回: bool 签名完整性、时间语义、证书信任及证书有效期是否均验证通过
+func (report SignatureVerifyReport) TrustedValid() bool {
+	if !report.IntegrityValid() || !report.certificatePolicyOK() || !report.CertTrustChecked || !report.CertTrustOK || !report.CertTimeChecked || !report.CertTimeOK {
+		return false
+	}
+	for _, ts := range report.Timestamps {
+		if !ts.Valid || !ts.CertTrustChecked || !ts.CertTrustOK {
+			return false
+		}
+	}
+	return true
+}
+
+// HasFailure 判断已完成的签名检查是否存在失败
+// 返回: bool 是否存在失败（未完成检查时仍需判断Valid和Error）
+func (report SignatureVerifyReport) HasFailure() bool {
+	for _, ref := range report.References {
+		if ref.Checked && !ref.OK {
+			return true
+		}
+	}
+	return report.DataHashChecked && !report.DataHashOK ||
+		report.SignedValueChecked && !report.SignedValueOK ||
+		report.SealChecked && !report.SealOK ||
+		report.SealMatchChecked && !report.SealMatchOK ||
+		report.CertChecked && !report.CertOK || !report.certificatePolicyOK()
+}
+
+// VerifySignatures 验证文档签名，加密文档需在打开阅读器时提供解密凭据或使用已解密阅读器
+// 入参: opts 签名验证选项
+// 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
+func (r *Reader) VerifySignatures(opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	return r.VerifySignaturesContext(context.Background(), opts...)
+}
+
+// VerifySignaturesContext 验证全部文档签名并在读取与流式摘要阶段响应取消
+// 加密文档验签前需在打开阅读器时提供解密凭据或使用已解密阅读器
+// 入参: ctx 取消上下文，nil使用后台上下文, opts 签名验证选项
+// 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
+func (r *Reader) VerifySignaturesContext(ctx context.Context, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r.ofd == nil || len(r.ofd.DocBody) == 0 {
+		return nil, fmt.Errorf("no docbody found")
+	}
+	if _, err := r.DocContext(ctx); err != nil {
+		return nil, err
+	}
+	cache := make(map[[2]string][]byte)
+	withCache := append([]SignatureVerifyOption{withSignatureDigestCache(cache)}, opts...)
+	var reports []SignatureVerifyReport
+	for i := range r.ofd.DocBody {
+		items, err := r.VerifyDocumentSignaturesContext(ctx, i, withCache...)
+		reports = append(reports, items...)
+		if err != nil {
+			return reports, fmt.Errorf("document %d: %w", i, err)
+		}
+	}
+	return reports, nil
+}
+
+// VerifyDocumentSignatures 验证指定DocBody的签名且不切换阅读器当前文档
+// 加密文档验签前需提供解密凭据或使用已解密阅读器
+// 入参: index 从0开始的文档索引, opts 签名验证选项
+// 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
+func (r *Reader) VerifyDocumentSignatures(index int, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	return r.VerifyDocumentSignaturesContext(context.Background(), index, opts...)
+}
+
+// VerifyDocumentSignaturesContext 验证指定文档签名并在读取和摘要阶段响应取消
+// 加密文档验签前需提供解密凭据或使用已解密阅读器
+// 入参: ctx 取消上下文，nil使用后台上下文, index 文档索引, opts 验证选项
+// 返回: []SignatureVerifyReport 验证报告, error 验证或取消错误
+func (r *Reader) VerifyDocumentSignaturesContext(ctx context.Context, index int, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var selectedVersion *string
+	if index == r.documentIndex {
+		selectedVersion = r.selectedVersion
+	}
+	return r.verifyDocumentSignaturesContext(ctx, index, selectedVersion, opts...)
+}
+
+// VerifyDocumentVersionSignatures 验证指定文档指定版本的签名且不切换阅读器当前文档
+// 加密文档验签前需提供解密凭据或使用已解密阅读器
+// 入参: docIndex 从0开始的文档索引, versionID 版本标识，空值选择主入口, opts 签名验证选项
+// 返回: []SignatureVerifyReport 签名验证报告, error 错误信息
+func (r *Reader) VerifyDocumentVersionSignatures(docIndex int, versionID string, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	return r.VerifyDocumentVersionSignaturesContext(context.Background(), docIndex, versionID, opts...)
+}
+
+// VerifyDocumentVersionSignaturesContext 验证指定文档指定版本的签名并在读取和摘要阶段响应取消
+// 加密文档验签前需提供解密凭据或使用已解密阅读器
+// 入参: ctx 取消上下文，nil使用后台上下文, docIndex 从0开始的文档索引, versionID 版本标识，空值选择主入口, opts 签名验证选项
+// 返回: []SignatureVerifyReport 签名验证报告, error 验证或取消错误
+func (r *Reader) VerifyDocumentVersionSignaturesContext(ctx context.Context, docIndex int, versionID string, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	id := versionID
+	return r.verifyDocumentSignaturesContext(ctx, docIndex, &id, opts...)
+}
+
+// verifyDocumentSignaturesContext 按指定文档索引与版本选择执行签名验证
+// 入参: ctx 取消上下文, index 文档索引, selectedVersion 显式版本选择，nil表示按默认规则选择, opts 签名验证选项
+// 返回: []SignatureVerifyReport 签名验证报告, error 验证或取消错误
+func (r *Reader) verifyDocumentSignaturesContext(ctx context.Context, index int, selectedVersion *string, opts ...SignatureVerifyOption) ([]SignatureVerifyReport, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r.ofd == nil || index < 0 || index >= len(r.ofd.DocBody) {
+		return nil, fmt.Errorf("document index out of range: %d", index)
+	}
+	options := signatureVerifyOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
+	if options.digestCache == nil {
+		options.digestCache = make(map[[2]string][]byte)
+	}
+	body := r.ofd.DocBody[index]
+	var view *Reader
+	var docRoot string
+	var err error
+	sameVersion := r.selectedVersion == nil && selectedVersion == nil || r.selectedVersion != nil && selectedVersion != nil && *r.selectedVersion == *selectedVersion
+	if index == r.documentIndex && sameVersion && r.doc != nil && r.fileIndex != nil && r.fileNames != nil {
+		if r.doc.Signatures == "" {
+			return nil, nil
+		}
+		snapshot := *r
+		docRoot = snapshot.documentRoot
+		if docRoot == "" {
+			docRoot, err = snapshot.DocumentRootContext(ctx)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if snapshot.rootDir == "" {
+			snapshot.rootDir = path.Dir(docRoot)
+		}
+		view = &snapshot
+	} else {
+		view = r.deriveView(nil, index, selectedVersion)
+		if r.fileIndex != nil && r.fileNames != nil && r.ofd != nil {
+			view.fileIndex, view.fileNames, view.ofd = r.fileIndex, r.fileNames, r.ofd
+		} else if err := view.initRootContext(ctx); err != nil {
+			return nil, err
+		}
+		docRoot, err = view.DocumentRootContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		data, err := view.readFileViewContext(ctx, docRoot)
+		if err != nil {
+			return nil, err
+		}
+		var doc Document
+		if err := xml.Unmarshal(data, &doc); err != nil {
+			return nil, err
+		}
+		view.doc, view.rootDir = &doc, path.Dir(docRoot)
+		doc.Signatures = view.versionSignaturesContext(ctx, body.Signatures)
+		if doc.Signatures == "" {
+			return nil, nil
+		}
+	}
+	options.DocIndex, options.DocRoot = index, docRoot
+	if view.versionInfo != nil {
+		options.VersionID = view.versionInfo.ID
+	}
+	sigListPath := view.ResPath(view.doc.Signatures)
+	data, err := view.readFileViewContext(ctx, sigListPath)
+	if err != nil {
+		return nil, err
+	}
+	var signatures Signatures
+	if err := xml.Unmarshal(data, &signatures); err != nil {
+		return nil, err
+	}
+	var scope *versionSignatureScope
+	if view.versionInfo != nil {
+		scope, err = view.buildVersionSignatureScope(ctx, sigListPath, signatures)
+		if err != nil {
+			return nil, err
+		}
+	}
+	reports := make([]SignatureVerifyReport, 0, len(signatures.List))
+	for _, sigRef := range signatures.List {
+		if err := ctx.Err(); err != nil {
+			return reports, err
+		}
+		if scope != nil && !view.versionSignatureMatches(ctx, scope, sigRef) {
+			continue
+		}
+		reports = append(reports, view.verifySignature(ctx, sigListPath, sigRef, &options))
+	}
+	return reports, ctx.Err()
+}
+
+// applySignatureCertificatePolicy 分别按签署校验时间与印章制章时间验证签署证书和制章证书
+// 入参: options 验证选项, signerCerts 签署证书列表, sealCert 制章证书, extraCerts 辅助证书池, trustedTimestamp 已验证信任链的可信时间戳时间
+func (report *SignatureVerifyReport) applySignatureCertificatePolicy(options *signatureVerifyOptions, signerCerts [][]byte, sealCert []byte, extraCerts [][]byte, trustedTimestamp *time.Time) {
+	signerCerts = compactSignatureCerts(signerCerts)
+	verifyTime := options.VerifyTime
+	if verifyTime == nil && trustedTimestamp != nil {
+		verifyTime = trustedTimestamp
+	}
+	if verifyTime == nil && len(options.TrustCerts) != 0 {
+		now := time.Now()
+		verifyTime = &now
+	}
+	sealTime := report.SealInfo.CreateTime
+	if verifyTime != nil {
+		report.CertTimeChecked = true
+		report.CertTimeOK = signatureCertsValidAt(signerCerts, *verifyTime)
+		if len(sealCert) != 0 {
+			report.CertTimeOK = report.CertTimeOK && !sealTime.IsZero() && signatureCertsValidAt([][]byte{sealCert}, sealTime)
+		}
+	}
+	if len(options.TrustCerts) != 0 {
+		report.CertTrustChecked = true
+		report.CertTrustOK = true
+		pool := append([][]byte{}, options.TrustCerts...)
+		pool = append(pool, options.SignCerts...)
+		pool = append(pool, extraCerts...)
+		pool = compactSignatureCerts(pool)
+		for _, cert := range signerCerts {
+			if err := verifySignatureCertificateTrust(cert, pool, options.TrustCerts, *verifyTime); err != nil {
+				report.CertTrustOK = false
+				report.CertTrustError = err.Error()
+				break
+			}
+		}
+		if report.CertTrustOK && len(sealCert) != 0 {
+			if sealTime.IsZero() {
+				report.CertTrustOK = false
+				report.CertTrustError = "seal create time missing"
+			} else if err := verifySignatureCertificateTrust(sealCert, pool, options.TrustCerts, sealTime); err != nil {
+				report.CertTrustOK = false
+				report.CertTrustError = err.Error()
+			}
+		}
+		if len(signerCerts) == 0 && len(sealCert) == 0 {
+			report.CertTrustOK = false
+			report.CertTrustError = "signature certificate missing"
+		}
+	}
+}
+
+// applySignatureTimePolicy 应用签名时间、印章有效期与制章时间策略
+func (report *SignatureVerifyReport) applySignatureTimePolicy() {
+	if !report.SignatureTime.IsZero() {
+		if len(report.signerCerts) > 0 {
+			report.SignatureTimeChecked = true
+			report.SignatureTimeOK = signatureCertsValidAt(report.signerCerts, report.SignatureTime)
+		} else if !report.SignCert.NotBefore.IsZero() && !report.SignCert.NotAfter.IsZero() {
+			report.SignatureTimeChecked = true
+			report.SignatureTimeOK = timeInRange(report.SignatureTime, report.SignCert.NotBefore, report.SignCert.NotAfter)
+		}
+	}
+	if len(report.SealCert.Raw) != 0 || !report.SealCert.NotBefore.IsZero() || !report.SealCert.NotAfter.IsZero() {
+		report.SealCertTimeChecked = true
+		report.SealCertTimeOK = !report.SealInfo.CreateTime.IsZero() && !report.SealCert.NotBefore.IsZero() && !report.SealCert.NotAfter.IsZero() && timeInRange(report.SealInfo.CreateTime, report.SealCert.NotBefore, report.SealCert.NotAfter)
+	}
+	if !report.SignatureTime.IsZero() && (!report.SealInfo.ValidStart.IsZero() || !report.SealInfo.ValidEnd.IsZero()) {
+		report.SealTimeChecked = true
+		if report.SealInfo.ValidStart.IsZero() || report.SealInfo.ValidEnd.IsZero() {
+			report.SealTimeOK = false
+		} else {
+			report.SealTimeOK = timeInRange(report.SignatureTime, report.SealInfo.ValidStart, report.SealInfo.ValidEnd)
+			if !report.SealInfo.CreateTime.IsZero() && report.SignatureTime.Before(report.SealInfo.CreateTime) {
+				report.SealTimeOK = false
+			}
+		}
+	}
+}
+
+// certificatePolicyOK 判断证书策略是否通过
+// 返回: bool 是否通过
+func (report SignatureVerifyReport) certificatePolicyOK() bool {
+	if report.PolicyChecked && !report.PolicyOK || report.CoverageChecked && !report.CoverageOK ||
+		report.TimestampChecked && !report.TimestampOK || report.RevocationChecked && !report.RevocationOK {
+		return false
+	}
+	if report.SignatureTimeChecked && !report.SignatureTimeOK {
+		return false
+	}
+	if report.SealCertTimeChecked && !report.SealCertTimeOK {
+		return false
+	}
+	if report.SealTimeChecked && !report.SealTimeOK {
+		return false
+	}
+	if report.CertTimeChecked && !report.CertTimeOK {
+		return false
+	}
+	if report.CertTrustChecked && !report.CertTrustOK {
+		return false
+	}
+	return true
+}
+
+// verifySignature 验证单个签名
+// 入参: ctx 取消上下文, sigListPath 签名列表路径, sigRef 签名引用, options 验证选项
+// 返回: SignatureVerifyReport 签名验证报告
+func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigRef Signature, options *signatureVerifyOptions) SignatureVerifyReport {
+	sigPath := signatureRefPath(sigListPath, sigRef.BaseLoc)
+	report := SignatureVerifyReport{
+		DocIndex:    options.DocIndex,
+		VersionID:   options.VersionID,
+		DocRoot:     options.DocRoot,
+		ID:          sigRef.ID,
+		BaseLoc:     sigRef.BaseLoc,
+		Type:        sigRef.Type,
+		SealMatchOK: true,
+	}
+	if report.Type == "" {
+		report.Type = SignTypeSeal
+	}
+	if !validPackagePath(sigPath) {
+		report.Error = fmt.Sprintf("invalid signature path: %s", sigRef.BaseLoc)
+		return report
+	}
+	sigData, err := r.readFileViewContext(ctx, sigPath)
+	if err != nil {
+		report.Error = err.Error()
+		return report
+	}
+	sigFile, err := parseSignatureFile(sigData)
+	if err != nil {
+		report.Error = err.Error()
+		return report
+	}
+	report.Provider = sigFile.SignedInfo.Provider
+	report.SignatureMethod = strings.TrimSpace(sigFile.SignedInfo.SignatureMethod)
+	report.SignatureDateTime = sigFile.SignedInfo.SignatureDateTime
+	report.DigestMethod = sigFile.SignedInfo.References.CheckMethod
+	if report.DigestMethod == "" {
+		report.DigestMethod = "MD5"
+	}
+	report.References = r.verifySignatureReferences(ctx, sigPath, sigFile.SignedInfo.References, options.digestCache)
+	report.Stamps = append(report.Stamps, sigFile.SignedInfo.StampAnnot...)
+	report.StampPositions, err = r.SignatureStampPositions(report.Stamps)
+	if err != nil {
+		report.StampPositionError = err.Error()
+	}
+	report.DigestOK = referencesOK(report.References)
+	r.applySignatureCoverage(ctx, &report, sigListPath, options)
+	report.applySignaturePolicy(options, r.ofd.Version, 0, report.SignatureMethod, report.DigestMethod)
+	signedValuePath := signatureRefPath(sigPath, sigFile.SignedValue)
+	if !validPackagePath(signedValuePath) {
+		report.Error = fmt.Sprintf("invalid signed value path: %s", sigFile.SignedValue)
+		return report
+	}
+	signedValue, err := r.readFileViewContext(ctx, signedValuePath)
+	if err != nil {
+		report.Error = err.Error()
+		return report
+	}
+	switch report.Type {
+	case SignTypeSign:
+		if strings.TrimSpace(sigFile.SignedInfo.Seal.BaseLoc) != "" {
+			report.SealChecked = true
+			report.SealOK = false
+			report.Error = "digital signature cannot contain seal"
+			return report
+		}
+		result, err := verifyDigitalSignature(report.SignatureMethod, report.DigestMethod, signedValue, sigData, options)
+		if result != nil {
+			if report.SignatureMethod == "" {
+				report.SignatureMethod = strings.TrimSpace(result.SignatureMethod)
+				if report.SignatureMethod != "" {
+					report.applySignaturePolicy(options, r.ofd.Version, 0, report.SignatureMethod, report.DigestMethod)
+				}
+			}
+			report.signerCerts = result.SignerCerts
+			report.DataHashChecked = result.DataHashChecked
+			report.DataHashOK = result.DataHashOK
+			report.SignedValueChecked = result.SignedChecked
+			report.SignedValueOK = result.SignedOK
+			report.CertChecked = result.CertChecked
+			report.CertOK = result.CertOK
+			report.SignCert = result.CertInfo
+			report.Signer = result.CertInfo.CommonName
+		}
+		if report.SignatureMethod == "" && options.Policy != nil && len(options.Policy.SignatureMethods) != 0 {
+			report.applySignaturePolicyError(rejectSignaturePolicy("signature algorithm rejected: %s", report.SignatureMethod))
+		}
+		if err != nil {
+			report.applySignaturePolicyError(err)
+			report.Error = err.Error()
+			return report
+		}
+		report.SealOK = true
+		if strings.TrimSpace(report.SignatureDateTime) != "" {
+			sigTime, timeErr := parseSignatureDateTime(report.SignatureDateTime)
+			if timeErr != nil {
+				report.SignatureTimeChecked = true
+				report.SignatureTimeOK = false
+				report.Error = timeErr.Error()
+				return report
+			}
+			report.SignatureTime = sigTime
+		}
+		report.applySignatureTimePolicy()
+		trustedTime := report.applySignatureTimestamps(ctx, options, signedValue, result.Timestamps)
+		report.applySignatureCertificatePolicy(options, result.SignerCerts, nil, result.Certs, trustedTime)
+		report.applySignatureRevocation(ctx, options, result.SignerCerts, result.Certs)
+		report.Valid = report.IntegrityValid() && report.certificatePolicyOK()
+		return report
+	case SignTypeSeal:
+	default:
+		report.Error = fmt.Sprintf("unsupported signature type: %s", report.Type)
+		return report
+	}
+	sesResult, err := verifySESSignature(signedValue, sigData, options)
+	if sesResult != nil {
+		if report.SignatureMethod == "" {
+			report.SignatureMethod = strings.TrimSpace(sesResult.SignatureMethod)
+		}
+		report.signerCerts = [][]byte{sesResult.SignCertRaw}
+		report.DataHashChecked = sesResult.DataHashChecked
+		report.DataHashOK = sesResult.DataHashOK
+		report.SignedValueChecked = sesResult.SignedChecked
+		report.SignedValueOK = sesResult.SignedOK
+		report.SealChecked = sesResult.SealChecked
+		report.SealOK = sesResult.SealOK
+		report.CertChecked = sesResult.CertChecked
+		report.CertOK = sesResult.CertOK
+		report.SignCert = sesResult.SignCert
+		report.SealCert = sesResult.SealCert
+		report.SealInfo = sesResult.SealInfo
+		report.SealType = sesResult.SealType
+		report.SignatureTime = sesResult.SignatureTime
+		report.Signer = sesResult.SignCert.CommonName
+	}
+	if err != nil {
+		if strings.Contains(err.Error(), "signature time") {
+			report.SignatureTimeChecked = true
+			report.SignatureTimeOK = false
+		}
+		report.applySignaturePolicyError(err)
+		report.Error = err.Error()
+		return report
+	}
+	if report.SignatureMethod != "" && !signatureAlgorithmEquivalent(report.SignatureMethod, sesResult.SignatureMethod, "SM3") {
+		report.Error = "signature method does not match SES"
+		return report
+	}
+	var dateTimeErr error
+	if strings.TrimSpace(report.SignatureDateTime) != "" {
+		var parsedTime time.Time
+		parsedTime, dateTimeErr = parseSignatureDateTime(report.SignatureDateTime)
+		if dateTimeErr == nil && report.SignatureTime.IsZero() {
+			report.SignatureTime = parsedTime
+		}
+	}
+	report.applySignaturePolicy(options, r.ofd.Version, sesResult.SealInfo.Version, sesResult.SignatureMethod, "SM3")
+	report.applySignatureTimePolicy()
+	if dateTimeErr != nil {
+		report.SignatureTimeChecked = true
+		report.SignatureTimeOK = false
+	}
+	trustedTime := report.applySignatureTimestamps(ctx, options, signedValue, sesResult.Timestamps)
+	report.applySignatureCertificatePolicy(options, [][]byte{sesResult.SignCertRaw}, sesResult.SealCertRaw, sesResult.Certs, trustedTime)
+	report.applySignatureRevocation(ctx, options, [][]byte{sesResult.SignCertRaw, sesResult.SealCertRaw}, sesResult.Certs)
+	if sigFile.SignedInfo.Seal.BaseLoc != "" {
+		sealPath := signatureRefPath(sigPath, sigFile.SignedInfo.Seal.BaseLoc)
+		if !validPackagePath(sealPath) {
+			report.Error = fmt.Sprintf("invalid seal path: %s", sigFile.SignedInfo.Seal.BaseLoc)
+			return report
+		}
+		sealData, err := r.readFileViewContext(ctx, sealPath)
+		if err != nil {
+			report.Error = err.Error()
+			return report
+		}
+		report.SealMatchChecked = true
+		report.SealMatchOK = bytes.Equal(sealData, sesResult.SealRaw)
+	}
+	if dateTimeErr != nil && report.Error == "" {
+		report.Error = dateTimeErr.Error()
+	}
+	report.Valid = report.IntegrityValid() && report.certificatePolicyOK()
+	return report
+}
+
+// verifySignatureReferences 验证签名保护文件列表，引用较多时使用有限并发计算摘要
+// 入参: ctx 取消上下文, sigPath 签名文件路径, refs 签名保护文件列表, cache 共享摘要缓存
+// 返回: []SignatureReferenceVerify 保护文件验证结果
+func (r *Reader) verifySignatureReferences(ctx context.Context, sigPath string, refs SignatureReferences, cache map[[2]string][]byte) []SignatureReferenceVerify {
+	count := len(refs.Reference)
+	workers := min(runtime.GOMAXPROCS(0), 4)
+	if r.resources != nil && r.resources.options.Parallelism > 0 && r.resources.options.Parallelism < workers {
+		workers = r.resources.options.Parallelism
+	}
+	if workers <= 1 || count < 4 {
+		results := make([]SignatureReferenceVerify, 0, count)
+		for _, ref := range refs.Reference {
+			if ctx.Err() != nil {
+				break
+			}
+			results = append(results, r.verifySignatureReference(ctx, sigPath, refs.CheckMethod, ref, cache, nil))
+		}
+		return results
+	}
+	if workers > count {
+		workers = count
+	}
+	results := make([]SignatureReferenceVerify, count)
+	completed := make([]bool, count)
+	var cacheMu sync.Mutex
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for {
+				idx := int(next.Add(1) - 1)
+				if idx >= count || ctx.Err() != nil {
+					return
+				}
+				results[idx] = r.verifySignatureReference(ctx, sigPath, refs.CheckMethod, refs.Reference[idx], cache, &cacheMu)
+				completed[idx] = true
+			}
+		}()
+	}
+	wg.Wait()
+	if ctx.Err() == nil {
+		return results
+	}
+	out := make([]SignatureReferenceVerify, 0, count)
+	for i := range count {
+		if completed[i] {
+			out = append(out, results[i])
+		}
+	}
+	return out
+}
+
+// verifySignatureReference 验证签名保护文件并在单次会话内复用流式哈希结果
+// 入参: ctx 取消上下文, sigPath 签名文件路径, method 摘要算法, ref 保护文件引用, cache 共享摘要缓存, cacheMu 缓存互斥锁
+// 返回: SignatureReferenceVerify 保护文件验证结果
+func (r *Reader) verifySignatureReference(ctx context.Context, sigPath, method string, ref SignatureReference, cache map[[2]string][]byte, cacheMu *sync.Mutex) SignatureReferenceVerify {
+	refPath := signatureRefPath(sigPath, ref.FileRef)
+	result := SignatureReferenceVerify{
+		FileRef: ref.FileRef,
+		Path:    refPath,
+	}
+	if !validPackagePath(refPath) {
+		result.Error = fmt.Sprintf("invalid reference path: %s", ref.FileRef)
+		return result
+	}
+	checkValue, err := base64.StdEncoding.DecodeString(strings.TrimSpace(ref.CheckValue))
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	algKey, ok := canonicalSignatureDigestKey(method)
+	if !ok {
+		result.Error = fmt.Sprintf("unsupported digest method: %s", method)
+		return result
+	}
+	cleanPath := cleanPackagePath(refPath)
+	cacheKey := [2]string{cleanPath, algKey}
+	var actual []byte
+	if cache != nil {
+		if cacheMu != nil {
+			cacheMu.Lock()
+		}
+		if cached, found := cache[cacheKey]; found {
+			actual = bytes.Clone(cached)
+		}
+		if cacheMu != nil {
+			cacheMu.Unlock()
+		}
+	}
+	if actual == nil {
+		actual, err = r.streamSignatureDigest(ctx, method, refPath)
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		if cache != nil {
+			cloned := bytes.Clone(actual)
+			if cacheMu != nil {
+				cacheMu.Lock()
+			}
+			cache[cacheKey] = cloned
+			if cacheMu != nil {
+				cacheMu.Unlock()
+			}
+		}
+	}
+	result.CheckValue = checkValue
+	result.Actual = actual
+	result.Checked = true
+	result.OK = subtle.ConstantTimeCompare(checkValue, actual) == 1
+	return result
+}
+
+// streamSignatureDigest 流式计算包内文件摘要，避免大文件整块驻留内存
+// 入参: ctx 取消上下文, method 摘要算法, refPath 包内路径
+// 返回: []byte 摘要值, error 读取、不支持算法或取消错误
+func (r *Reader) streamSignatureDigest(ctx context.Context, method, refPath string) ([]byte, error) {
+	var digest hash.Hash
+	switch {
+	case strings.TrimSpace(method) == "":
+		digest = md5.New()
+	case isSM3DigestMethod(method):
+		digest = sm3.New()
+	default:
+		algorithm, ok := signatureDigestHash(method)
+		if !ok {
+			return nil, fmt.Errorf("unsupported digest method: %s", method)
+		}
+		digest = algorithm.New()
+	}
+	input, err := r.openFile(refPath)
+	if err != nil {
+		return nil, err
+	}
+	_, err = io.Copy(digest, imageInput{ReadCloser: input, ctx: ctx})
+	closeErr := input.Close()
+	if err != nil {
+		return nil, err
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return digest.Sum(nil), nil
 }

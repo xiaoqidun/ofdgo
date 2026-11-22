@@ -24,6 +24,191 @@ import (
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
+// editorRotation 返回无浮点误差的直角旋转矩阵
+// 入参: degrees 顺时针角度，仅支持90度的整数倍
+// 返回: Matrix 旋转, error 角度错误
+func editorRotation(degrees int) (Matrix, error) {
+	if degrees%90 != 0 {
+		return Matrix{}, fmt.Errorf("rotation must be a multiple of 90 degrees")
+	}
+	turn := (degrees%360 + 360) % 360 / 90
+	return [...]Matrix{IdentityMatrix(), {b: 1, c: -1}, {a: -1, d: -1}, {b: -1, c: 1}}[turn], nil
+}
+
+// editorFlip 返回指定方向的镜像矩阵
+// 入参: axis 为horizontal或vertical
+// 返回: Matrix 镜像, error 方向错误
+func editorFlip(axis string) (Matrix, error) {
+	matrix := IdentityMatrix()
+	switch axis {
+	case "horizontal":
+		matrix.a = -1
+	case "vertical":
+		matrix.d = -1
+	default:
+		return Matrix{}, fmt.Errorf("invalid flip axis %q", axis)
+	}
+	return matrix, nil
+}
+
+// imageTransformNeedsContainer 判断图片变换是否需保留边框或隐式坐标中的动作
+// 入参: object 图片对象, matrix 所在坐标系中的变换
+// 返回: bool 是否需要复合资源
+func imageTransformNeedsContainer(object ImageObject, matrix Matrix) bool {
+	return object.Border != nil || object.CTM == "" && len(object.Actions) != 0 && (matrix.a != 1 || matrix.b != 0 || matrix.c != 0 || matrix.d != 1)
+}
+
+// transformEditorMatrix 在所在坐标系中变换对象，保留局部绘制数据和裁剪
+// 入参: object 对象, matrix 所在坐标系中的变换
+// 返回: GraphicObject 变换后的独立对象
+func transformEditorMatrix(object GraphicObject, matrix Matrix) GraphicObject {
+	var boundary, ctm *string
+	switch object.Type {
+	case "TextObject":
+		boundary, ctm = &object.TextObject.Boundary, &object.TextObject.CTM
+	case "PathObject":
+		boundary, ctm = &object.PathObject.Boundary, &object.PathObject.CTM
+	case "ImageObject":
+		boundary, ctm = &object.ImageObject.Boundary, &object.ImageObject.CTM
+	case "CompositeObject", "CompositeGraphicUnit":
+		boundary, ctm = &object.CompositeGraphicUnit.Boundary, &object.CompositeGraphicUnit.CTM
+	}
+	before, _ := ParseBox(*boundary)
+	after := matrix.TransformBox(before)
+	if object.Type == "ImageObject" && *ctm == "" {
+		if matrix.a == 1 && matrix.b == 0 && matrix.c == 0 && matrix.d == 1 {
+			*boundary = editorBoxString(after)
+			return object
+		}
+		*ctm = Matrix{a: before.W, d: before.H}.String()
+	}
+	local := TranslationMatrix(-after.X, -after.Y).Multiply(matrix).Multiply(TranslationMatrix(before.X, before.Y))
+	*ctm = local.Multiply(NewMatrix(*ctm)).String()
+	*boundary = editorBoxString(after)
+	if clips := editorObjectClips(&object); *clips != nil && !(*clips).usesObjectMatrix() {
+		*clips = transformObjectClips(*clips, local)
+	}
+	if !basegeom.AxisAligned(basegeom.MatrixFromValues(matrix.Values())) && before.W > 0 && before.H > 0 {
+		clips := editorObjectClips(&object)
+		if *clips == nil {
+			*clips = &Clips{}
+		} else {
+			copy := **clips
+			copy.Clip = slices.Clone(copy.Clip)
+			*clips = &copy
+		}
+		clipMatrix := local
+		if (*clips).usesObjectMatrix() {
+			if inverse, ok := NewMatrix(*ctm).Invert(); ok {
+				clipMatrix = inverse.Multiply(local)
+			} else {
+				*clips = transformObjectClips(*clips, NewMatrix(*ctm))
+				(*clips).TransFlag = nil
+			}
+		}
+		fill, stroke := true, false
+		path := PathObject{Boundary: editorBoxString(Box{W: before.W, H: before.H}), Fill: &fill, Stroke: &stroke,
+			AbbreviatedData: "M 0 0 L " + ofdNumber(before.W) + " 0 L " + ofdNumber(before.W) + " " + ofdNumber(before.H) + " L 0 " + ofdNumber(before.H) + " C"}
+		(*clips).Clip = append((*clips).Clip, Clip{Area: []ClipArea{{CTM: clipMatrix.String(), Path: []PathObject{path}}}})
+	}
+	return object
+}
+
+// transformObjectClips 变换裁剪区域，不修改原始裁剪数据
+// 入参: clips 裁剪集合, matrix 对象边界坐标中的变换
+// 返回: *Clips 变换后的裁剪集合
+func transformObjectClips(clips *Clips, matrix Matrix) *Clips {
+	result := *clips
+	result.Clip = slices.Clone(clips.Clip)
+	for i := range result.Clip {
+		result.Clip[i].Area = slices.Clone(clips.Clip[i].Area)
+		for j := range result.Clip[i].Area {
+			area := &result.Clip[i].Area[j]
+			area.CTM = matrix.Multiply(NewMatrix(area.CTM)).String()
+		}
+	}
+	return &result
+}
+
+// cropImageObject 更新图片副本的裁剪和局部坐标，不修改资源
+// 入参: image 图片对象副本, box 页面毫米坐标中的保留范围
+// 返回: error 错误信息
+func cropImageObject(image *ImageObject, box Box) error {
+	full, err := image.ImageBounds()
+	if err != nil {
+		return err
+	}
+	if err := validateCreationBox(box); err != nil {
+		return err
+	}
+	if box.X < full.X-1e-9 || box.Y < full.Y-1e-9 || box.X+box.W > full.X+full.W+1e-9 || box.Y+box.H > full.Y+full.H+1e-9 {
+		return fmt.Errorf("crop must stay within the image bounds")
+	}
+	before, _ := ParseBox(image.Boundary)
+	matrix := NewMatrix(image.CTM)
+	if image.CTM == "" {
+		matrix = Matrix{a: before.W, d: before.H}
+	}
+	if box.X != before.X || box.Y != before.Y {
+		x, y := matrix.e+(before.X-box.X), matrix.f+(before.Y-box.Y)
+		if !finite(x) {
+			x = before.X + matrix.e - box.X
+		}
+		if !finite(y) {
+			y = before.Y + matrix.f - box.Y
+		}
+		matrix.e, matrix.f = x, y
+	}
+	if !finite(matrix.e) || !finite(matrix.f) {
+		return fmt.Errorf("crop transform exceeds finite range")
+	}
+	next := *image
+	if image.CTM == "" || box.X != before.X || box.Y != before.Y {
+		next.CTM = matrix.String()
+	}
+	next.Boundary, next.Clips = editorBoxString(box), nil
+	if box != full {
+		path, err := NewShape(ShapeRectangle, Box{W: box.W, H: box.H})
+		if err != nil {
+			return err
+		}
+		fill, stroke := true, false
+		path.Fill, path.Stroke = &fill, &stroke
+		next.Clips = &Clips{Clip: []Clip{{Area: []ClipArea{{Path: []PathObject{path}}}}}}
+	}
+	*image = next
+	return nil
+}
+
+// imageFitBasis 提取图片变换的单位轴方向，保留旋转、镜像和斜切夹角
+// 入参: ctm 原始变换，空值使用默认方向
+// 返回: Matrix 单位轴矩阵, error 无效或退化变换
+func imageFitBasis(ctm string) (Matrix, error) {
+	if ctm != "" {
+		if _, err := creationNumbers(ctm, 6); err != nil {
+			return Matrix{}, err
+		}
+	}
+	m := NewMatrix(ctm)
+	x, y := math.Hypot(m.a, m.b), math.Hypot(m.c, m.d)
+	if x == 0 || y == 0 || !finite(x) || !finite(y) {
+		return Matrix{}, fmt.Errorf("image fitting requires nonzero finite axes")
+	}
+	m.a, m.b, m.c, m.d = m.a/x, m.b/x, m.c/y, m.d/y
+	m.e, m.f = 0, 0
+	if _, ok := m.Invert(); !ok {
+		return Matrix{}, fmt.Errorf("image fitting requires an invertible transform")
+	}
+	return m, nil
+}
+
+// editorBoxString 使用统一精度序列化创作边界
+// 入参: box 矩形范围
+// 返回: string 标准Boundary属性值
+func editorBoxString(box Box) string {
+	return fmt.Sprintf("%s %s %s %s", ofdNumber(box.X), ofdNumber(box.Y), ofdNumber(box.W), ofdNumber(box.H))
+}
+
 // TransformObjectsMatrix 对同页对象施加可逆页面变换，保留原文、资源与裁剪
 // 入参: page 页面索引, ids 对象标识, matrix 页面变换
 // 返回: error 错误信息
@@ -246,40 +431,13 @@ func (e *Editor) transformObject(object GraphicObject, dx, dy, scale float64) (G
 	return transformEditorObject(object, dx, dy, scale)
 }
 
-// editorRotation 返回无浮点误差的直角旋转矩阵
-// 入参: degrees 顺时针角度，仅支持90度的整数倍
-// 返回: Matrix 旋转, error 角度错误
-func editorRotation(degrees int) (Matrix, error) {
-	if degrees%90 != 0 {
-		return Matrix{}, fmt.Errorf("rotation must be a multiple of 90 degrees")
-	}
-	turn := (degrees%360 + 360) % 360 / 90
-	return [...]Matrix{IdentityMatrix, {b: 1, c: -1}, {a: -1, d: -1}, {b: -1, c: 1}}[turn], nil
-}
-
-// editorFlip 返回指定方向的镜像矩阵
-// 入参: axis 为horizontal或vertical
-// 返回: Matrix 镜像, error 方向错误
-func editorFlip(axis string) (Matrix, error) {
-	matrix := IdentityMatrix
-	switch axis {
-	case "horizontal":
-		matrix.a = -1
-	case "vertical":
-		matrix.d = -1
-	default:
-		return Matrix{}, fmt.Errorf("invalid flip axis %q", axis)
-	}
-	return matrix, nil
-}
-
 // orientObjects 更新Boundary与CTM，不重排文字或重采样图片
 // 入参: page 页面索引, ids 对象标识, matrix 直角旋转或镜像矩阵
 // 返回: error 错误信息
 func (e *Editor) orientObjects(page int, ids []string, matrix Matrix) error {
 	defer e.bindPageIndex(page)()
 	objects, _, err := e.selectedObjects(page, ids)
-	if err != nil || len(objects) == 0 || matrix == IdentityMatrix {
+	if err != nil || len(objects) == 0 || matrix == IdentityMatrix() {
 		return err
 	}
 	boxes, err := e.objectBounds(page, objects)
@@ -345,13 +503,6 @@ func (e *Editor) transformMatrix(object GraphicObject, matrix Matrix) (GraphicOb
 	return e.transformImageResource(object, matrix, origin, renderer)
 }
 
-// imageTransformNeedsContainer 判断图片变换是否需保留边框或隐式坐标中的动作
-// 入参: object 图片对象, matrix 所在坐标系中的变换
-// 返回: bool 是否需要复合资源
-func imageTransformNeedsContainer(object ImageObject, matrix Matrix) bool {
-	return object.Border != nil || object.CTM == "" && len(object.Actions) != 0 && (matrix.a != 1 || matrix.b != 0 || matrix.c != 0 || matrix.d != 1)
-}
-
 // objectStretchable 允许图片及纯图片资源独立调整宽高，内联组合仍保持比例
 // 入参: object 对象, visiting 当前资源链
 // 返回: bool 是否支持独立宽高
@@ -411,7 +562,11 @@ func (e *Editor) transformImageResource(object GraphicObject, matrix Matrix, ori
 	}
 	extent := unionTextBox(box, visible)
 	child := cloneEditorData(object)
-	child.ImageObject.ID = e.nextID()
+	childID, err := e.nextID()
+	if err != nil {
+		return GraphicObject{}, err
+	}
+	child.ImageObject.ID = childID
 	child.ImageObject.Boundary = editorBoxString(Box{X: box.X - extent.X, Y: box.Y - extent.Y, W: box.W, H: box.H})
 	var data []byte
 	if origin == nil {
@@ -429,7 +584,10 @@ func (e *Editor) transformImageResource(object GraphicObject, matrix Matrix, ori
 	if err != nil {
 		return GraphicObject{}, err
 	}
-	id := e.nextID()
+	id, err := e.nextID()
+	if err != nil {
+		return GraphicObject{}, err
+	}
 	attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: id}, {Name: xml.Name{Local: "Width"}, Value: ofdNumber(extent.W)}, {Name: xml.Name{Local: "Height"}, Value: ofdNumber(extent.H)}}
 	data, err = editorXMLContainer("CompositeGraphicUnit", attrs, bytes.TrimPrefix(content, []byte(xml.Header)))
 	if err != nil {
@@ -451,150 +609,6 @@ func (e *Editor) transformImageResource(object GraphicObject, matrix Matrix, ori
 	e.resources = append(e.resources, resource)
 	object = GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: CompositeGraphicUnit{ID: object.ImageObject.ID, ResourceID: id, Boundary: editorBoxString(extent)}}
 	return transformEditorMatrix(object, matrix), nil
-}
-
-// transformEditorMatrix 在所在坐标系中变换对象，保留局部绘制数据和裁剪
-// 入参: object 对象, matrix 所在坐标系中的变换
-// 返回: GraphicObject 变换后的独立对象
-func transformEditorMatrix(object GraphicObject, matrix Matrix) GraphicObject {
-	var boundary, ctm *string
-	switch object.Type {
-	case "TextObject":
-		boundary, ctm = &object.TextObject.Boundary, &object.TextObject.CTM
-	case "PathObject":
-		boundary, ctm = &object.PathObject.Boundary, &object.PathObject.CTM
-	case "ImageObject":
-		boundary, ctm = &object.ImageObject.Boundary, &object.ImageObject.CTM
-	case "CompositeObject", "CompositeGraphicUnit":
-		boundary, ctm = &object.CompositeGraphicUnit.Boundary, &object.CompositeGraphicUnit.CTM
-	}
-	before, _ := ParseBox(*boundary)
-	after := matrix.TransformBox(before)
-	if object.Type == "ImageObject" && *ctm == "" {
-		if matrix.a == 1 && matrix.b == 0 && matrix.c == 0 && matrix.d == 1 {
-			*boundary = editorBoxString(after)
-			return object
-		}
-		*ctm = Matrix{a: before.W, d: before.H}.String()
-	}
-	local := TranslationMatrix(-after.X, -after.Y).Multiply(matrix).Multiply(TranslationMatrix(before.X, before.Y))
-	*ctm = local.Multiply(NewMatrix(*ctm)).String()
-	*boundary = editorBoxString(after)
-	if clips := editorObjectClips(&object); *clips != nil && !(*clips).usesObjectMatrix() {
-		*clips = transformObjectClips(*clips, local)
-	}
-	if !basegeom.AxisAligned(basegeom.MatrixFromValues(matrix.Values())) && before.W > 0 && before.H > 0 {
-		clips := editorObjectClips(&object)
-		if *clips == nil {
-			*clips = &Clips{}
-		} else {
-			copy := **clips
-			copy.Clip = slices.Clone(copy.Clip)
-			*clips = &copy
-		}
-		clipMatrix := local
-		if (*clips).usesObjectMatrix() {
-			if inverse, ok := NewMatrix(*ctm).Invert(); ok {
-				clipMatrix = inverse.Multiply(local)
-			} else {
-				*clips = transformObjectClips(*clips, NewMatrix(*ctm))
-				(*clips).TransFlag = nil
-			}
-		}
-		fill, stroke := true, false
-		path := PathObject{Boundary: editorBoxString(Box{W: before.W, H: before.H}), Fill: &fill, Stroke: &stroke,
-			AbbreviatedData: "M 0 0 L " + ofdNumber(before.W) + " 0 L " + ofdNumber(before.W) + " " + ofdNumber(before.H) + " L 0 " + ofdNumber(before.H) + " C"}
-		(*clips).Clip = append((*clips).Clip, Clip{Area: []ClipArea{{CTM: clipMatrix.String(), Path: []PathObject{path}}}})
-	}
-	return object
-}
-
-// transformObjectClips 变换裁剪区域，不修改原始裁剪数据
-// 入参: clips 裁剪集合, matrix 对象边界坐标中的变换
-// 返回: *Clips 变换后的裁剪集合
-func transformObjectClips(clips *Clips, matrix Matrix) *Clips {
-	result := *clips
-	result.Clip = slices.Clone(clips.Clip)
-	for i := range result.Clip {
-		result.Clip[i].Area = slices.Clone(clips.Clip[i].Area)
-		for j := range result.Clip[i].Area {
-			area := &result.Clip[i].Area[j]
-			area.CTM = matrix.Multiply(NewMatrix(area.CTM)).String()
-		}
-	}
-	return &result
-}
-
-// cropImageObject 更新图片副本的裁剪和局部坐标，不修改资源
-// 入参: image 图片对象副本, box 页面毫米坐标中的保留范围
-// 返回: error 错误信息
-func cropImageObject(image *ImageObject, box Box) error {
-	full, err := image.ImageBounds()
-	if err != nil {
-		return err
-	}
-	if err := validateCreationBox(box); err != nil {
-		return err
-	}
-	if box.X < full.X-1e-9 || box.Y < full.Y-1e-9 || box.X+box.W > full.X+full.W+1e-9 || box.Y+box.H > full.Y+full.H+1e-9 {
-		return fmt.Errorf("crop must stay within the image bounds")
-	}
-	before, _ := ParseBox(image.Boundary)
-	matrix := NewMatrix(image.CTM)
-	if image.CTM == "" {
-		matrix = Matrix{a: before.W, d: before.H}
-	}
-	if box.X != before.X || box.Y != before.Y {
-		x, y := matrix.e+(before.X-box.X), matrix.f+(before.Y-box.Y)
-		if !finite(x) {
-			x = before.X + matrix.e - box.X
-		}
-		if !finite(y) {
-			y = before.Y + matrix.f - box.Y
-		}
-		matrix.e, matrix.f = x, y
-	}
-	if !finite(matrix.e) || !finite(matrix.f) {
-		return fmt.Errorf("crop transform exceeds finite range")
-	}
-	next := *image
-	if image.CTM == "" || box.X != before.X || box.Y != before.Y {
-		next.CTM = matrix.String()
-	}
-	next.Boundary, next.Clips = editorBoxString(box), nil
-	if box != full {
-		path, err := NewShape(ShapeRectangle, Box{W: box.W, H: box.H})
-		if err != nil {
-			return err
-		}
-		fill, stroke := true, false
-		path.Fill, path.Stroke = &fill, &stroke
-		next.Clips = &Clips{Clip: []Clip{{Area: []ClipArea{{Path: []PathObject{path}}}}}}
-	}
-	*image = next
-	return nil
-}
-
-// imageFitBasis 提取图片变换的单位轴方向，保留旋转、镜像和斜切夹角
-// 入参: ctm 原始变换，空值使用默认方向
-// 返回: Matrix 单位轴矩阵, error 无效或退化变换
-func imageFitBasis(ctm string) (Matrix, error) {
-	if ctm != "" {
-		if _, err := creationNumbers(ctm, 6); err != nil {
-			return Matrix{}, err
-		}
-	}
-	m := NewMatrix(ctm)
-	x, y := math.Hypot(m.a, m.b), math.Hypot(m.c, m.d)
-	if x == 0 || y == 0 || !finite(x) || !finite(y) {
-		return Matrix{}, fmt.Errorf("image fitting requires nonzero finite axes")
-	}
-	m.a, m.b, m.c, m.d = m.a/x, m.b/x, m.c/y, m.d/y
-	m.e, m.f = 0, 0
-	if _, ok := m.Invert(); !ok {
-		return Matrix{}, fmt.Errorf("image fitting requires an invertible transform")
-	}
-	return m, nil
 }
 
 // fitImage 按原像素比例和轴方向布局，适应使用变换后边界，填充使用逆变换后的框范围
@@ -644,11 +658,4 @@ func (e *Editor) fitImage(obj *ImageObject, mode string) error {
 		return cropImageObject(obj, box)
 	}
 	return nil
-}
-
-// editorBoxString 使用统一精度序列化创作边界
-// 入参: box 矩形范围
-// 返回: string 标准Boundary属性值
-func editorBoxString(box Box) string {
-	return fmt.Sprintf("%s %s %s %s", ofdNumber(box.X), ofdNumber(box.Y), ofdNumber(box.W), ofdNumber(box.H))
 }

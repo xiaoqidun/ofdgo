@@ -37,17 +37,31 @@ func (v *editorValidation) addOwnedVector(ctx context.Context, objects []Graphic
 	if !finite(width) || !finite(height) || width < 0 || height < 0 {
 		return "", fmt.Errorf("invalid vector dimensions")
 	}
+	savedMaxID := e.maxID
+	committed := false
+	defer func() {
+		if !committed {
+			e.maxID = savedMaxID
+		}
+	}()
 	for index, object := range objects {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		prepared, err := v.prepareObject(e.nextID(), object)
+		objID, err := e.nextID()
+		if err != nil {
+			return "", err
+		}
+		prepared, err := v.prepareObject(objID, object)
 		if err != nil {
 			return "", err
 		}
 		objects[index] = prepared
 	}
-	id := e.nextID()
+	id, err := e.nextID()
+	if err != nil {
+		return "", err
+	}
 	name := e.packageName("Res/Composites/Composite_" + id + ".xml")
 	scan := &editorReferenceScan{refs: &editorResourceRefs{ids: make(map[string]bool), files: make(map[string]bool), fonts: make(map[string]*editorFontUsage)}, objects: make(map[string]bool), name: name, safe: true}
 	data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) {
@@ -82,10 +96,14 @@ func (v *editorValidation) addOwnedVector(ctx context.Context, objects []Graphic
 			return "", err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	e.resources = append(e.resources, resource)
 	if v.vectors == nil {
 		v.vectors = make(map[string]bool)
 	}
 	v.vectors[id] = true
-	return id, ctx.Err()
+	committed = true
+	return id, nil
 }

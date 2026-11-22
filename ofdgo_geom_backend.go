@@ -20,9 +20,6 @@ import (
 	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 )
 
-// GeometryOperation 指定路径填充区域的布尔运算
-type GeometryOperation uint8
-
 // 路径填充区域的交集、并集、差集和异或运算
 const (
 	GeometryIntersect GeometryOperation = iota
@@ -31,12 +28,23 @@ const (
 	GeometryXor
 )
 
+// GeometryOperation 指定路径填充区域的布尔运算
+type GeometryOperation uint8
+
 // StrokeOptions 描述描边参数，长度单位为毫米
 // Width须为正有限数；Cap和Join使用OFD名称，空值分别采用Butt和Miter
 // MiterLimit为尖角长度与半线宽的比值上限，MiterLimitSet区分显式零值与默认值
 // DashOffset为虚线起始偏移，允许负值；Dashes交替指定实线段和间隔长度，奇数项按重复一遍处理
 // Tolerance为曲线展开的误差目标，0采用后端默认精度
-type StrokeOptions = basegeom.StrokeOptions
+type StrokeOptions struct {
+	Width         float64
+	Cap, Join     string
+	MiterLimit    float64
+	MiterLimitSet bool
+	DashOffset    float64
+	Tolerance     float64
+	Dashes        []float64
+}
 
 // GeometryBackend 操作库自有路径，坐标以页面左上角为原点，不修改任何输入
 // Clip返回nil表示不裁剪，空路径指针表示完全裁去，矩阵将裁剪坐标映射到页面坐标
@@ -57,39 +65,6 @@ type GeometryCurves interface {
 	Curves(path GeometryPath) (GeometryPath, error)
 }
 
-// Geometry 返回当前几何后端，不隐式恢复默认实现
-// 返回: GeometryBackend 几何后端, error 未配置错误
-func (r *Renderer) Geometry() (GeometryBackend, error) {
-	if r.backends.Geometry == nil {
-		return nil, fmt.Errorf("geometry: %w", ErrBackendUnavailable)
-	}
-	return r.backends.Geometry, nil
-}
-
-// PathOutline 使用配置的几何后端生成页面坐标中的SVG轮廓
-// 入参: object 路径对象
-// 返回: string SVG路径, error 几何或编码错误
-func (r *Renderer) PathOutline(object PathObject) (string, error) {
-	geometry, err := r.Geometry()
-	if err != nil {
-		return "", err
-	}
-	path, err := geometry.Path(object)
-	if err != nil {
-		return "", err
-	}
-	return path.SVG()
-}
-
-// Geometry 返回编辑器配置的几何后端
-// 返回: GeometryBackend 几何后端, error 未配置错误
-func (e *Editor) Geometry() (GeometryBackend, error) {
-	if e.backends.Geometry == nil {
-		return nil, fmt.Errorf("geometry: %w", ErrBackendUnavailable)
-	}
-	return e.backends.Geometry, nil
-}
-
 // clipGeometry 将非零填充路径与页面裁剪相交
 // 入参: geometry 几何后端, path 页面路径, clip 页面裁剪
 // 返回: GeometryPath 裁剪路径, error 几何错误
@@ -100,14 +75,14 @@ func clipGeometry(geometry GeometryBackend, path GeometryPath, clip *GeometryPat
 	if len(*clip) == 0 {
 		return nil, nil
 	}
-	if rect, ok := basegeom.RectangleBounds(basegeom.Path(*clip)); ok {
-		if bounds, ok := basegeom.RectangleBounds(basegeom.Path(path)); ok {
+	if rect, ok := geometryRectangleBounds(*clip); ok {
+		if bounds, ok := geometryRectangleBounds(path); ok {
 			left, top := max(rect.X, bounds.X), max(rect.Y, bounds.Y)
 			right, bottom := min(rect.X+rect.W, bounds.X+bounds.W), min(rect.Y+rect.H, bounds.Y+bounds.H)
 			if right <= left || bottom <= top {
 				return nil, nil
 			}
-			return GeometryPath(basegeom.Rectangle(Box{X: left, Y: top, W: right - left, H: bottom - top})), nil
+			return geometryRectangle(Box{X: left, Y: top, W: right - left, H: bottom - top}), nil
 		}
 		if err := path.validate(); err != nil {
 			return nil, err
@@ -141,7 +116,7 @@ func clipGeometry(geometry GeometryBackend, path GeometryPath, clip *GeometryPat
 			return path, nil
 		}
 	}
-	if rect, ok := basegeom.RectangleBounds(basegeom.Path(path)); ok {
+	if rect, ok := geometryRectangleBounds(path); ok {
 		bounds, err := geometry.Bounds(*clip)
 		if err != nil {
 			return nil, err
@@ -151,4 +126,44 @@ func clipGeometry(geometry GeometryBackend, path GeometryPath, clip *GeometryPat
 		}
 	}
 	return geometry.Combine(path, *clip, GeometryIntersect)
+}
+
+// validateStrokeOptions 校验描边选项的合法性
+// 入参: options 描边样式
+// 返回: error 参数错误
+func validateStrokeOptions(options StrokeOptions) error {
+	return basegeom.ValidateStroke(basegeom.StrokeOptions(options))
+}
+
+// Geometry 返回当前几何后端，不隐式恢复默认实现
+// 返回: GeometryBackend 几何后端, error 未配置错误
+func (r *Renderer) Geometry() (GeometryBackend, error) {
+	if r.backends.Geometry == nil {
+		return nil, fmt.Errorf("geometry: %w", ErrBackendUnavailable)
+	}
+	return r.backends.Geometry, nil
+}
+
+// PathOutline 使用配置的几何后端生成页面坐标中的SVG轮廓
+// 入参: object 路径对象
+// 返回: string SVG路径, error 几何或编码错误
+func (r *Renderer) PathOutline(object PathObject) (string, error) {
+	geometry, err := r.Geometry()
+	if err != nil {
+		return "", err
+	}
+	path, err := geometry.Path(object)
+	if err != nil {
+		return "", err
+	}
+	return path.SVG()
+}
+
+// Geometry 返回编辑器配置的几何后端
+// 返回: GeometryBackend 几何后端, error 未配置错误
+func (e *Editor) Geometry() (GeometryBackend, error) {
+	if e.backends.Geometry == nil {
+		return nil, fmt.Errorf("geometry: %w", ErrBackendUnavailable)
+	}
+	return e.backends.Geometry, nil
 }

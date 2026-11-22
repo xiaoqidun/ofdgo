@@ -40,23 +40,6 @@ func mergeGraphicObjectAlpha(obj GraphicObject, alpha *int) GraphicObject {
 	return obj
 }
 
-// drawParamDefaults 合并绘制参数默认样式
-// 入参: id 绘制参数ID, defaults 默认绘制参数
-// 返回: *DrawParam 合并后的绘制参数
-func (r *Renderer) drawParamDefaults(id string, defaults *DrawParam) *DrawParam {
-	if id == "" {
-		return defaults
-	}
-	dp := r.getDrawParam(id, nil)
-	if dp == nil {
-		return defaults
-	}
-	if defaults == nil {
-		return dp
-	}
-	return mergeDrawParam(*defaults, dp)
-}
-
 // mergeDrawParam 合并绘制参数属性
 // 入参: base 基础绘制参数, dp 覆盖绘制参数
 // 返回: *DrawParam 合并后的绘制参数
@@ -71,9 +54,9 @@ func mergeDrawParam(base DrawParam, dp *DrawParam) *DrawParam {
 	if dp.Cap != "" {
 		base.Cap = dp.Cap
 	}
-	if dp.DashPattern != "" || dp.dashPatternSet {
+	if dp.DashPattern != "" || dp.DashPatternSet {
 		base.DashPattern = dp.DashPattern
-		base.dashPatternSet = dp.dashPatternSet
+		base.DashPatternSet = dp.DashPatternSet
 	}
 	if dp.DashOffset != nil {
 		base.DashOffset = dp.DashOffset
@@ -105,13 +88,30 @@ func mergeDrawParam(base DrawParam, dp *DrawParam) *DrawParam {
 	return &base
 }
 
+// drawParamDefaults 合并绘制参数默认样式
+// 入参: id 绘制参数ID, defaults 默认绘制参数
+// 返回: *DrawParam 合并后的绘制参数
+func (r *Renderer) drawParamDefaults(id string, defaults *DrawParam) *DrawParam {
+	if id == "" {
+		return defaults
+	}
+	dp := r.getDrawParam(id, nil)
+	if dp == nil {
+		return defaults
+	}
+	if defaults == nil {
+		return dp
+	}
+	return mergeDrawParam(*defaults, dp)
+}
+
 // compositeGraphicUnitDefaults 合并复合图元直接声明的描边属性与继承样式
 // 入参: unit 复合图元, defaults 父级默认绘制参数
 // 返回: *DrawParam 合并后的绘制参数
 func (r *Renderer) compositeGraphicUnitDefaults(unit CompositeGraphicUnit, defaults *DrawParam) *DrawParam {
 	merged := r.drawParamDefaults(unit.DrawParam, defaults)
 	hasDirect := unit.LineWidth > 0 || unit.LineWidthSet || unit.Join != "" || unit.Cap != "" ||
-		unit.DashPattern != "" || unit.dashPatternSet || unit.DashOffset != nil || unit.MiterLimit > 0 || unit.MiterLimitSet
+		unit.DashPattern != "" || unit.DashPatternSet || unit.DashOffset != nil || unit.MiterLimit > 0 || unit.MiterLimitSet
 	if !hasDirect {
 		return merged
 	}
@@ -122,7 +122,7 @@ func (r *Renderer) compositeGraphicUnitDefaults(unit CompositeGraphicUnit, defau
 	override := &DrawParam{
 		LineWidth: unit.LineWidth, LineWidthSet: unit.LineWidthSet,
 		Join: unit.Join, Cap: unit.Cap,
-		DashPattern: unit.DashPattern, dashPatternSet: unit.dashPatternSet, DashOffset: unit.DashOffset,
+		DashPattern: unit.DashPattern, DashPatternSet: unit.DashPatternSet, DashOffset: unit.DashOffset,
 		MiterLimit: unit.MiterLimit, MiterLimitSet: unit.MiterLimitSet,
 	}
 	return mergeDrawParam(base, override)
@@ -132,7 +132,7 @@ func (r *Renderer) compositeGraphicUnitDefaults(unit CompositeGraphicUnit, defau
 // 入参: id 参数标识, visited 已访问资源
 // 返回: *DrawParam 绘制参数
 func (r *Renderer) getDrawParam(id string, visited map[*DrawParam]bool) *DrawParam {
-	dp, _ := resourceValue(r.DrawParams, id)
+	dp, _ := resourceValue(r.drawParams, id)
 	if dp == nil || visited[dp] {
 		return nil
 	}

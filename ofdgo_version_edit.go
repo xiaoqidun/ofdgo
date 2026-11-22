@@ -33,6 +33,19 @@ type versionEditFile struct {
 	links  []versionEditLink
 }
 
+// versionEditLink 记录文件引用的位置与包内目标
+type versionEditLink struct {
+	node      *editorXML
+	attribute string
+	target    string
+}
+
+// versionEditGraph 保存一个入口的结构文件与全部直接、间接文件依赖
+type versionEditGraph struct {
+	files map[string]*versionEditFile
+	used  map[string]bool
+}
+
 // rewrite 按需读取并更新已隔离文件的引用，保留其余XML及相对路径基准
 // 入参: ctx 取消上下文, paths 原路径到新路径的映射
 // 返回: []byte 更新后的XML，未改动时返回已加载原文或nil, error 读取或属性编码错误
@@ -102,19 +115,6 @@ func (file *versionEditFile) rewrite(ctx context.Context, paths map[string]strin
 		return file.data, nil
 	}
 	return editorPatchXML(source, patches), ctx.Err()
-}
-
-// versionEditLink 记录文件引用的位置与包内目标
-type versionEditLink struct {
-	node      *editorXML
-	attribute string
-	target    string
-}
-
-// versionEditGraph 保存一个入口的结构文件与全部直接、间接文件依赖
-type versionEditGraph struct {
-	files map[string]*versionEditFile
-	used  map[string]bool
 }
 
 // versionFileDependencies 流式汇总版本入口的标准文件引用，不保留页面节点或读取二进制资源
@@ -236,16 +236,16 @@ func (r *Reader) versionSharedFiles(ctx context.Context) (map[string]bool, error
 // currentVersioned 判断当前文档是否声明版本列表
 // 返回: bool 是否版本化文档
 func (r *Reader) currentVersioned() bool {
-	return r != nil && r.OFD != nil && r.documentIndex >= 0 && r.documentIndex < len(r.OFD.DocBody) && r.OFD.DocBody[r.documentIndex].versioned
+	return r != nil && r.ofd != nil && r.documentIndex >= 0 && r.documentIndex < len(r.ofd.DocBody) && r.ofd.DocBody[r.documentIndex].versioned
 }
 
 // packageVersioned 判断包内是否存在声明版本列表的文档
 // 返回: bool 整包是否包含版本化文档
 func (r *Reader) packageVersioned() bool {
-	if r == nil || r.OFD == nil {
+	if r == nil || r.ofd == nil {
 		return false
 	}
-	for _, body := range r.OFD.DocBody {
+	for _, body := range r.ofd.DocBody {
 		if body.versioned {
 			return true
 		}
@@ -260,7 +260,7 @@ func (r *Reader) documentNonCurrentVersionFiles(ctx context.Context, index int) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if r == nil || r.OFD == nil || index < 0 || index >= len(r.OFD.DocBody) || !r.OFD.DocBody[index].versioned {
+	if r == nil || r.ofd == nil || index < 0 || index >= len(r.ofd.DocBody) || !r.ofd.DocBody[index].versioned {
 		return nil, nil
 	}
 	otherDoc := index != r.documentIndex
@@ -299,8 +299,8 @@ func (r *Reader) documentNonCurrentVersionFiles(ctx context.Context, index int) 
 			}
 		}
 	}
-	if (otherDoc || view.versionInfo != nil) && view.OFD.DocBody[index].DocRoot != "" {
-		entry, err := versionFileLocation("OFD.xml", view.OFD.DocBody[index].DocRoot)
+	if (otherDoc || view.versionInfo != nil) && view.ofd.DocBody[index].DocRoot != "" {
+		entry, err := versionFileLocation("OFD.xml", view.ofd.DocBody[index].DocRoot)
 		if err != nil {
 			return nil, err
 		}
@@ -380,7 +380,7 @@ func (r *Reader) versionPreservedFiles(ctx context.Context) (map[string]bool, er
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if !r.OFD.DocBody[index].versioned {
+		if !r.ofd.DocBody[index].versioned {
 			continue
 		}
 		files, err := r.documentNonCurrentVersionFiles(ctx, index)

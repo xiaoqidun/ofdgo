@@ -66,6 +66,293 @@ type ResourceLocation struct {
 	Bounds Box    `json:"bounds"`
 }
 
+// resourceCatalog 保存当前资源声明和原文位置，供查询及隔离修改复用
+type resourceCatalog struct {
+	scan        *editorFontDocument
+	docRes      map[string]bool
+	docScope    []string
+	pageScopes  map[string][]string
+	fileScopes  map[string][]string
+	annotByPage map[string][]string
+	extParents  map[string]string
+	resKinds    map[string]map[string]string
+	itemIndex   map[string]int
+	items       []ResourceInfo
+	itemFiles   []string
+	nodes       map[string]editorFontText
+	images      []editorFontText
+	fileIDs     map[string]string
+}
+
+// resourcePageFrame 保存流式页面扫描的图元归属及直接文本位置
+type resourcePageFrame struct {
+	name   string
+	object string
+	start  int
+	role   string
+	link   bool
+}
+
+// rawResourceRef 记录尚未按作用域归属的原始资源引用事件
+type rawResourceRef struct {
+	ref   ResourceReference
+	elem  string
+	value string
+}
+
+// scanResourcePage 流式收集常规页面引用与PageRes声明，特殊结构回退到完整节点扫描
+// 入参: ctx 取消上下文, file 页面原文, pages 文件页码, declaredPageRes 页面局部资源声明, rawRefs 原始引用列表
+// 返回: bool 是否已处理, bool 引用是否不安全, []string 依赖路径, error 解析或取消错误
+func scanResourcePage(ctx context.Context, file *editorFontXML, pages map[string]int, declaredPageRes map[string][]string, rawRefs *[]rawResourceRef) (bool, bool, []string, error) {
+	d := xml.NewDecoder(&editorXMLReader{data: file.data, ctx: ctx})
+	var stack []resourcePageFrame
+	var links []string
+	var localPageRes []string
+	var localRefs []rawResourceRef
+	cleanName := cleanPackagePath(file.name)
+	page, exists := pages[cleanName]
+	if !exists {
+		page = -1
+	}
+	seen, unsafe := false, false
+	add := func(role, value, object, elem string) {
+		if value != "" {
+			localRefs = append(localRefs, rawResourceRef{
+				ref:   ResourceReference{File: file.name, Page: page, Object: object, Role: role},
+				elem:  elem,
+				value: value,
+			})
+		}
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return true, false, nil, err
+		}
+		start := int(d.InputOffset())
+		token, err := d.Token()
+		if err == io.EOF {
+			if !seen {
+				return false, false, nil, nil
+			}
+			if len(localPageRes) > 0 {
+				declaredPageRes[cleanName] = append(declaredPageRes[cleanName], localPageRes...)
+			}
+			*rawRefs = append(*rawRefs, localRefs...)
+			return true, unsafe, links, nil
+		}
+		if err != nil {
+			return true, false, nil, err
+		}
+		switch token := token.(type) {
+		case xml.StartElement:
+			if len(stack) == 0 {
+				if seen {
+					return true, false, nil, fmt.Errorf("multiple XML roots")
+				}
+				if token.Name.Local != "Page" {
+					return false, false, nil, nil
+				}
+				seen = true
+			}
+			if classifyOFDNamespace(token.Name.Space) == ofdXMLUnknown || slices.Contains([]string{"Attachments", "Signatures", "CustomTags", "Extensions", "ExtendData", "Data"}, token.Name.Local) {
+				return false, false, nil, nil
+			}
+			for _, attr := range token.Attr {
+				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace {
+					return false, false, nil, nil
+				}
+			}
+			frame := resourcePageFrame{name: token.Name.Local, start: start}
+			parent := ""
+			if len(stack) != 0 {
+				outer := stack[len(stack)-1]
+				if outer.role != "" || outer.link {
+					return false, false, nil, nil
+				}
+				frame.object, parent = outer.object, outer.name
+			}
+			node := editorXML{name: token.Name, attrs: token.Attr}
+			if slices.Contains([]string{"TextObject", "PathObject", "ImageObject", "CompositeObject"}, frame.name) {
+				frame.object = node.attr("ID")
+			}
+			if frame.name == "TextObject" || frame.name == "Text" && parent == "Area" {
+				unsafe = unsafe || editorResourceID(node.attr("Font")) == ""
+			}
+			for _, attr := range token.Attr {
+				if attr.Name.Space == "" && (editorResourceReferenceKind(attr.Name.Local, false) == editorReferenceID || attr.Name.Local == "AttachID") {
+					add(attr.Name.Local, attr.Value, frame.object, frame.name)
+				}
+			}
+			if slices.Contains([]string{"Thumbnail", "Substitution", "DefaultCS"}, frame.name) {
+				frame.role = frame.name
+			}
+			value := ""
+			switch frame.name {
+			case "PublicRes", "DocumentRes", "PageRes", "Annotations":
+				frame.link = true
+			case "Page", "TemplatePage", "CompositeGraphicUnit":
+				value = node.attr("BaseLoc")
+			case "PageAnnot":
+				value = node.attr("FileLoc")
+			case "DrawParam":
+				value = node.attr("Link")
+			}
+			if value != "" {
+				links = append(links, resolveResourcePath(file.name, "", value))
+			}
+			stack = append(stack, frame)
+		case xml.EndElement:
+			frame := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if frame.role != "" || frame.link {
+				node := editorXML{start: frame.start, end: int(d.InputOffset())}
+				value := strings.TrimSpace(editorImportText(file.data, &node))
+				if frame.role != "" {
+					add(frame.role, value, frame.object, frame.name)
+				}
+				if frame.link && value != "" {
+					resolved := resolveResourcePath(file.name, "", value)
+					links = append(links, resolved)
+					if frame.name == "PageRes" && len(stack) == 1 && stack[0].name == "Page" {
+						localPageRes = append(localPageRes, cleanPackagePath(resolved))
+					}
+				}
+			}
+		}
+	}
+}
+
+// resourceMatches 判断资源条目是否匹配指定的资源类型与标识
+// 入参: item 资源条目, kind 资源类型, id 资源标识
+// 返回: bool 是否匹配
+func resourceMatches(item ResourceInfo, kind, id string) bool {
+	return item.Kind == kind && (item.ID == id || kind != "Attachment" && sameResourceID(item.ID, id))
+}
+
+// findResource 查找当前视图内的资源，不接受调用方提供的任意包路径
+// 入参: items 资源列表, kind 资源类型, id 资源标识
+// 返回: ResourceInfo 资源信息, error 未找到资源
+func findResource(items []ResourceInfo, kind, id string) (ResourceInfo, error) {
+	item, _, err := findResourceWithCount(items, kind, id)
+	return item, err
+}
+
+// findResourceWithCount 查找首个匹配资源并统计同名同类型声明数量
+// 入参: items 资源列表, kind 资源类型, id 资源标识
+// 返回: ResourceInfo 首个匹配资源, int 匹配总数, error 未找到资源
+func findResourceWithCount(items []ResourceInfo, kind, id string) (ResourceInfo, int, error) {
+	var first ResourceInfo
+	count := 0
+	for _, item := range items {
+		if resourceMatches(item, kind, id) {
+			if count == 0 {
+				first = item
+			}
+			count++
+		}
+	}
+	if count == 0 {
+		return ResourceInfo{}, 0, fmt.Errorf("resource not found: %s/%s", kind, id)
+	}
+	return first, count, nil
+}
+
+// findResourceRefTarget 按Resources与ResourceReferences一致的顺序定位引用所属声明与引用项
+// 入参: items 资源列表, kind 资源类型, id 资源标识, reference 全局引用下标
+// 返回: int 声明条目索引, ResourceReference 命中引用, error 未找到资源或引用错误
+func findResourceRefTarget(items []ResourceInfo, kind, id string, reference int) (int, ResourceReference, error) {
+	found := false
+	rem := reference
+	for i, item := range items {
+		if !resourceMatches(item, kind, id) {
+			continue
+		}
+		found = true
+		if rem >= 0 && rem < len(item.References) {
+			return i, item.References[rem], nil
+		}
+		rem -= len(item.References)
+	}
+	if !found {
+		return -1, ResourceReference{}, fmt.Errorf("resource not found: %s/%s", kind, id)
+	}
+	return -1, ResourceReference{}, fmt.Errorf("resource reference not found")
+}
+
+// resourceExpectedKind 根据承载元素与引用角色推断标准目标资源类别
+// 入参: elem 元素局部名, role 引用字段名
+// 返回: string 目标资源类别，不确定时为空
+func resourceExpectedKind(elem, role string) string {
+	switch role {
+	case "AttachID":
+		return "Attachment"
+	case "Font":
+		return "Font"
+	case "DrawParam", "Relative":
+		return "DrawParam"
+	case "ColorSpace", "DefaultCS":
+		return "ColorSpace"
+	case "ImageMask", "Substitution", "Thumbnail":
+		return "Image"
+	case "ResourceID":
+		switch elem {
+		case "ImageObject":
+			return "Image"
+		case "Sound":
+			return "Audio"
+		case "Movie":
+			return "Video"
+		case "DrawParam":
+			return "DrawParam"
+		case "CompositeObject", "CompositeGraphicUnit":
+			return "CompositeGraphicUnit"
+		}
+	}
+	return ""
+}
+
+// appendUniquePath 向切片追加不重复的非空路径并保持首次出现顺序
+// 入参: list 原路径列表, value 待追加路径
+// 返回: []string 追加后的路径列表
+func appendUniquePath(list []string, value string) []string {
+	if value == "" || value == "." || slices.Contains(list, value) {
+		return list
+	}
+	return append(list, value)
+}
+
+// recordSingleOwner 记录文件唯一归属者，多归属时标记为星号避免错误绑定单一页面作用域
+// 入参: owners 归属映射, key 被引用文件, owner 归属标识
+func recordSingleOwner(owners map[string]string, key, owner string) {
+	if key == "" || owner == "" {
+		return
+	}
+	if prev, exists := owners[key]; exists && prev != owner {
+		owners[key] = "*"
+		return
+	}
+	owners[key] = owner
+}
+
+// resourceReferenceOwner 查找承载引用的资源定义或最外层图元，图层只承接其自身的绘制参数
+// 入参: node 引用节点
+// 返回: string 图元或资源标识，无法映射时为空
+func resourceReferenceOwner(node *editorXML) string {
+	id := ""
+	for current := node; current != nil; current = current.parent {
+		if !current.matchesOFD(current.name.Local) {
+			return ""
+		}
+		if slices.Contains([]string{"TextObject", "PathObject", "ImageObject", "CompositeObject", "CompositeGraphicUnit"}, current.name.Local) || current.parent != nil && current.name.Local == editorResourceElement(current.parent.name.Local) {
+			id = editorResourceID(current.attr("ID"))
+		}
+		if id == "" && current.matchesOFD("Layer") {
+			id = editorResourceID(current.attr("ID"))
+		}
+	}
+	return id
+}
+
 // Resources 列出当前文档及所选版本的资源，标记缺失文件，不读取二进制内容或执行媒体动作
 // 重复查询复用已完成的扫描，返回值及引用位置与阅读器相互独立
 // 入参: ctx 取消上下文
@@ -227,7 +514,7 @@ func (r *Reader) OpenMedia(id string) (io.ReadCloser, error) {
 // 入参: ctx 取消上下文, kind 资源类型, id 资源标识, reference 为Resources返回的引用索引
 // 返回: []ResourceLocation 页面位置，无可见图元时为空, error 引用、度量或取消错误
 func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, reference int) ([]ResourceLocation, error) {
-	catalog, err := r.Reader.resourceCatalog(ctx)
+	catalog, err := r.reader.resourceCatalog(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +522,7 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 	if err != nil {
 		return nil, err
 	}
-	doc, err := r.Reader.docStructureContext(ctx)
+	doc, err := r.reader.docStructureContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -357,8 +644,6 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 			break
 		}
 	}
-	view := *r
-	view.pageContext = ctx
 	collectTargets := func(files ...string) map[string]*StructureTarget {
 		var targets map[string]*StructureTarget
 		for _, cf := range files {
@@ -384,7 +669,7 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 		if ref.Page >= 0 && ref.Page != page || !hasObjectWanted {
 			continue
 		}
-		content, err := r.Reader.PageContentByIndexContext(ctx, page)
+		content, err := r.reader.PageContentByIndexContext(ctx, page)
 		if err != nil {
 			return nil, err
 		}
@@ -394,10 +679,11 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 			if len(targets) == 0 {
 				return nil
 			}
-			partView := view
-			partView.RenderAnnotations = renderAnnots
-			visitor := &structureVisitor{ctx: ctx, renderer: &partView, targets: targets, boundsOnly: true}
-			if err := partView.WalkPage(&part, visitor); err != nil {
+			prevAnnots, prevPageCtx := r.renderAnnotations, r.pageContext
+			r.renderAnnotations, r.pageContext = renderAnnots, ctx
+			defer func() { r.renderAnnotations, r.pageContext = prevAnnots, prevPageCtx }()
+			visitor := &structureVisitor{ctx: ctx, renderer: r, targets: targets, boundsOnly: true}
+			if err := r.WalkPageContext(ctx, &part, visitor); err != nil {
 				return err
 			}
 			for _, objID := range slices.Sorted(maps.Keys(targets)) {
@@ -414,7 +700,7 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 					tplPart := *content
 					tplPart.Content = Content{}
 					tplPart.Template = []Template{tplRef}
-					if err := walkPart(tplPart, false, collectTargets(cleanPackagePath(r.Reader.ResPath(tpl.BaseLoc)))); err != nil {
+					if err := walkPart(tplPart, false, collectTargets(cleanPackagePath(r.reader.ResPath(tpl.BaseLoc)))); err != nil {
 						return nil, err
 					}
 					break
@@ -423,7 +709,7 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 		}
 		pagePart := *content
 		pagePart.Template = nil
-		if err := walkPart(pagePart, false, collectTargets(cleanPackagePath(r.Reader.ResPath(pageRef.BaseLoc)))); err != nil {
+		if err := walkPart(pagePart, false, collectTargets(cleanPackagePath(r.reader.ResPath(pageRef.BaseLoc)))); err != nil {
 			return nil, err
 		}
 		if pageKey := editorResourceID(pageRef.ID); pageKey != "" {
@@ -443,24 +729,6 @@ func (r *Renderer) ResourceLocations(ctx context.Context, kind, id string, refer
 		return nil, err
 	}
 	return result, nil
-}
-
-// resourceCatalog 保存当前资源声明和原文位置，供查询及隔离修改复用
-type resourceCatalog struct {
-	scan        *editorFontDocument
-	docRes      map[string]bool
-	docScope    []string
-	pageScopes  map[string][]string
-	fileScopes  map[string][]string
-	annotByPage map[string][]string
-	extParents  map[string]string
-	resKinds    map[string]map[string]string
-	itemIndex   map[string]int
-	items       []ResourceInfo
-	itemFiles   []string
-	nodes       map[string]editorFontText
-	images      []editorFontText
-	fileIDs     map[string]string
 }
 
 // add 加入资源声明，拒绝同一资源文件内的重复标识，允许不同资源文件声明同名标识
@@ -585,22 +853,6 @@ func (c *resourceCatalog) resolveScopedDepNode(file, elem, role, rawValue string
 		}
 	}
 	return ""
-}
-
-// resourcePageFrame 保存流式页面扫描的图元归属及直接文本位置
-type resourcePageFrame struct {
-	name   string
-	object string
-	start  int
-	role   string
-	link   bool
-}
-
-// rawResourceRef 记录尚未按作用域归属的原始资源引用事件
-type rawResourceRef struct {
-	ref   ResourceReference
-	elem  string
-	value string
 }
 
 // resourceList 缓存当前阅读视图的资源摘要，不保留扫描使用的XML树
@@ -1064,257 +1316,4 @@ func (r *Reader) locateResourceFileContext(ctx context.Context, kind, id string)
 		return "", false, err
 	}
 	return fallbackLoc, foundAny, nil
-}
-
-// scanResourcePage 流式收集常规页面引用与PageRes声明，特殊结构回退到完整节点扫描
-// 入参: ctx 取消上下文, file 页面原文, pages 文件页码, declaredPageRes 页面局部资源声明, rawRefs 原始引用列表
-// 返回: bool 是否已处理, bool 引用是否不安全, []string 依赖路径, error 解析或取消错误
-func scanResourcePage(ctx context.Context, file *editorFontXML, pages map[string]int, declaredPageRes map[string][]string, rawRefs *[]rawResourceRef) (bool, bool, []string, error) {
-	d := xml.NewDecoder(&editorXMLReader{data: file.data, ctx: ctx})
-	var stack []resourcePageFrame
-	var links []string
-	var localPageRes []string
-	var localRefs []rawResourceRef
-	cleanName := cleanPackagePath(file.name)
-	page, exists := pages[cleanName]
-	if !exists {
-		page = -1
-	}
-	seen, unsafe := false, false
-	add := func(role, value, object, elem string) {
-		if value != "" {
-			localRefs = append(localRefs, rawResourceRef{
-				ref:   ResourceReference{File: file.name, Page: page, Object: object, Role: role},
-				elem:  elem,
-				value: value,
-			})
-		}
-	}
-	for {
-		if err := ctx.Err(); err != nil {
-			return true, false, nil, err
-		}
-		start := int(d.InputOffset())
-		token, err := d.Token()
-		if err == io.EOF {
-			if !seen {
-				return false, false, nil, nil
-			}
-			if len(localPageRes) > 0 {
-				declaredPageRes[cleanName] = append(declaredPageRes[cleanName], localPageRes...)
-			}
-			*rawRefs = append(*rawRefs, localRefs...)
-			return true, unsafe, links, nil
-		}
-		if err != nil {
-			return true, false, nil, err
-		}
-		switch token := token.(type) {
-		case xml.StartElement:
-			if len(stack) == 0 {
-				if seen {
-					return true, false, nil, fmt.Errorf("multiple XML roots")
-				}
-				if token.Name.Local != "Page" {
-					return false, false, nil, nil
-				}
-				seen = true
-			}
-			if classifyOFDNamespace(token.Name.Space) == ofdXMLUnknown || slices.Contains([]string{"Attachments", "Signatures", "CustomTags", "Extensions", "ExtendData", "Data"}, token.Name.Local) {
-				return false, false, nil, nil
-			}
-			for _, attr := range token.Attr {
-				if attr.Name.Space != "" && attr.Name.Space != "xmlns" && attr.Name.Space != XMLNamespace {
-					return false, false, nil, nil
-				}
-			}
-			frame := resourcePageFrame{name: token.Name.Local, start: start}
-			parent := ""
-			if len(stack) != 0 {
-				outer := stack[len(stack)-1]
-				if outer.role != "" || outer.link {
-					return false, false, nil, nil
-				}
-				frame.object, parent = outer.object, outer.name
-			}
-			node := editorXML{name: token.Name, attrs: token.Attr}
-			if slices.Contains([]string{"TextObject", "PathObject", "ImageObject", "CompositeObject"}, frame.name) {
-				frame.object = node.attr("ID")
-			}
-			if frame.name == "TextObject" || frame.name == "Text" && parent == "Area" {
-				unsafe = unsafe || editorResourceID(node.attr("Font")) == ""
-			}
-			for _, attr := range token.Attr {
-				if attr.Name.Space == "" && (editorResourceReferenceKind(attr.Name.Local, false) == editorReferenceID || attr.Name.Local == "AttachID") {
-					add(attr.Name.Local, attr.Value, frame.object, frame.name)
-				}
-			}
-			if slices.Contains([]string{"Thumbnail", "Substitution", "DefaultCS"}, frame.name) {
-				frame.role = frame.name
-			}
-			value := ""
-			switch frame.name {
-			case "PublicRes", "DocumentRes", "PageRes", "Annotations":
-				frame.link = true
-			case "Page", "TemplatePage", "CompositeGraphicUnit":
-				value = node.attr("BaseLoc")
-			case "PageAnnot":
-				value = node.attr("FileLoc")
-			case "DrawParam":
-				value = node.attr("Link")
-			}
-			if value != "" {
-				links = append(links, resolveResourcePath(file.name, "", value))
-			}
-			stack = append(stack, frame)
-		case xml.EndElement:
-			frame := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			if frame.role != "" || frame.link {
-				node := editorXML{start: frame.start, end: int(d.InputOffset())}
-				value := strings.TrimSpace(editorImportText(file.data, &node))
-				if frame.role != "" {
-					add(frame.role, value, frame.object, frame.name)
-				}
-				if frame.link && value != "" {
-					resolved := resolveResourcePath(file.name, "", value)
-					links = append(links, resolved)
-					if frame.name == "PageRes" && len(stack) == 1 && stack[0].name == "Page" {
-						localPageRes = append(localPageRes, cleanPackagePath(resolved))
-					}
-				}
-			}
-		}
-	}
-}
-
-// resourceMatches 判断资源条目是否匹配指定的资源类型与标识
-// 入参: item 资源条目, kind 资源类型, id 资源标识
-// 返回: bool 是否匹配
-func resourceMatches(item ResourceInfo, kind, id string) bool {
-	return item.Kind == kind && (item.ID == id || kind != "Attachment" && sameResourceID(item.ID, id))
-}
-
-// findResource 查找当前视图内的资源，不接受调用方提供的任意包路径
-// 入参: items 资源列表, kind 资源类型, id 资源标识
-// 返回: ResourceInfo 资源信息, error 未找到资源
-func findResource(items []ResourceInfo, kind, id string) (ResourceInfo, error) {
-	item, _, err := findResourceWithCount(items, kind, id)
-	return item, err
-}
-
-// findResourceWithCount 查找首个匹配资源并统计同名同类型声明数量
-// 入参: items 资源列表, kind 资源类型, id 资源标识
-// 返回: ResourceInfo 首个匹配资源, int 匹配总数, error 未找到资源
-func findResourceWithCount(items []ResourceInfo, kind, id string) (ResourceInfo, int, error) {
-	var first ResourceInfo
-	count := 0
-	for _, item := range items {
-		if resourceMatches(item, kind, id) {
-			if count == 0 {
-				first = item
-			}
-			count++
-		}
-	}
-	if count == 0 {
-		return ResourceInfo{}, 0, fmt.Errorf("resource not found: %s/%s", kind, id)
-	}
-	return first, count, nil
-}
-
-// findResourceRefTarget 按Resources与ResourceReferences一致的顺序定位引用所属声明与引用项
-// 入参: items 资源列表, kind 资源类型, id 资源标识, reference 全局引用下标
-// 返回: int 声明条目索引, ResourceReference 命中引用, error 未找到资源或引用错误
-func findResourceRefTarget(items []ResourceInfo, kind, id string, reference int) (int, ResourceReference, error) {
-	found := false
-	rem := reference
-	for i, item := range items {
-		if !resourceMatches(item, kind, id) {
-			continue
-		}
-		found = true
-		if rem >= 0 && rem < len(item.References) {
-			return i, item.References[rem], nil
-		}
-		rem -= len(item.References)
-	}
-	if !found {
-		return -1, ResourceReference{}, fmt.Errorf("resource not found: %s/%s", kind, id)
-	}
-	return -1, ResourceReference{}, fmt.Errorf("resource reference not found")
-}
-
-// resourceExpectedKind 根据承载元素与引用角色推断标准目标资源类别
-// 入参: elem 元素局部名, role 引用字段名
-// 返回: string 目标资源类别，不确定时为空
-func resourceExpectedKind(elem, role string) string {
-	switch role {
-	case "AttachID":
-		return "Attachment"
-	case "Font":
-		return "Font"
-	case "DrawParam", "Relative":
-		return "DrawParam"
-	case "ColorSpace", "DefaultCS":
-		return "ColorSpace"
-	case "ImageMask", "Substitution", "Thumbnail":
-		return "Image"
-	case "ResourceID":
-		switch elem {
-		case "ImageObject":
-			return "Image"
-		case "Sound":
-			return "Audio"
-		case "Movie":
-			return "Video"
-		case "DrawParam":
-			return "DrawParam"
-		case "CompositeObject", "CompositeGraphicUnit":
-			return "CompositeGraphicUnit"
-		}
-	}
-	return ""
-}
-
-// appendUniquePath 向切片追加不重复的非空路径并保持首次出现顺序
-// 入参: list 原路径列表, value 待追加路径
-// 返回: []string 追加后的路径列表
-func appendUniquePath(list []string, value string) []string {
-	if value == "" || value == "." || slices.Contains(list, value) {
-		return list
-	}
-	return append(list, value)
-}
-
-// recordSingleOwner 记录文件唯一归属者，多归属时标记为星号避免错误绑定单一页面作用域
-// 入参: owners 归属映射, key 被引用文件, owner 归属标识
-func recordSingleOwner(owners map[string]string, key, owner string) {
-	if key == "" || owner == "" {
-		return
-	}
-	if prev, exists := owners[key]; exists && prev != owner {
-		owners[key] = "*"
-		return
-	}
-	owners[key] = owner
-}
-
-// resourceReferenceOwner 查找承载引用的资源定义或最外层图元，图层只承接其自身的绘制参数
-// 入参: node 引用节点
-// 返回: string 图元或资源标识，无法映射时为空
-func resourceReferenceOwner(node *editorXML) string {
-	id := ""
-	for current := node; current != nil; current = current.parent {
-		if !current.matchesOFD(current.name.Local) {
-			return ""
-		}
-		if slices.Contains([]string{"TextObject", "PathObject", "ImageObject", "CompositeObject", "CompositeGraphicUnit"}, current.name.Local) || current.parent != nil && current.name.Local == editorResourceElement(current.parent.name.Local) {
-			id = editorResourceID(current.attr("ID"))
-		}
-		if id == "" && current.matchesOFD("Layer") {
-			id = editorResourceID(current.attr("ID"))
-		}
-	}
-	return id
 }

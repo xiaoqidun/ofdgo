@@ -67,6 +67,7 @@ type U3DRenderOptions struct {
 type Renderer struct {
 	ctx                                    context.Context
 	model                                  *U3DModel
+	width, height                          int
 	remaining                              uint64
 	frame                                  []u3dPixel
 	output                                 *image.RGBA
@@ -104,6 +105,23 @@ type Renderer struct {
 	order                                  uint64
 }
 
+// u3dPixel 保存不透明底色、最近深度及透明片元链
+type u3dPixel struct {
+	color [3]float64
+	depth float64
+	order uint64
+	head  int32
+}
+
+// u3dFragment 保存等待按像素深度混合的透明或非覆盖片元
+type u3dFragment struct {
+	color [4]float64
+	depth float64
+	order uint64
+	blend uint32
+	next  int32
+}
+
 // NewRenderer 建立有预算限制的场景实例与资源索引
 // 入参: ctx 取消上下文, model 场景, options 输出与资源限制, states 后续节点覆盖分组
 // 返回: *Renderer 绘制状态, error 参数、场景、预算或取消错误
@@ -115,7 +133,7 @@ func NewRenderer(ctx context.Context, model *U3DModel, options U3DRenderOptions,
 	if limit == 0 {
 		limit = DefaultBytes
 	}
-	r := &Renderer{ctx: ctx, model: model, remaining: uint64(limit), opacity: -1, mode: options.Mode, creaseAngle: 45, resolveTexture: options.ResolveTexture}
+	r := &Renderer{ctx: ctx, model: model, width: options.Width, height: options.Height, remaining: uint64(limit), opacity: -1, mode: options.Mode, creaseAngle: 45, resolveTexture: options.ResolveTexture}
 	if options.Mode > U3DRenderShadedIllustration {
 		return nil, fmt.Errorf("unsupported U3D render mode")
 	}
@@ -173,10 +191,37 @@ func NewRenderer(ctx context.Context, model *U3DModel, options U3DRenderOptions,
 	return r, nil
 }
 
+// RenderU3D 绘制几何及视图纹理层，返回指定时刻的不透明图像，不执行脚本
+// 可通过节点覆盖指定动作轨道与采样时间，逐次生成独立姿态，不修改原模型
+// 显式骨骼姿态按权重变换位置和法线，暂不生成骨骼链接或推导缺失权重
+// 动画修饰器支持单动作的节点和骨骼求值，尚未实现的动作衔接返回明确错误
+// 几何纹理支持模型坐标与程序化映射，参考形状约定见U3DTextureLayer
+// 纹理按需解码并复用，不自动访问外部图像
+// 采用逐顶点光照及逐像素深度混合，空名称引用标准默认资源
+// 缺失几何、材质和着色器采用默认资源，缺失的非空光源引用不产生光照
+// 缺失纹理返回错误，空纹理名称使用标准默认图像
+// 仅绘制默认根的后代，非空父节点引用缺失时不展开该父路径
+// 入参: ctx 取消上下文, model 场景, options 视图、输出与资源限制
+// 返回: *image.RGBA 图像, error 参数、能力、预算或取消错误
+func RenderU3D(ctx context.Context, model *U3DModel, options U3DRenderOptions) (*image.RGBA, error) {
+	r, err := NewRenderer(ctx, model, options)
+	if err != nil {
+		return nil, err
+	}
+	passes, err := r.SelectView(options)
+	if err != nil {
+		return nil, err
+	}
+	return r.Render(options, passes)
+}
+
 // Render 在已选择的相机和轮次下生成图像
 // 入参: options 输出与灯光背景, passes 绘制轮次
 // 返回: *image.RGBA 图像, error 参数、绘制、预算或取消错误
 func (r *Renderer) Render(options U3DRenderOptions, passes []U3DViewPass) (*image.RGBA, error) {
+	if options.Width <= 0 || options.Height <= 0 || options.Width > r.width || options.Height > r.height {
+		return nil, fmt.Errorf("invalid U3D render dimensions")
+	}
 	if r.sections == nil {
 		if err := r.PrepareSections(options.Sections); err != nil {
 			return nil, err
@@ -305,7 +350,7 @@ func (r *Renderer) SelectView(options U3DRenderOptions) ([]U3DViewPass, error) {
 				return nil, fmt.Errorf("missing U3D camera instance")
 			}
 			r.camera.ToWorld = r.scene[r.byNode[selected][options.Instance]].world
-			if view.Attributes & ^uint32(7) != 0 || view.Attributes&6 >= 4 {
+			if view.Attributes&6 >= 4 {
 				return nil, fmt.Errorf("unsupported U3D view projection")
 			}
 			for i, v := range view.Viewport {
@@ -320,21 +365,30 @@ func (r *Renderer) SelectView(options U3DRenderOptions) ([]U3DViewPass, error) {
 				r.viewport[2] *= float64(options.Width)
 				r.viewport[3] *= float64(options.Height)
 			}
+			for _, v := range r.viewport {
+				if !finite(v) {
+					return nil, fmt.Errorf("invalid U3D viewport size")
+				}
+			}
 			if r.viewport[2] <= 0 || r.viewport[3] <= 0 {
 				return nil, fmt.Errorf("invalid U3D viewport size")
 			}
 			r.camera.Near, r.camera.Far = float64(view.Near), float64(view.Far)
-			if r.camera.Far <= r.camera.Near {
+			if !finite(r.camera.Near) || !finite(r.camera.Far) || r.camera.Far <= r.camera.Near {
 				return nil, fmt.Errorf("invalid U3D view clipping range")
 			}
 			r.camera.Perspective = view.Attributes&6 == 0
 			if r.camera.Perspective {
-				if view.Projection <= 0 || view.Projection >= 180 {
+				if !finite(float64(view.Projection)) || view.Projection <= 0 || view.Projection >= 180 {
 					return nil, fmt.Errorf("invalid U3D perspective field of view")
 				}
-				r.camera.ScaleY = r.viewport[3] / (2 * math.Tan(float64(view.Projection)*math.Pi/360))
+				denominator := 2 * math.Tan(float64(view.Projection)*math.Pi/360)
+				if !finite(denominator) || denominator <= 0 {
+					return nil, fmt.Errorf("invalid U3D perspective field of view")
+				}
+				r.camera.ScaleY = r.viewport[3] / denominator
 			} else {
-				if view.Projection <= 0 {
+				if !finite(float64(view.Projection)) || view.Projection <= 0 {
 					return nil, fmt.Errorf("invalid U3D orthographic height")
 				}
 				r.camera.ScaleY = r.viewport[3] / float64(view.Projection)
@@ -368,47 +422,6 @@ func (r *Renderer) SelectView(options U3DRenderOptions) ([]U3DViewPass, error) {
 		return nil, fmt.Errorf("invalid U3D camera transform")
 	}
 	return passes, nil
-}
-
-// RenderU3D 绘制几何及视图纹理层，返回指定时刻的不透明图像，不执行脚本
-// 可通过节点覆盖指定动作轨道与采样时间，逐次生成独立姿态，不修改原模型
-// 显式骨骼姿态按权重变换位置和法线，暂不生成骨骼链接或推导缺失权重
-// 动画修饰器支持单动作的节点和骨骼求值，尚未实现的动作衔接返回明确错误
-// 几何纹理支持模型坐标与程序化映射，参考形状约定见U3DTextureLayer
-// 纹理按需解码并复用，不自动访问外部图像
-// 采用逐顶点光照及逐像素深度混合，空名称引用标准默认资源
-// 缺失几何、材质和着色器采用默认资源，缺失的非空光源引用不产生光照
-// 缺失纹理返回错误，空纹理名称使用标准默认图像
-// 仅绘制默认根的后代，非空父节点引用缺失时不展开该父路径
-// 入参: ctx 取消上下文, model 场景, options 视图、输出与资源限制
-// 返回: *image.RGBA 图像, error 参数、能力、预算或取消错误
-func RenderU3D(ctx context.Context, model *U3DModel, options U3DRenderOptions) (*image.RGBA, error) {
-	r, err := NewRenderer(ctx, model, options)
-	if err != nil {
-		return nil, err
-	}
-	passes, err := r.SelectView(options)
-	if err != nil {
-		return nil, err
-	}
-	return r.Render(options, passes)
-}
-
-// u3dPixel 保存不透明底色、最近深度及透明片元链
-type u3dPixel struct {
-	color [3]float64
-	depth float64
-	order uint64
-	head  int32
-}
-
-// u3dFragment 保存等待按像素深度混合的透明或非覆盖片元
-type u3dFragment struct {
-	color [4]float64
-	depth float64
-	order uint64
-	blend uint32
-	next  int32
 }
 
 // resources 建立只读资源索引，空名称保留给标准默认资源
@@ -491,7 +504,7 @@ func (r *Renderer) renderPass(pass U3DViewPass, passIndex int, last bool) error 
 				return fmt.Errorf("invalid U3D fog value")
 			}
 		}
-		if pass.FogMode == 0 && pass.FogFar <= pass.FogNear || pass.FogMode != 0 && pass.FogFar <= 0 {
+		if pass.FogMode == 0 && (pass.FogFar <= pass.FogNear || !finite(float64(pass.FogFar)-float64(pass.FogNear))) || pass.FogMode != 0 && pass.FogFar <= 0 {
 			return fmt.Errorf("invalid U3D fog range")
 		}
 	}

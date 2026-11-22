@@ -45,6 +45,7 @@ func (e *businessEngine) preparePrint(args []platformValue) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		defer func() { _ = editor.Close() }()
 	}
 	source := e.currentSession.Renderer
 	dirs, fonts := source.FontSources()

@@ -122,7 +122,7 @@ type TextObject struct {
 	MiterLimitSet  bool          `xml:"-"`
 	WeightSet      bool          `xml:"-"`
 	ItalicSet      bool          `xml:"-"`
-	dashPatternSet bool
+	DashPatternSet bool          `xml:"-"`
 	layout         *textLayout
 }
 
@@ -208,7 +208,7 @@ type PathObject struct {
 	Actions         []Action     `xml:"Actions>Action"`
 	LineWidthSet    bool         `xml:"-"`
 	MiterLimitSet   bool         `xml:"-"`
-	dashPatternSet  bool
+	DashPatternSet  bool         `xml:"-"`
 }
 
 // StrokeColor 勾边颜色
@@ -276,7 +276,7 @@ type ImageObject struct {
 	Actions        []Action     `xml:"Actions>Action"`
 	LineWidthSet   bool         `xml:"-"`
 	MiterLimitSet  bool         `xml:"-"`
-	dashPatternSet bool
+	DashPatternSet bool         `xml:"-"`
 }
 
 // ImageBorder 图像边框

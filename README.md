@@ -107,6 +107,7 @@ import (
 func main() {
 	// 1. 创建文档
 	editor := ofdgo.NewEditor()
+	defer editor.Close()
 	editor.Info.Title = "示例文档"
 	page, err := editor.AddPage(210, 297)
 	if err != nil {
@@ -164,6 +165,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer editor.Close()
 	editor.Info.Title = "编辑后的"
 	// 3. 另存文档
 	output, err := ofdgo.NewFileOutput("edited.ofd")
@@ -270,19 +272,24 @@ func main() {
 		log.Fatal(err)
 	}
 	defer input.Close()
-	// 2. 验证OFD签名
-	reports, err := ofdgo.VerifySignatures(input)
+	// 2. 信任的根证书
+	trustCert, err := os.ReadFile("ca.crt")
 	if err != nil {
 		log.Fatal(err)
 	}
-	// 3. 判断验证结果
+	// 3. 验证OFD签名
+	reports, err := ofdgo.VerifySignatures(input, ofdgo.WithSignatureTrustCert(trustCert))
+	if err != nil {
+		log.Fatal(err)
+	}
+	// 4. 判断验证结果
 	if len(reports) == 0 {
 		log.Println("文件未发现签名")
 		return
 	}
 	valid := true
 	for _, report := range reports {
-		if report.IntegrityValid() {
+		if report.TrustedValid() {
 			log.Printf("签名%s验证通过", report.ID)
 			continue
 		}

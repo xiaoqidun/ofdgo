@@ -181,31 +181,6 @@ func TIFFConversionDensity(data []byte, layout TIFFLayout, allowColorConversion 
 	return density.Scale(layout.size(), layout.DisplaySize())
 }
 
-// Scale 按最终像素尺寸保留绝对密度或精确相对比例
-// 入参: before 原始像素尺寸, after 最终像素尺寸
-// 返回: Density 缩放后密度, bool 相对比例是否可完整保留
-func (density Density) Scale(before, after image.Point) (Density, bool) {
-	hasDensity := density.X != 0 || density.Y != 0
-	if hasDensity && before != after {
-		if before.X <= 0 || before.Y <= 0 || after.X <= 0 || after.Y <= 0 || !(density.X > 0 && density.Y > 0) || math.IsInf(density.X, 0) || math.IsInf(density.Y, 0) {
-			return Density{}, false
-		}
-		if density.Unit == 0 {
-			ratio := new(big.Rat).Quo(new(big.Rat).SetFloat64(density.X), new(big.Rat).SetFloat64(density.Y))
-			ratio.Mul(ratio, new(big.Rat).SetFrac64(int64(after.X), int64(after.Y)))
-			ratio.Mul(ratio, new(big.Rat).SetFrac64(int64(before.Y), int64(before.X)))
-			if ratio.Num().BitLen() > 31 || ratio.Denom().BitLen() > 31 {
-				return Density{}, false
-			}
-			density.X, density.Y = float64(ratio.Num().Int64()), float64(ratio.Denom().Int64())
-		} else {
-			density.X *= float64(after.X) / float64(before.X)
-			density.Y *= float64(after.Y) / float64(before.Y)
-		}
-	}
-	return density, true
-}
-
 // PageMetadataContext 读取图片方向与密度，扫描目录或数据段时响应取消
 // TIFF方向由解码器处理，JPEG的EXIF密度优先于JFIF
 // 入参: ctx 取消上下文, data 图片数据, format 图像格式, dpi 缺少物理密度时使用的DPI
@@ -477,4 +452,29 @@ func imageExifMetadata(data []byte, dpi float64, directory uint32) (int, float64
 		x, y = 0, 0
 	}
 	return orientation, x, y, nil
+}
+
+// Scale 按最终像素尺寸保留绝对密度或精确相对比例
+// 入参: before 原始像素尺寸, after 最终像素尺寸
+// 返回: Density 缩放后密度, bool 相对比例是否可完整保留
+func (density Density) Scale(before, after image.Point) (Density, bool) {
+	hasDensity := density.X != 0 || density.Y != 0
+	if hasDensity && before != after {
+		if before.X <= 0 || before.Y <= 0 || after.X <= 0 || after.Y <= 0 || !(density.X > 0 && density.Y > 0) || math.IsInf(density.X, 0) || math.IsInf(density.Y, 0) {
+			return Density{}, false
+		}
+		if density.Unit == 0 {
+			ratio := new(big.Rat).Quo(new(big.Rat).SetFloat64(density.X), new(big.Rat).SetFloat64(density.Y))
+			ratio.Mul(ratio, new(big.Rat).SetFrac64(int64(after.X), int64(after.Y)))
+			ratio.Mul(ratio, new(big.Rat).SetFrac64(int64(before.Y), int64(before.X)))
+			if ratio.Num().BitLen() > 31 || ratio.Denom().BitLen() > 31 {
+				return Density{}, false
+			}
+			density.X, density.Y = float64(ratio.Num().Int64()), float64(ratio.Denom().Int64())
+		} else {
+			density.X *= float64(after.X) / float64(before.X)
+			density.Y *= float64(after.Y) / float64(before.Y)
+		}
+	}
+	return density, true
 }

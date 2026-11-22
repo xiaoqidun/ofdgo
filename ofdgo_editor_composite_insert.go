@@ -100,7 +100,11 @@ func (e *Editor) copyObjectsToComposite(page int, path ObjectPath, objects []Gra
 				srcScope = srcOrigin.page.original.pageResources
 				restoreOrigin = e.bindPageResources(srcOrigin.page.original)
 			}
-			id := e.nextID()
+			id, err := e.nextID()
+			if err != nil {
+				restoreOrigin()
+				return err
+			}
 			object, err := validation.prepareCopiedObject(id, source)
 			restoreOrigin()
 			if err != nil {
@@ -151,11 +155,11 @@ func (e *Editor) copyObjectsToComposite(page int, path ObjectPath, objects []Gra
 					}
 				}
 			}
-			node.parent, node.boundaryInCTM = IdentityMatrix, true
+			node.parent, node.boundaryInCTM = IdentityMatrix(), true
 			node.setStates(object.CompositeGraphicUnit.states)
 			node.drawParams = []string{targetLayerStyle}
 			if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
-				if err := node.convertCoordinates(IdentityMatrix, true); err != nil {
+				if err := node.convertCoordinates(IdentityMatrix(), true); err != nil {
 					return err
 				}
 			}
@@ -420,7 +424,7 @@ func (e *Editor) neutralDrawParam() (string, error) {
 		return "", err
 	}
 	zero := 0.0
-	return e.addEditorDrawParam(DrawParam{LineWidth: defaultPathLineWidth, Cap: "Butt", Join: "Miter", MiterLimit: defaultMiterLimit, DashOffset: &zero, dashPatternSet: true, FillColor: fill, StrokeColor: (*StrokeColor)(fill)})
+	return e.addEditorDrawParam(DrawParam{LineWidth: defaultPathLineWidth, Cap: "Butt", Join: "Miter", MiterLimit: defaultMiterLimit, DashOffset: &zero, DashPatternSet: true, FillColor: fill, StrokeColor: (*StrokeColor)(fill)})
 }
 
 // addEditorDrawParam 注册已校验的绘制参数，相同定义复用资源
@@ -457,7 +461,11 @@ func (e *Editor) addEditorDrawParamContext(ctx context.Context, draw DrawParam) 
 	if err := e.prepareSourceIDsContext(ctx); err != nil {
 		return "", err
 	}
-	draw.ID = e.nextID()
+	drawID, err := e.nextID()
+	if err != nil {
+		return "", err
+	}
+	draw.ID = drawID
 	data, err := encodeOFDXMLContext(ctx, func(x *ofdXML) {
 		x.root("Res", ofdAttrs{{Name: xml.Name{Local: "BaseLoc"}, Value: "."}})
 		x.start("DrawParams", nil)
@@ -473,7 +481,7 @@ func (e *Editor) addEditorDrawParamContext(ctx context.Context, draw DrawParam) 
 		if draw.MiterLimitSet && draw.MiterLimit == 0 {
 			attrs.add("MiterLimit", "0")
 		}
-		if draw.DashPattern != "" || draw.dashPatternSet && draw.Relative != "" {
+		if draw.DashPattern != "" || draw.DashPatternSet && draw.Relative != "" {
 			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "DashPattern"}, Value: draw.DashPattern})
 		}
 		if draw.DashOffset != nil {

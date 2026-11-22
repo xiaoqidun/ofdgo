@@ -232,47 +232,24 @@ func ReadInput(ctx context.Context, reader io.Reader, options InputOptions) (*In
 	return input, nil
 }
 
-// Size 返回输入字节数，关闭后仍可查询
-// 返回: int64 数据大小
-func (s *Input) Size() int64 {
-	return s.size
-}
-
-// ReadAt 读取指定位置的数据，关闭后返回os.ErrClosed
-// 入参: data 目标缓冲区, offset 字节偏移
-// 返回: int 读取字节数, error 读取错误
-func (s *Input) ReadAt(data []byte, offset int64) (int, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.reader == nil {
-		return 0, os.ErrClosed
-	}
-	return readBoundedAt(s.reader, s.size, data, offset)
-}
-
-// Close 释放自有文件和缓存，等待正在进行的读取结束，可重复调用
-// 返回: error 文件关闭或临时文件删除错误
-func (s *Input) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.reader = nil
-	if s.file == nil {
-		return nil
-	}
-	file := s.file
-	s.file = nil
-	err := file.Close()
-	if s.temp {
-		err = errors.Join(err, os.Remove(file.Name()))
-	}
-	return err
-}
-
 // NewReader 从统一输入源创建OFD阅读器，不接管输入源生命周期
 // 阅读器及其派生编辑器使用结束后，调用方再关闭输入源
 // 入参: input 输入源, options 阅读选项
 // 返回: *Reader 阅读器实例, error 错误信息
 func NewReader(input *Input, options ...ReaderOption) (*Reader, error) {
+	return NewReaderContext(context.Background(), input, options...)
+}
+
+// NewReaderContext 按取消上下文从统一输入源创建OFD阅读器，不接管输入源生命周期
+// 入参: ctx 取消上下文，nil使用后台上下文, input 输入源, options 阅读选项
+// 返回: *Reader 阅读器实例, error 打开或取消错误
+func NewReaderContext(ctx context.Context, input *Input, options ...ReaderOption) (*Reader, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if input == nil {
 		return nil, fmt.Errorf("missing input")
 	}
@@ -281,29 +258,32 @@ func NewReader(input *Input, options ...ReaderOption) (*Reader, error) {
 		return nil, err
 	}
 	reader := &Reader{
-		Path:       input.path,
-		Zip:        zr,
+		path:       input.path,
+		zip:        zr,
 		sourceFile: input.info,
 	}
-	if err := reader.open(options); err != nil {
+	if err := reader.openContext(ctx, options); err != nil {
 		return nil, err
 	}
 	return reader, nil
 }
 
 // NewRenderer 创建渲染器
-// 入参: reader 阅读器, opts 渲染选项
+// 入参: reader 阅读器，nil时创建空阅读器, opts 渲染选项
 // 返回: *Renderer 渲染器实例
 func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
+	if reader == nil {
+		reader = &Reader{}
+	}
 	if reader.resources == nil {
 		reader.resources, _ = NewResources(ResourceOptions{})
 	}
 	r := &Renderer{
-		Reader:                reader,
-		DPI:                   300.0,
-		RenderAnnotations:     true,
-		DrawParams:            reader.drawParamCache,
-		CompositeGraphicUnits: reader.compositeGraphicUnitCache,
+		reader:                reader,
+		dpi:                   300.0,
+		renderAnnotations:     true,
+		drawParams:            reader.drawParamCache,
+		compositeGraphicUnits: reader.compositeGraphicUnitCache,
 		templatePageCache:     make(map[string]*PageContent),
 		imageCache:            resourceCache[string, image.Image](reader.resources, imageCacheLimit),
 		backends:              defaultRenderBackends(),
@@ -311,17 +291,21 @@ func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
 	}
 	r.resetFontCache()
 	for _, opt := range opts {
-		opt(r)
+		if opt != nil {
+			opt(r)
+		}
 	}
 	return r
 }
 
-// WithDPI 设置渲染DPI
+// WithDPI 设置渲染DPI，忽略非正数或非有限值
 // 入参: dpi DPI值
 // 返回: RendererOption 渲染选项
 func WithDPI(dpi float64) RendererOption {
 	return func(r *Renderer) {
-		r.DPI = dpi
+		if finite(dpi) && dpi > 0 {
+			r.dpi = dpi
+		}
 	}
 }
 
@@ -330,7 +314,25 @@ func WithDPI(dpi float64) RendererOption {
 // 返回: RendererOption 渲染选项
 func WithAnnotations(enable bool) RendererOption {
 	return func(r *Renderer) {
-		r.RenderAnnotations = enable
+		r.renderAnnotations = enable
+	}
+}
+
+// WithCompression 设置导出编码压缩选项
+// 入参: options 压缩选项
+// 返回: RendererOption 渲染选项
+func WithCompression(options CompressionOptions) RendererOption {
+	return func(r *Renderer) {
+		r.compression = options
+	}
+}
+
+// WithTransparentBackground 设置是否关闭页面白色背景
+// 入参: enabled 是否透明背景
+// 返回: RendererOption 渲染选项
+func WithTransparentBackground(enabled bool) RendererOption {
+	return func(r *Renderer) {
+		r.transparentBackground = enabled
 	}
 }
 
@@ -350,16 +352,6 @@ func WithFontFS(fs ...fs.FS) RendererOption {
 	return func(r *Renderer) {
 		r.fontFS = append(r.fontFS, fs...)
 	}
-}
-
-// checkOptions 检查取消状态及输入大小
-// 入参: ctx 取消上下文, options 输入选项
-// 返回: error 取消或大小错误
-func (s *Input) checkOptions(ctx context.Context, options InputOptions) error {
-	if options.MaxSize < 0 || options.MaxSize > 0 && s.size > options.MaxSize {
-		return fmt.Errorf("input exceeds size limit")
-	}
-	return ctx.Err()
 }
 
 // readBoundedAt 在固定长度区间内执行随机读取，避免构造临时SectionReader
@@ -399,4 +391,50 @@ func sameOutputFile(source os.FileInfo, writer io.Writer) error {
 		return ErrSameFile
 	}
 	return nil
+}
+
+// Size 返回输入字节数，关闭后仍可查询
+// 返回: int64 数据大小
+func (s *Input) Size() int64 {
+	return s.size
+}
+
+// ReadAt 读取指定位置的数据，关闭后返回os.ErrClosed
+// 入参: data 目标缓冲区, offset 字节偏移
+// 返回: int 读取字节数, error 读取错误
+func (s *Input) ReadAt(data []byte, offset int64) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.reader == nil {
+		return 0, os.ErrClosed
+	}
+	return readBoundedAt(s.reader, s.size, data, offset)
+}
+
+// Close 释放自有文件和缓存，等待正在进行的读取结束，可重复调用
+// 返回: error 文件关闭或临时文件删除错误
+func (s *Input) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reader = nil
+	if s.file == nil {
+		return nil
+	}
+	file := s.file
+	s.file = nil
+	err := file.Close()
+	if s.temp {
+		err = errors.Join(err, os.Remove(file.Name()))
+	}
+	return err
+}
+
+// checkOptions 检查取消状态及输入大小
+// 入参: ctx 取消上下文, options 输入选项
+// 返回: error 取消或大小错误
+func (s *Input) checkOptions(ctx context.Context, options InputOptions) error {
+	if options.MaxSize < 0 || options.MaxSize > 0 && s.size > options.MaxSize {
+		return fmt.Errorf("input exceeds size limit")
+	}
+	return ctx.Err()
 }

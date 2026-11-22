@@ -41,6 +41,18 @@ type MeshRasterOptions struct {
 	SoftMask      bool
 }
 
+// meshVertex 保存局部毫米坐标及原曲面参数
+type meshVertex struct {
+	point pdfgo.Point
+	u, v  float64
+}
+
+// meshSample 保存采样点参数，patch为一基编号，零表示未覆盖
+type meshSample struct {
+	u, v  float64
+	patch int
+}
+
 // MeshEdge 按坐标及颜色分量匹配相邻三角形的共享边，不改变顶点顺序
 // 入参: previous 前一三角形, current 当前三角形
 // 返回: int OFD共享边标志，零表示独立三角形
@@ -300,16 +312,4 @@ func MeshPixels(ctx context.Context, mesh *pdfgo.MeshGradient, triangles []MeshT
 		pixel.Shape /= samples * samples
 	}
 	return pixels, nil
-}
-
-// meshVertex 保存局部毫米坐标及原曲面参数
-type meshVertex struct {
-	point pdfgo.Point
-	u, v  float64
-}
-
-// meshSample 保存采样点参数，patch为一基编号，零表示未覆盖
-type meshSample struct {
-	u, v  float64
-	patch int
 }

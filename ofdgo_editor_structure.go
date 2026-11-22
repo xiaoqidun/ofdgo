@@ -25,6 +25,154 @@ import (
 	"strings"
 )
 
+// structureRemapLinks 合并按操作顺序记录的编号迁移，保留一对多关系并排除重复边
+// 入参: ctx 取消上下文, remaps 图元编号迁移记录
+// 返回: map[string][]string 原编号及其迁移目标, error 取消错误
+func structureRemapLinks(ctx context.Context, remaps []map[string]string) (map[string][]string, error) {
+	links := make(map[string][]string)
+	seen := make(map[[2]string]bool)
+	for _, ids := range remaps {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		for from, to := range ids {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			key := [2]string{from, to}
+			if from == to || seen[key] {
+				continue
+			}
+			seen[key] = true
+			links[from] = append(links[from], to)
+		}
+	}
+	return links, ctx.Err()
+}
+
+// structureMappedIDs 沿编号迁移关系收集当前仍可达的图元，同一来源的结果不重复
+// 入参: ctx 取消上下文, id 原编号, links 编号迁移关系, remaining 当前页面可达图元
+// 返回: []string 保留的原编号及迁移后的编号, error 取消错误
+func structureMappedIDs(ctx context.Context, id string, links map[string][]string, remaining map[string]bool) ([]string, error) {
+	var result []string
+	pending := []string{id}
+	seen := make(map[string]bool)
+	for len(pending) != 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		id = pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		if remaining[id] {
+			result = append(result, id)
+		}
+		for i := len(links[id]) - 1; i >= 0; i-- {
+			pending = append(pending, links[id][i])
+		}
+	}
+	return result, nil
+}
+
+// structurePageObjectIDs 收集页面、模板、复合资源及注释外观中的图元标识，不加载字体或图像
+// 入参: ctx 取消上下文, reader 资源已加载的阅读器, page 页面引用
+// 返回: map[string]bool 可达图元标识, error 页面读取或遍历错误
+func structurePageObjectIDs(ctx context.Context, reader *Reader, page Page) (map[string]bool, error) {
+	if _, err := reader.DocContext(ctx); err != nil {
+		return nil, err
+	}
+	content, err := reader.PageContentContext(ctx, page)
+	if err != nil {
+		return nil, err
+	}
+	renderer := NewRenderer(reader, WithAnnotations(true))
+	renderer.pageContext = ctx
+	visitor := &structureObjectVisitor{objects: make(map[string]bool)}
+	if err := renderer.WalkPage(content, visitor); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return visitor.objects, nil
+}
+
+// rewriteStructureReferences 仅改写已识别公文命名空间的叶子引用，保留其他XML字节
+// 入参: ctx 取消上下文, data 原始标引, tag 标引入口, rewrite 引用映射，空标识列表表示删除引用
+// 返回: []byte 修改后的标引, error 解析或取消错误
+func rewriteStructureReferences(ctx context.Context, data []byte, tag CustomTag, rewrite func(string, []string) (string, []string, error)) ([]byte, error) {
+	root, err := parseEditorXMLContext(ctx, data)
+	if err != nil {
+		return nil, err
+	}
+	if !structureOfficial(tag, root.name.Space) {
+		structure, err := parseStructure(ctx, data, tag)
+		if err != nil {
+			return nil, err
+		}
+		if !structureInvoiceReferences(structure) {
+			return data, nil
+		}
+	}
+	var patches []editorXMLPatch
+	var walk func(*editorXML, int) error
+	walk = func(node *editorXML, depth int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if depth > 128 {
+			return fmt.Errorf("custom tag structure limit exceeded")
+		}
+		if node.name.Space != root.name.Space {
+			return nil
+		}
+		if node.name.Local == "ObjectRef" && len(node.children) == 0 {
+			value := strings.TrimSpace(editorImportText(data, node))
+			ids := structureObjectIDs(value)
+			if len(ids) == 0 {
+				return nil
+			}
+			page, next, err := rewrite(node.attr("PageRef"), ids)
+			if err != nil {
+				return err
+			}
+			if len(next) == 0 {
+				patches = append(patches, editorXMLPatch{start: node.start, end: node.end})
+				return nil
+			}
+			if strings.Join(next, ",") != strings.Join(ids, ",") {
+				var text bytes.Buffer
+				_ = xml.EscapeText(&text, []byte(strings.Join(next, ",")))
+				patches = append(patches, editorXMLContent(data, node, text.Bytes()))
+			}
+			if page != node.attr("PageRef") {
+				patch, err := editorXMLAttributePatch(data, node, "PageRef", page)
+				if err != nil {
+					return err
+				}
+				patches = append(patches, patch)
+			}
+			return nil
+		}
+		for _, child := range node.children {
+			if err := walk(child, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := walk(root, 1); err != nil {
+		return nil, err
+	}
+	if len(patches) == 0 {
+		return data, nil
+	}
+	return editorPatchXML(data, patches), nil
+}
+
 // pruneStructureReferences 迁移公文图元编号并清理已删除的引用，保留未知标引和原有悬空引用
 // 改动进入输出快照，由既有文档及版本隔离流程维护共享文件
 // 入参: ctx 取消上下文, parts 输出覆盖条目, generated 本次编码结果及扫描记录
@@ -461,152 +609,4 @@ func (m *editorPageImport) structures() ([]byte, error) {
 		entries = append(entries, entry...)
 	}
 	return entries, nil
-}
-
-// structureRemapLinks 合并按操作顺序记录的编号迁移，保留一对多关系并排除重复边
-// 入参: ctx 取消上下文, remaps 图元编号迁移记录
-// 返回: map[string][]string 原编号及其迁移目标, error 取消错误
-func structureRemapLinks(ctx context.Context, remaps []map[string]string) (map[string][]string, error) {
-	links := make(map[string][]string)
-	seen := make(map[[2]string]bool)
-	for _, ids := range remaps {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		for from, to := range ids {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			key := [2]string{from, to}
-			if from == to || seen[key] {
-				continue
-			}
-			seen[key] = true
-			links[from] = append(links[from], to)
-		}
-	}
-	return links, ctx.Err()
-}
-
-// structureMappedIDs 沿编号迁移关系收集当前仍可达的图元，同一来源的结果不重复
-// 入参: ctx 取消上下文, id 原编号, links 编号迁移关系, remaining 当前页面可达图元
-// 返回: []string 保留的原编号及迁移后的编号, error 取消错误
-func structureMappedIDs(ctx context.Context, id string, links map[string][]string, remaining map[string]bool) ([]string, error) {
-	var result []string
-	pending := []string{id}
-	seen := make(map[string]bool)
-	for len(pending) != 0 {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		id = pending[len(pending)-1]
-		pending = pending[:len(pending)-1]
-		if seen[id] {
-			continue
-		}
-		seen[id] = true
-		if remaining[id] {
-			result = append(result, id)
-		}
-		for i := len(links[id]) - 1; i >= 0; i-- {
-			pending = append(pending, links[id][i])
-		}
-	}
-	return result, nil
-}
-
-// structurePageObjectIDs 收集页面、模板、复合资源及注释外观中的图元标识，不加载字体或图像
-// 入参: ctx 取消上下文, reader 资源已加载的阅读器, page 页面引用
-// 返回: map[string]bool 可达图元标识, error 页面读取或遍历错误
-func structurePageObjectIDs(ctx context.Context, reader *Reader, page Page) (map[string]bool, error) {
-	if _, err := reader.DocContext(ctx); err != nil {
-		return nil, err
-	}
-	content, err := reader.PageContentContext(ctx, page)
-	if err != nil {
-		return nil, err
-	}
-	renderer := NewRenderer(reader, WithAnnotations(true))
-	renderer.pageContext = ctx
-	visitor := &structureObjectVisitor{objects: make(map[string]bool)}
-	if err := renderer.WalkPage(content, visitor); err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return visitor.objects, nil
-}
-
-// rewriteStructureReferences 仅改写已识别公文命名空间的叶子引用，保留其他XML字节
-// 入参: ctx 取消上下文, data 原始标引, tag 标引入口, rewrite 引用映射，空标识列表表示删除引用
-// 返回: []byte 修改后的标引, error 解析或取消错误
-func rewriteStructureReferences(ctx context.Context, data []byte, tag CustomTag, rewrite func(string, []string) (string, []string, error)) ([]byte, error) {
-	root, err := parseEditorXMLContext(ctx, data)
-	if err != nil {
-		return nil, err
-	}
-	if !structureOfficial(tag, root.name.Space) {
-		structure, err := parseStructure(ctx, data, tag)
-		if err != nil {
-			return nil, err
-		}
-		if !structureInvoiceReferences(structure) {
-			return data, nil
-		}
-	}
-	var patches []editorXMLPatch
-	var walk func(*editorXML, int) error
-	walk = func(node *editorXML, depth int) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if depth > 128 {
-			return fmt.Errorf("custom tag structure limit exceeded")
-		}
-		if node.name.Space != root.name.Space {
-			return nil
-		}
-		if node.name.Local == "ObjectRef" && len(node.children) == 0 {
-			value := strings.TrimSpace(editorImportText(data, node))
-			ids := structureObjectIDs(value)
-			if len(ids) == 0 {
-				return nil
-			}
-			page, next, err := rewrite(node.attr("PageRef"), ids)
-			if err != nil {
-				return err
-			}
-			if len(next) == 0 {
-				patches = append(patches, editorXMLPatch{start: node.start, end: node.end})
-				return nil
-			}
-			if strings.Join(next, ",") != strings.Join(ids, ",") {
-				var text bytes.Buffer
-				_ = xml.EscapeText(&text, []byte(strings.Join(next, ",")))
-				patches = append(patches, editorXMLContent(data, node, text.Bytes()))
-			}
-			if page != node.attr("PageRef") {
-				patch, err := editorXMLAttributePatch(data, node, "PageRef", page)
-				if err != nil {
-					return err
-				}
-				patches = append(patches, patch)
-			}
-			return nil
-		}
-		for _, child := range node.children {
-			if err := walk(child, depth+1); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := walk(root, 1); err != nil {
-		return nil, err
-	}
-	if len(patches) == 0 {
-		return data, nil
-	}
-	return editorPatchXML(data, patches), nil
 }

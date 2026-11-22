@@ -36,10 +36,222 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// pdfPageBaseLocKey 按页内容包路径与物理尺寸复用相同静态页面
+type pdfPageBaseLocKey struct {
+	baseLoc string
+	box     Box
+}
+
+// pdfSharedPageRef 记录可跨页直接复用的PDF内容流与资源字典引用
+type pdfSharedPageRef struct {
+	contentRef   pdfgo.Reference
+	resourcesRef pdfgo.Reference
+}
+
+// pdfCompiledPage 保存单页并发渲染与预压缩后的轻量输出结果
+type pdfCompiledPage struct {
+	digest        [32]byte
+	compressed    []byte
+	resources     *codecpdf.ContentResources
+	contentForNav *PageContent
+	err           error
+}
+
+// pdfDeferredPage 保存因含跨页视频或延迟音频需在文档末尾写出的页面字典骨架
+type pdfDeferredPage struct {
+	index int
+	dict  pdfgo.Dictionary
+}
+
+// canvasEPSWriter 在EPS头部写入本库制作软件，不改动绘图内容
+type canvasEPSWriter struct {
+	io.Writer
+}
+
+// epsImageRenderer 在EPS输出端优化图片，不修改页面及渲染缓存
+type epsImageRenderer struct {
+	*ps.PS
+	writer  io.Writer
+	options CompressionOptions
+	ctx     context.Context
+	err     error
+}
+
+// buildPDFInfoDict 构造符合PDF标准的文档信息字典
+// 入参: r 渲染器
+// 返回: pdfgo.Dictionary 文档信息字典, error 文本编码错误
+func buildPDFInfoDict(r *Renderer) (pdfgo.Dictionary, error) {
+	var info DocInfo
+	if r.reader != nil {
+		if docInfo, err := r.reader.DocInfo(); err == nil && docInfo != nil {
+			info = *docInfo
+		}
+	}
+	dict := make(pdfgo.Dictionary)
+	for _, field := range []struct {
+		key   pdfgo.Name
+		value string
+	}{{"Title", info.Title}, {"Subject", info.Subject}, {"Author", info.Author}, {"Creator", ofdCreator}} {
+		if field.value == "" {
+			continue
+		}
+		encoded, err := pdfgo.EncodeTextString(field.value)
+		if err != nil {
+			return nil, err
+		}
+		dict[field.key] = encoded
+	}
+	dict["Producer"] = pdfgo.String(ofdCreator)
+	dict["CreationDate"] = pdfgo.String(time.Now().UTC().Format("D:20060102150405Z"))
+	return dict, nil
+}
+
+// compilePDFPage 在独立协程或主协程中完成单页内容读取、单遍内容流生成与Flate预压缩
+// 入参: ctx 取消上下文, r 当前工作渲染器, session 共享PDF会话, page 页面描述, checkNav 是否检查页面导航, zw 复用zlib压缩器, zbuf 复用压缩缓冲
+// 返回: pdfCompiledPage 编译结果, *zlib.Writer 复用压缩器
+func compilePDFPage(ctx context.Context, r *Renderer, session *pdfStreamSession, page RenderDocumentPage, checkNav bool, zw *zlib.Writer, zbuf *bytes.Buffer) (pdfCompiledPage, *zlib.Writer) {
+	content, err := page.ReadContent(ctx, r.reader)
+	if err != nil {
+		return pdfCompiledPage{err: fmt.Errorf("failed to read page: %w", err)}, zw
+	}
+	var resources *Resources
+	if r.reader != nil {
+		resources = r.reader.resources
+	}
+	pdfOut := newPDFPageRenderer(session, ctx, page.Box.W, page.Box.H, resources)
+	prevCtx, prevErr := r.pageContext, r.renderError
+	r.pageContext, r.renderError = context.WithValue(ctx, pdfRendererCtxKey{}, pdfOut), nil
+	renderErr := r.renderCanvasPageToContext(canvas.NewContext(pdfOut), content, !r.transparentBackground)
+	r.pageContext, r.renderError = prevCtx, prevErr
+	if renderErr != nil {
+		return pdfCompiledPage{err: renderErr}, zw
+	}
+	if pdfOut.imageError != nil {
+		return pdfCompiledPage{err: pdfOut.imageError}, zw
+	}
+	raw := pdfOut.content.Bytes()
+	digest := sha256.Sum256(raw)
+	compressed, zw, err := codecpdf.CompressBytes(zw, zbuf, session.compressLevel, raw)
+	if err != nil {
+		return pdfCompiledPage{err: err}, zw
+	}
+	var navContent *PageContent
+	if checkNav && pageNeedsPDFNavigation(r, content) {
+		navContent = content
+	}
+	return pdfCompiledPage{
+		digest:        digest,
+		compressed:    compressed,
+		resources:     pdfOut.content.Resources(),
+		contentForNav: navContent,
+	}, zw
+}
+
+// commitCompiledPDFPage 按内容摘要与资源签名去重并流式写出单页内容流与资源字典
+// 入参: sw 流式PDF写出器, session 共享PDF会话, res 已编译页面数据
+// 返回: pdfgo.Reference 内容流引用, pdfgo.Reference 资源字典引用, error 写入错误
+func commitCompiledPDFPage(sw *codecpdf.StreamWriter, session *pdfStreamSession, res pdfCompiledPage) (pdfgo.Reference, pdfgo.Reference, error) {
+	contentRef, exists := session.contentRefs[res.digest]
+	if exists {
+		session.contentHits.Add(1)
+	} else {
+		contentRef = sw.AllocRef()
+		if err := sw.WritePreencodedStream(contentRef, pdfgo.Dictionary{"Filter": pdfgo.Name("FlateDecode")}, res.compressed); err != nil {
+			return pdfgo.Reference{}, pdfgo.Reference{}, err
+		}
+		session.contentRefs[res.digest] = contentRef
+	}
+	resRef, err := session.graphics.ResourceDictRef(sw, res.resources)
+	if err != nil {
+		return pdfgo.Reference{}, pdfgo.Reference{}, err
+	}
+	return contentRef, resRef, nil
+}
+
+// pageNeedsPDFNavigation 快速判断页面是否存在动作、带动作模板或页面注释，避免无导航页滞留内存
+// 入参: r 渲染器, page 页面内容
+// 返回: bool 是否需要执行导航收集
+func pageNeedsPDFNavigation(r *Renderer, page *PageContent) bool {
+	if page == nil {
+		return false
+	}
+	if len(page.Actions) > 0 {
+		return true
+	}
+	if len(r.pageActionSources(page)) > 0 {
+		return true
+	}
+	if len(r.pageOpenActionSources(page)) > 0 {
+		return true
+	}
+	if r.renderAnnotations && r.reader != nil {
+		ctx := r.pageContext
+		if ctx == nil {
+			ctx = r.outputContext()
+		}
+		if r.reader.doc != nil || r.reader.ofd != nil {
+			if err := r.reader.ensureAnnotationIndexContext(ctx); err != nil {
+				return true
+			}
+		}
+		if readerMayHavePageAnnotations(r.reader, page.ID) {
+			if annots, err := r.reader.pageAnnotationsContext(ctx, page.ID); err == nil && len(annots) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// canReusePDFBaseLoc 判断页面是否不含专属注解与签章，允许按BaseLoc直接跳过读取与渲染
+// 入参: r 渲染器, page 页面描述
+// 返回: bool 是否允许BaseLoc快速复用
+func canReusePDFBaseLoc(r *Renderer, page RenderDocumentPage) bool {
+	if r.OnPageText != nil || page.Source.BaseLoc == "" || page.Content != nil || r.reader == nil {
+		return false
+	}
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	pageID := page.Source.ID
+	if r.renderAnnotations {
+		if r.reader.doc != nil || r.reader.ofd != nil {
+			if err := r.reader.ensureAnnotationIndexContext(ctx); err != nil {
+				return false
+			}
+		}
+		if readerMayHavePageAnnotations(r.reader, pageID) {
+			if annots, err := r.reader.pageAnnotationsContext(ctx, pageID); err != nil || len(annots) > 0 {
+				return false
+			}
+		}
+	}
+	if err := r.reader.ensureSignatureIndexContext(ctx); err != nil {
+		return false
+	}
+	if readerMayHavePageStamps(r.reader, pageID) {
+		if err := r.reader.ensurePageStampsContext(ctx, pageID); err != nil {
+			return false
+		}
+		return len(r.reader.stamps[r.reader.resolveStampPageID(pageID)]) == 0
+	}
+	return true
+}
+
 // RenderSVG 使用canvas输出SVG，按模式保留资源和对象分组
-// 入参: r 渲染器, page 页面内容, writer 输出流, mode 资源模式
+// 入参: ctx 取消上下文, r 渲染器, page 页面内容, writer 输出流, mode 资源模式
 // 返回: SVGResources 外部资源, error 错误信息
-func (CanvasBackend) RenderSVG(r *Renderer, page *PageContent, writer io.Writer, mode SVGMode) (SVGResources, error) {
+func (CanvasBackend) RenderSVG(ctx context.Context, r *Renderer, page *PageContent, writer io.Writer, mode SVGMode) (SVGResources, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return SVGResources{}, err
+	}
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
 	switch mode {
 	case SVGExternalFonts:
 		return r.renderSVGResources(page, writer, false, false)
@@ -48,17 +260,18 @@ func (CanvasBackend) RenderSVG(r *Renderer, page *PageContent, writer io.Writer,
 	case SVGObjects:
 		return r.renderSVGResources(page, writer, true, true)
 	case SVGEmbedded:
-		box, err := r.GetPageBox(page)
+		box, err := r.GetPageBoxContext(ctx, page)
 		if err != nil {
 			return SVGResources{}, err
 		}
 		buffer := bufio.NewWriter(writer)
-		renderer := &svgResourceRenderer{SVG: svg.New(buffer, box.W, box.H, nil), renderer: r, writer: buffer, seen: make(map[string]bool), embeddedFonts: true}
+		renderer := &svgResourceRenderer{SVG: svg.New(buffer, box.W, box.H, nil), renderer: r, writer: buffer, seen: make(map[string]bool), embeddedFonts: true, mergePaths: true, precision: r.svgPrecision}
 		io.WriteString(buffer, svgCreatorMetadata)
 		io.WriteString(buffer, `<g style="image-orientation:none">`)
-		if err := r.renderCanvasPageToContext(canvas.NewContext(renderer), page, !r.TransparentBackground); err != nil {
+		if err := r.renderCanvasPageToContext(canvas.NewContext(renderer), page, !r.transparentBackground); err != nil {
 			return SVGResources{}, err
 		}
+		renderer.flushPendingPath()
 		if renderer.err != nil {
 			return SVGResources{}, renderer.err
 		}
@@ -73,25 +286,40 @@ func (CanvasBackend) RenderSVG(r *Renderer, page *PageContent, writer io.Writer,
 }
 
 // RenderEPS 使用canvas输出单页EPS
-// 入参: r 渲染器, page 页面内容, writer 输出流
+// 入参: ctx 取消上下文, r 渲染器, page 页面内容, writer 输出流
 // 返回: error 错误信息
-func (CanvasBackend) RenderEPS(r *Renderer, page *PageContent, writer io.Writer) error {
+func (CanvasBackend) RenderEPS(ctx context.Context, r *Renderer, page *PageContent, writer io.Writer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	prevCtx := r.pageContext
+	r.pageContext = ctx
+	defer func() { r.pageContext = prevCtx }()
 	c, err := r.renderCanvasPage(page)
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	options := ps.DefaultOptions
 	options.Format = ps.EncapsulatedPostScript
 	buffer := bufio.NewWriter(writer)
 	renderer := ps.New(canvasEPSWriter{buffer}, c.W, c.H, &options)
-	if r.Compression.Mode == CompressionUnchanged {
+	if r.compression.Mode == CompressionUnchanged {
 		c.RenderTo(renderer)
 	} else {
-		optimized := &epsImageRenderer{PS: renderer, writer: buffer, options: r.Compression, ctx: r.outputContext()}
+		optimized := &epsImageRenderer{PS: renderer, writer: buffer, options: r.compression, ctx: ctx}
 		c.RenderTo(optimized)
 		if optimized.err != nil {
 			return optimized.err
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := renderer.Close(); err != nil {
 		return err
@@ -100,10 +328,12 @@ func (CanvasBackend) RenderEPS(r *Renderer, page *PageContent, writer io.Writer)
 }
 
 // RenderPDF 使用原生流式PDF写出器单遍多核并发导出PDF，支持Form复用、内容流去重与恒定内存写出
-// 入参: r 渲染器, pages 页面列表, writer 输出流, progress 页面处理进度
+// 入参: ctx 取消上下文, r 渲染器, pages 页面列表, writer 输出流, progress 页面处理进度
 // 返回: error 错误信息
-func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer io.Writer, progress func(int, int) error) error {
-	ctx := r.outputContext()
+func (CanvasBackend) RenderPDF(ctx context.Context, r *Renderer, pages []RenderDocumentPage, writer io.Writer, progress func(int, int) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -115,11 +345,12 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 			return fmt.Errorf("invalid PDF page %d size: %g x %g", i+1, page.Box.W, page.Box.H)
 		}
 	}
-	view := *r
-	view.pageContext = ctx
-	view.compactStrokes = true
-	r = &view
-	doc := r.Reader.doc
+	prevCtx, prevCompact := r.pageContext, r.compactStrokes
+	r.pageContext, r.compactStrokes = ctx, true
+	defer func() {
+		r.pageContext, r.compactStrokes = prevCtx, prevCompact
+	}()
+	doc := r.reader.doc
 	navigation := &pdfNavigation{}
 	if !r.printing {
 		var err error
@@ -129,14 +360,14 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		}
 	}
 	compressLevel := zlib.DefaultCompression
-	if r.Compression.Mode != CompressionUnchanged {
+	if r.compression.Mode != CompressionUnchanged {
 		compressLevel = zlib.BestCompression
 	}
 	sw, err := codecpdf.NewStreamWriter(ctx, writer, len(pages), true, compressLevel)
 	if err != nil {
 		return err
 	}
-	session := newPDFStreamSession(sw, r.Compression)
+	session := newPDFStreamSession(sw, r.compression)
 	navWriter := codecpdf.NewNavWriter(sw)
 	pageGroupRef := sw.AllocRef()
 	if err := sw.WriteObject(pageGroupRef, pdfgo.Dictionary{
@@ -152,8 +383,8 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		return err
 	}
 	workers := 1
-	if len(pages) > 2 && r.OnPageText == nil && r.Reader != nil {
-		w := conversionWorkers(r.Reader.resources.context(ctx))
+	if len(pages) > 2 && r.OnPageText == nil && r.reader != nil {
+		w := conversionWorkers(r.reader.resources.context(ctx))
 		if w > 1 {
 			workers = min(len(pages)-1, min(w, 8))
 		}
@@ -237,6 +468,14 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		return err
 	}
 	var forkedRenderers []*Renderer
+	var cleanupForks []*Renderer
+	defer func() {
+		for _, forked := range cleanupForks {
+			if forked != nil && forked.reader != nil {
+				_ = forked.reader.Close()
+			}
+		}
+	}()
 	if workers > 1 && len(pages) > 1 {
 		workerCtx, cancelWorkers := context.WithCancel(ctx)
 		defer cancelWorkers()
@@ -252,6 +491,7 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 			}
 			forked.compactStrokes = true
 			forkedRenderers = append(forkedRenderers, forked)
+			cleanupForks = append(cleanupForks, forked)
 		}
 		if len(forkedRenderers) == 0 {
 			workers = 1
@@ -364,8 +604,8 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 		return err
 	}
 	fontWorkers := 1
-	if r.Reader != nil {
-		fontWorkers = max(1, conversionWorkers(r.Reader.resources.context(ctx)))
+	if r.reader != nil {
+		fontWorkers = max(1, conversionWorkers(r.reader.resources.context(ctx)))
 	}
 	if err := session.fonts.WriteAll(ctx, sw, fontWorkers); err != nil {
 		return err
@@ -471,38 +711,6 @@ func (CanvasBackend) RenderPDF(r *Renderer, pages []RenderDocumentPage, writer i
 	return sw.Finish(catalog, info)
 }
 
-// pdfPageBaseLocKey 按页内容包路径与物理尺寸复用相同静态页面
-type pdfPageBaseLocKey struct {
-	baseLoc string
-	box     Box
-}
-
-// pdfSharedPageRef 记录可跨页直接复用的PDF内容流与资源字典引用
-type pdfSharedPageRef struct {
-	contentRef   pdfgo.Reference
-	resourcesRef pdfgo.Reference
-}
-
-// pdfCompiledPage 保存单页并发渲染与预压缩后的轻量输出结果
-type pdfCompiledPage struct {
-	digest        [32]byte
-	compressed    []byte
-	resources     *codecpdf.ContentResources
-	contentForNav *PageContent
-	err           error
-}
-
-// pdfDeferredPage 保存因含跨页视频或延迟音频需在文档末尾写出的页面字典骨架
-type pdfDeferredPage struct {
-	index int
-	dict  pdfgo.Dictionary
-}
-
-// canvasEPSWriter 在EPS头部写入本库制作软件，不改动绘图内容
-type canvasEPSWriter struct {
-	io.Writer
-}
-
 // Write 写入EPS片段并替换独立的制作软件声明
 // 入参: data EPS片段
 // 返回: int 已处理字节数, error 写入错误
@@ -514,15 +722,6 @@ func (w canvasEPSWriter) Write(data []byte) (int, error) {
 		return len(data), nil
 	}
 	return w.Writer.Write(data)
-}
-
-// epsImageRenderer 在EPS输出端优化图片，不修改页面及渲染缓存
-type epsImageRenderer struct {
-	*ps.PS
-	writer  io.Writer
-	options CompressionOptions
-	ctx     context.Context
-	err     error
 }
 
 // RenderImage 写出Flate或更小的JPEG图片，保留显示尺寸与变换
@@ -621,159 +820,4 @@ func (r *epsImageRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 		return
 	}
 	_, r.err = io.WriteString(r.writer, "~>\n grestore")
-}
-
-// buildPDFInfoDict 构造符合PDF标准的文档信息字典
-// 入参: r 渲染器
-// 返回: pdfgo.Dictionary 文档信息字典, error 文本编码错误
-func buildPDFInfoDict(r *Renderer) (pdfgo.Dictionary, error) {
-	var info DocInfo
-	if r.Reader != nil {
-		if docInfo, err := r.Reader.DocInfo(); err == nil && docInfo != nil {
-			info = *docInfo
-		}
-	}
-	dict := make(pdfgo.Dictionary)
-	for _, field := range []struct {
-		key   pdfgo.Name
-		value string
-	}{{"Title", info.Title}, {"Subject", info.Subject}, {"Author", info.Author}, {"Creator", ofdCreator}} {
-		if field.value == "" {
-			continue
-		}
-		encoded, err := pdfgo.EncodeTextString(field.value)
-		if err != nil {
-			return nil, err
-		}
-		dict[field.key] = encoded
-	}
-	dict["Producer"] = pdfgo.String(ofdCreator)
-	dict["CreationDate"] = pdfgo.String(time.Now().UTC().Format("D:20060102150405Z"))
-	return dict, nil
-}
-
-// compilePDFPage 在独立协程或主协程中完成单页内容读取、单遍内容流生成与Flate预压缩
-// 入参: ctx 取消上下文, r 当前工作渲染器, session 共享PDF会话, page 页面描述, checkNav 是否检查页面导航, zw 复用zlib压缩器, zbuf 复用压缩缓冲
-// 返回: pdfCompiledPage 编译结果, *zlib.Writer 复用压缩器
-func compilePDFPage(ctx context.Context, r *Renderer, session *pdfStreamSession, page RenderDocumentPage, checkNav bool, zw *zlib.Writer, zbuf *bytes.Buffer) (pdfCompiledPage, *zlib.Writer) {
-	content, err := page.ReadContent(ctx, r.Reader)
-	if err != nil {
-		return pdfCompiledPage{err: fmt.Errorf("failed to read page: %w", err)}, zw
-	}
-	var resources *Resources
-	if r.Reader != nil {
-		resources = r.Reader.resources
-	}
-	pdfOut := newPDFPageRenderer(session, ctx, page.Box.W, page.Box.H, resources)
-	pageRenderer := *r
-	pageRenderer.pageContext = context.WithValue(ctx, pdfRendererCtxKey{}, pdfOut)
-	pageRenderer.renderError = nil
-	if err := pageRenderer.renderCanvasPageToContext(canvas.NewContext(pdfOut), content, !pageRenderer.TransparentBackground); err != nil {
-		return pdfCompiledPage{err: err}, zw
-	}
-	if pdfOut.imageError != nil {
-		return pdfCompiledPage{err: pdfOut.imageError}, zw
-	}
-	raw := pdfOut.content.Bytes()
-	digest := sha256.Sum256(raw)
-	compressed, zw, err := codecpdf.CompressBytes(zw, zbuf, session.compressLevel, raw)
-	if err != nil {
-		return pdfCompiledPage{err: err}, zw
-	}
-	var navContent *PageContent
-	if checkNav && pageNeedsPDFNavigation(r, content) {
-		navContent = content
-	}
-	return pdfCompiledPage{
-		digest:        digest,
-		compressed:    compressed,
-		resources:     pdfOut.content.Resources(),
-		contentForNav: navContent,
-	}, zw
-}
-
-// commitCompiledPDFPage 按内容摘要与资源签名去重并流式写出单页内容流与资源字典
-// 入参: sw 流式PDF写出器, session 共享PDF会话, res 已编译页面数据
-// 返回: pdfgo.Reference 内容流引用, pdfgo.Reference 资源字典引用, error 写入错误
-func commitCompiledPDFPage(sw *codecpdf.StreamWriter, session *pdfStreamSession, res pdfCompiledPage) (pdfgo.Reference, pdfgo.Reference, error) {
-	contentRef, exists := session.contentRefs[res.digest]
-	if exists {
-		session.contentHits.Add(1)
-	} else {
-		contentRef = sw.AllocRef()
-		if err := sw.WritePreencodedStream(contentRef, pdfgo.Dictionary{"Filter": pdfgo.Name("FlateDecode")}, res.compressed); err != nil {
-			return pdfgo.Reference{}, pdfgo.Reference{}, err
-		}
-		session.contentRefs[res.digest] = contentRef
-	}
-	resRef, err := session.graphics.ResourceDictRef(sw, res.resources)
-	if err != nil {
-		return pdfgo.Reference{}, pdfgo.Reference{}, err
-	}
-	return contentRef, resRef, nil
-}
-
-// pageNeedsPDFNavigation 快速判断页面是否存在动作、带动作模板或页面注释，避免无导航页滞留内存
-// 入参: r 渲染器, page 页面内容
-// 返回: bool 是否需要执行导航收集
-func pageNeedsPDFNavigation(r *Renderer, page *PageContent) bool {
-	if page == nil {
-		return false
-	}
-	if len(page.Actions) > 0 {
-		return true
-	}
-	if len(r.pageActionSources(page)) > 0 {
-		return true
-	}
-	if len(r.pageOpenActionSources(page)) > 0 {
-		return true
-	}
-	if r.RenderAnnotations && r.Reader != nil {
-		ctx := r.outputContext()
-		if r.Reader.doc != nil || r.Reader.OFD != nil {
-			if err := r.Reader.ensureAnnotationIndexContext(ctx); err != nil {
-				return true
-			}
-		}
-		if readerMayHavePageAnnotations(r.Reader, page.ID) {
-			if annots, err := r.Reader.pageAnnotationsContext(ctx, page.ID); err == nil && len(annots) > 0 {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// canReusePDFBaseLoc 判断页面是否不含专属注解与签章，允许按BaseLoc直接跳过读取与渲染
-// 入参: r 渲染器, page 页面描述
-// 返回: bool 是否允许BaseLoc快速复用
-func canReusePDFBaseLoc(r *Renderer, page RenderDocumentPage) bool {
-	if r.OnPageText != nil || page.Source.BaseLoc == "" || page.Content != nil || r.Reader == nil {
-		return false
-	}
-	ctx := r.outputContext()
-	pageID := page.Source.ID
-	if r.RenderAnnotations {
-		if r.Reader.doc != nil || r.Reader.OFD != nil {
-			if err := r.Reader.ensureAnnotationIndexContext(ctx); err != nil {
-				return false
-			}
-		}
-		if readerMayHavePageAnnotations(r.Reader, pageID) {
-			if annots, err := r.Reader.pageAnnotationsContext(ctx, pageID); err != nil || len(annots) > 0 {
-				return false
-			}
-		}
-	}
-	if err := r.Reader.ensureSignatureIndexContext(ctx); err != nil {
-		return false
-	}
-	if readerMayHavePageStamps(r.Reader, pageID) {
-		if err := r.Reader.ensurePageStampsContext(ctx, pageID); err != nil {
-			return false
-		}
-		return len(r.Reader.Stamps[r.Reader.resolveStampPageID(pageID)]) == 0
-	}
-	return true
 }

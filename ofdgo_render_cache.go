@@ -60,6 +60,39 @@ type Resources struct {
 	order   list.List
 }
 
+// resourceNode 保存共享缓存成本、唯一扣减标记与弱引用淘汰操作
+type resourceNode struct {
+	cost    int64
+	removed atomic.Bool
+	element *list.Element
+	evict   func()
+}
+
+// renderCache 按估算字节数限制派生渲染数据，淘汰不修改源资源
+type renderCache[K comparable, V any] struct {
+	mu          sync.Mutex
+	resources   *Resources
+	limit, used int
+	entries     map[K]*list.Element
+	order       list.List
+	loading     map[K]*renderCacheLoad[V]
+}
+
+// renderCacheLoad 合并同一资源的并发加载，不持有已完成任务
+type renderCacheLoad[V any] struct {
+	done  chan struct{}
+	value V
+	err   error
+}
+
+// renderCacheEntry 保存缓存值及内存成本
+type renderCacheEntry[K comparable, V any] struct {
+	key   K
+	value V
+	cost  int
+	node  *resourceNode
+}
+
 // NewResources 创建共享资源策略，不启动任务或修改进程全局配置
 // 入参: options 并行及内存选项
 // 返回: *Resources 共享策略, error 参数错误
@@ -82,6 +115,86 @@ func NewResources(options ResourceOptions) (*Resources, error) {
 	resources := &Resources{options: options, pool: pool}
 	resources.limit.Store(options.CacheBytes)
 	return resources, nil
+}
+
+// WithResources 设置阅读器及派生编辑器共享的资源策略
+// 入参: resources 共享策略，nil使用默认策略
+// 返回: ReaderOption 阅读选项
+func WithResources(resources *Resources) ReaderOption {
+	return func(options *readerOptions) { options.resources = resources }
+}
+
+// resourceCache 按类别基准分配共享预算，较大总预算同比扩展类别额度
+// 入参: resources 共享策略, baseline 类别基准预算
+// 返回: *renderCache 缓存实例
+func resourceCache[K comparable, V any](resources *Resources, baseline int) *renderCache[K, V] {
+	if resources == nil {
+		return &renderCache[K, V]{limit: baseline}
+	}
+	limit := min(resources.options.CacheBytes, int64(int(^uint(0)>>1)-1))
+	if baseline > 0 && limit > int64(baseline) {
+		share := int64(baseline)
+		if limit > defaultResourceCacheBytes {
+			scaled := float64(baseline) * (float64(limit) / defaultResourceCacheBytes)
+			share = limit
+			if scaled < float64(limit) {
+				share = int64(scaled)
+			}
+		}
+		limit = min(limit, share)
+	}
+	return &renderCache[K, V]{resources: resources, limit: int(limit)}
+}
+
+// rasterCommandCost 按保留容量估算中立指令成本，不含临时后端路径及借用图片
+// 入参: command 绘制指令
+// 返回: int 字节成本
+func rasterCommandCost(command RasterCommand) int {
+	cost := 512 + (cap(command.Path)+cap(command.Clip))*56
+	if command.Stroke != nil {
+		cost += 128 + cap(command.Stroke.Dashes)*8
+	}
+	if command.Paint.Gradient != nil {
+		cost += 256 + cap(command.Paint.Gradient.Stops)*64
+		if mesh := command.Paint.Gradient.Mesh; mesh != nil {
+			cost += 32 + cap(mesh.Triangles)*240
+		}
+	}
+	return cost
+}
+
+// rasterCommandsCost 估算整组指令保留的内存，同一图片实例只计一次
+// 入参: commands 绘制指令, limit 缓存预算
+// 返回: int 估算字节数，超预算时返回预算加一
+func rasterCommandsCost(commands []RasterCommand, limit int) int {
+	limit = max(0, limit)
+	cost := 0
+	var images map[image.Image]bool
+	for _, command := range commands {
+		part := rasterCommandCost(command)
+		if part < 0 || part > limit-cost {
+			return limit + 1
+		}
+		cost += part
+		if command.Image == nil {
+			continue
+		}
+		if reflect.ValueOf(command.Image).Kind() == reflect.Pointer {
+			if images[command.Image] {
+				continue
+			}
+			if images == nil {
+				images = make(map[image.Image]bool)
+			}
+			images[command.Image] = true
+		}
+		part = baseimage.StorageCost(unwrapEncodedImage(command.Image), limit-cost)
+		if part > limit-cost {
+			return limit + 1
+		}
+		cost += part
+	}
+	return cost
 }
 
 // ConversionPool 返回资源策略共享的转换调度器
@@ -113,37 +226,6 @@ func (r *Resources) Clear() {
 // 返回: int64 缓存成本
 func (r *Resources) CacheUsage() int64 {
 	return r.used.Load()
-}
-
-// WithResources 设置阅读器及派生编辑器共享的资源策略
-// 入参: resources 共享策略，nil使用默认策略
-// 返回: ReaderOption 阅读选项
-func WithResources(resources *Resources) ReaderOption {
-	return func(options *readerOptions) { options.resources = resources }
-}
-
-// resourceNode 保存共享缓存成本、唯一扣减标记与弱引用淘汰操作
-type resourceNode struct {
-	cost    int64
-	removed atomic.Bool
-	element *list.Element
-	evict   func()
-}
-
-// renderCache 按估算字节数限制派生渲染数据，淘汰不修改源资源
-type renderCache[K comparable, V any] struct {
-	mu          sync.Mutex
-	resources   *Resources
-	limit, used int
-	entries     map[K]*list.Element
-	order       list.List
-	loading     map[K]*renderCacheLoad[V]
-}
-
-// remove 删除本地条目并在未扣减时归还全局字节计数，需持有本地缓存锁
-// 入参: item 缓存条目
-func (c *renderCache[K, V]) remove(item *list.Element) {
-	c.removeLocal(item)
 }
 
 // putLocked 在持有本地缓存锁时替换本地条目并按本地预算淘汰
@@ -360,21 +442,6 @@ func (c *renderCache[K, V]) load(ctx context.Context, key K, read func() (V, int
 	}
 }
 
-// renderCacheLoad 合并同一资源的并发加载，不持有已完成任务
-type renderCacheLoad[V any] struct {
-	done  chan struct{}
-	value V
-	err   error
-}
-
-// renderCacheEntry 保存缓存值及内存成本
-type renderCacheEntry[K comparable, V any] struct {
-	key   K
-	value V
-	cost  int
-	node  *resourceNode
-}
-
 // context 为未指定转换池的操作附加资源调度器
 // 入参: ctx 操作上下文
 // 返回: context.Context 计算上下文
@@ -458,77 +525,4 @@ func (r *Resources) evictOne() bool {
 		node.evict()
 	}
 	return true
-}
-
-// resourceCache 按类别基准分配共享预算，较大总预算同比扩展类别额度
-// 入参: resources 共享策略, baseline 类别基准预算
-// 返回: *renderCache 缓存实例
-func resourceCache[K comparable, V any](resources *Resources, baseline int) *renderCache[K, V] {
-	if resources == nil {
-		return &renderCache[K, V]{limit: baseline}
-	}
-	limit := min(resources.options.CacheBytes, int64(int(^uint(0)>>1)-1))
-	if baseline > 0 && limit > int64(baseline) {
-		share := int64(baseline)
-		if limit > defaultResourceCacheBytes {
-			scaled := float64(baseline) * (float64(limit) / defaultResourceCacheBytes)
-			share = limit
-			if scaled < float64(limit) {
-				share = int64(scaled)
-			}
-		}
-		limit = min(limit, share)
-	}
-	return &renderCache[K, V]{resources: resources, limit: int(limit)}
-}
-
-// rasterCommandCost 按保留容量估算中立指令成本，不含临时后端路径及借用图片
-// 入参: command 绘制指令
-// 返回: int 字节成本
-func rasterCommandCost(command RasterCommand) int {
-	cost := 512 + (cap(command.Path)+cap(command.Clip))*56
-	if command.Stroke != nil {
-		cost += 128 + cap(command.Stroke.Dashes)*8
-	}
-	if command.Paint.Gradient != nil {
-		cost += 256 + cap(command.Paint.Gradient.Stops)*64
-		if mesh := command.Paint.Gradient.Mesh; mesh != nil {
-			cost += 32 + cap(mesh.Triangles)*240
-		}
-	}
-	return cost
-}
-
-// rasterCommandsCost 估算整组指令保留的内存，同一图片实例只计一次
-// 入参: commands 绘制指令, limit 缓存预算
-// 返回: int 估算字节数，超预算时返回预算加一
-func rasterCommandsCost(commands []RasterCommand, limit int) int {
-	limit = max(0, limit)
-	cost := 0
-	var images map[image.Image]bool
-	for _, command := range commands {
-		part := rasterCommandCost(command)
-		if part < 0 || part > limit-cost {
-			return limit + 1
-		}
-		cost += part
-		if command.Image == nil {
-			continue
-		}
-		if reflect.ValueOf(command.Image).Kind() == reflect.Pointer {
-			if images[command.Image] {
-				continue
-			}
-			if images == nil {
-				images = make(map[image.Image]bool)
-			}
-			images[command.Image] = true
-		}
-		part = baseimage.StorageCost(command.Image, limit-cost)
-		if part > limit-cost {
-			return limit + 1
-		}
-		cost += part
-	}
-	return cost
 }

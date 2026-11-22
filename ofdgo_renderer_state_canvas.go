@@ -122,6 +122,49 @@ type canvasBackendState struct {
 	stampSessions   map[[32]byte]*cachedStampSession
 }
 
+// sharedCanvasCache 获取或初始化指定键名的线程安全Canvas共享缓存
+// 入参: r 渲染器, key 缓存标识键, limit 容量上限字节数
+// 返回: *renderCache[K, V] 共享缓存
+func sharedCanvasCache[K comparable, V any](r *Renderer, key any, limit int) *renderCache[K, V] {
+	if state, ok := r.sharedBackendStates[key]; ok {
+		return state.(*renderCache[K, V])
+	}
+	if r.sharedBackendStates == nil {
+		r.sharedBackendStates = make(map[any]any)
+	}
+	cache := resourceCache[K, V](r.reader.resources, limit)
+	r.sharedBackendStates[key] = cache
+	return cache
+}
+
+// canvasGeometryDigest 按完整坐标、路径顺序及几何容差计算摘要
+// 入参: paths 非空路径序列
+// 返回: [32]byte 几何摘要
+func canvasGeometryDigest(paths ...*canvas.Path) [32]byte {
+	hash := sha256.New()
+	var data [512]byte
+	binary.LittleEndian.PutUint64(data[:8], math.Float64bits(canvas.Tolerance))
+	binary.LittleEndian.PutUint64(data[8:16], math.Float64bits(canvas.Epsilon))
+	binary.LittleEndian.PutUint64(data[16:24], math.Float64bits(canvas.BentleyOttmannEpsilon))
+	hash.Write(data[:24])
+	for _, path := range paths {
+		values := path.Data()
+		binary.LittleEndian.PutUint64(data[:8], uint64(len(values)))
+		hash.Write(data[:8])
+		for len(values) > 0 {
+			count := min(len(values), len(data)/8)
+			for i, value := range values[:count] {
+				binary.LittleEndian.PutUint64(data[i*8:], math.Float64bits(value))
+			}
+			hash.Write(data[:count*8])
+			values = values[count:]
+		}
+	}
+	var key [32]byte
+	hash.Sum(key[:0])
+	return key
+}
+
 // resetFonts 清除Canvas字体及字形缓存
 func (s *canvasBackendState) resetFonts() {
 	s.fontFamilies = make(map[canvasFontKey]*canvas.FontFamily)
@@ -152,21 +195,6 @@ func (CanvasBackend) forkSharedState(src, dst *Renderer) {
 	dst.sharedBackendStates[stampImageCacheKey{}] = src.stampImageCache()
 	dst.sharedBackendStates[stampOFDCacheKey{}] = src.stampOFDCache()
 	dst.sharedBackendStates[imageEffectCacheKey{}] = src.imageEffectCache()
-}
-
-// sharedCanvasCache 获取或初始化指定键名的线程安全Canvas共享缓存
-// 入参: r 渲染器, key 缓存标识键, limit 容量上限字节数
-// 返回: *renderCache[K, V] 共享缓存
-func sharedCanvasCache[K comparable, V any](r *Renderer, key any, limit int) *renderCache[K, V] {
-	if state, ok := r.sharedBackendStates[key]; ok {
-		return state.(*renderCache[K, V])
-	}
-	if r.sharedBackendStates == nil {
-		r.sharedBackendStates = make(map[any]any)
-	}
-	cache := resourceCache[K, V](r.Reader.resources, limit)
-	r.sharedBackendStates[key] = cache
-	return cache
 }
 
 // canvasClipIntersections 获取子渲染器共享的几何交集缓存，限制结果保留量
@@ -295,7 +323,7 @@ func (r *Renderer) canvasFontOutlines() *renderCache[[32]byte, *basefont.Outline
 func (r *Renderer) canvasFontFamilies() *renderCache[canvasFontKey, *canvas.FontFamily] {
 	state := r.canvasState()
 	if state.fontFamilyCache == nil {
-		state.fontFamilyCache = resourceCache[canvasFontKey, *canvas.FontFamily](r.Reader.resources, 64<<20)
+		state.fontFamilyCache = resourceCache[canvasFontKey, *canvas.FontFamily](r.reader.resources, 64<<20)
 	}
 	return state.fontFamilyCache
 }
@@ -338,7 +366,7 @@ func (r *Renderer) canvasState() *canvasBackendState {
 		return state.(*canvasBackendState)
 	}
 	state := &canvasBackendState{
-		resources: r.Reader.resources,
+		resources: r.reader.resources,
 	}
 	state.resetFonts()
 	r.backendStates[key] = state
@@ -362,32 +390,4 @@ func (r *Renderer) settleCanvasPath(path *canvas.Path, rule canvas.FillRule) *ca
 		cache.put(key, result.Copy(), cost)
 	}
 	return result
-}
-
-// canvasGeometryDigest 按完整坐标、路径顺序及几何容差计算摘要
-// 入参: paths 非空路径序列
-// 返回: [32]byte 几何摘要
-func canvasGeometryDigest(paths ...*canvas.Path) [32]byte {
-	hash := sha256.New()
-	var data [512]byte
-	binary.LittleEndian.PutUint64(data[:8], math.Float64bits(canvas.Tolerance))
-	binary.LittleEndian.PutUint64(data[8:16], math.Float64bits(canvas.Epsilon))
-	binary.LittleEndian.PutUint64(data[16:24], math.Float64bits(canvas.BentleyOttmannEpsilon))
-	hash.Write(data[:24])
-	for _, path := range paths {
-		values := path.Data()
-		binary.LittleEndian.PutUint64(data[:8], uint64(len(values)))
-		hash.Write(data[:8])
-		for len(values) > 0 {
-			count := min(len(values), len(data)/8)
-			for i, value := range values[:count] {
-				binary.LittleEndian.PutUint64(data[i*8:], math.Float64bits(value))
-			}
-			hash.Write(data[:count*8])
-			values = values[count:]
-		}
-	}
-	var key [32]byte
-	hash.Sum(key[:0])
-	return key
 }

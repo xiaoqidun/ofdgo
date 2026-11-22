@@ -40,6 +40,19 @@ type CompositeSelection struct {
 	richText   map[int]*richTextSnapshot
 }
 
+// compositeContainers 获取直接内容容器，序号不随绘制成员增删变化
+// 入参: node 父节点
+// 返回: []*editorXML 内容容器与页块
+func compositeContainers(node *editorXML) []*editorXML {
+	var result []*editorXML
+	for _, child := range node.children {
+		if (child.name.Local == "Content" || child.name.Local == "PageBlock") && classifyOFDNamespace(child.name.Space) != ofdXMLUnknown {
+			result = append(result, child)
+		}
+	}
+	return result
+}
+
 // PasteCompositeSelection 将内部对象快照粘贴到页面顶层，保持嵌套结构、源继承外观和裁剪
 // 入参: page 目标页, selection 当前编辑器内捕获的快照, dx 页面横向位移, dy 页面纵向位移
 // 返回: []string 新对象标识, error 错误信息
@@ -331,7 +344,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 			wrapped.defaults, wrapped.drawParams = copy.defaults, copy.drawParams
 			copy = wrapped
 		}
-		copy.parent, copy.boundaryInCTM = IdentityMatrix, true
+		copy.parent, copy.boundaryInCTM = IdentityMatrix(), true
 		if err := e.transformCompositeMember(renderer, copy, source.parent); err != nil {
 			return err
 		}
@@ -353,7 +366,7 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 			}
 		}
 		if copy.object.Type == "CompositeObject" || copy.object.Type == "CompositeGraphicUnit" {
-			if err := copy.convertCoordinates(IdentityMatrix, false); err != nil {
+			if err := copy.convertCoordinates(IdentityMatrix(), false); err != nil {
 				return err
 			}
 		}
@@ -531,17 +544,4 @@ func (n *editorCompositeNode) loadedScope(path []int) *editorCompositeNode {
 		n = nodes[index]
 	}
 	return n
-}
-
-// compositeContainers 获取直接内容容器，序号不随绘制成员增删变化
-// 入参: node 父节点
-// 返回: []*editorXML 内容容器与页块
-func compositeContainers(node *editorXML) []*editorXML {
-	var result []*editorXML
-	for _, child := range node.children {
-		if (child.name.Local == "Content" || child.name.Local == "PageBlock") && classifyOFDNamespace(child.name.Space) != ofdXMLUnknown {
-			result = append(result, child)
-		}
-	}
-	return result
 }

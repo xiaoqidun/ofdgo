@@ -22,13 +22,13 @@ import (
 const (
 	u3dLinePositionSign = iota
 	u3dLinePositionX
-	u3dLinePositionY
-	u3dLinePositionZ
+	_
+	_
 	u3dLineNormalCount
 	u3dLineNormalSign
 	u3dLineNormalX
-	u3dLineNormalY
-	u3dLineNormalZ
+	_
+	_
 	u3dLineCount
 	u3dLineShading
 	u3dLineNormalIndex
@@ -39,13 +39,13 @@ const (
 	u3dLineSpecularSign
 	u3dLineTextureSign
 	u3dLineColorR
-	u3dLineColorG
-	u3dLineColorB
-	u3dLineColorA
+	_
+	_
+	_
 	u3dLineTextureU
-	u3dLineTextureV
-	u3dLineTextureS
-	u3dLineTextureT
+	_
+	_
+	_
 	u3dLineContextCount
 )
 
@@ -56,6 +56,13 @@ type u3dLineState struct {
 	stats          []float64
 	pointOffsets   []uint32
 	pointPredicted []bool
+}
+
+// u3dLineReader 保存当前续块的独立压缩上下文
+type u3dLineReader struct {
+	values *u3dValues
+	bits   *u3dBits
+	hist   [u3dLineContextCount]u3dHistogram
 }
 
 // average 取得指定顶点各属性预测，点集法线使用缓存的球面均值
@@ -107,13 +114,6 @@ func (s *u3dLineState) accumulateCorners(mesh *U3DMesh, shadingIndex uint32, cor
 			s.stats[base+4]++
 		}
 	}
-}
-
-// u3dLineReader 保存当前续块的独立压缩上下文
-type u3dLineReader struct {
-	values *u3dValues
-	bits   *u3dBits
-	hist   [u3dLineContextCount]u3dHistogram
 }
 
 // value 按指定上下文和位宽读取点集或线集字段

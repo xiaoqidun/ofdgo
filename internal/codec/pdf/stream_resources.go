@@ -37,6 +37,18 @@ type GraphicResourceRegistry struct {
 	resourceRefs map[string]pdfgo.Reference
 }
 
+// pendingDictObj 记录待流式写出的非流字典资源对象
+type pendingDictObj struct {
+	ref  pdfgo.Reference
+	dict pdfgo.Dictionary
+}
+
+// patternItem 保存已登记的渐变Pattern资源名与引用
+type patternItem struct {
+	name pdfgo.Name
+	ref  pdfgo.Reference
+}
+
 // NewGraphicResourceRegistry 创建文档级图形资源去重注册表
 // 入参: allocRef 对象引用分配器
 // 返回: *GraphicResourceRegistry 图形资源注册表
@@ -47,80 +59,6 @@ func NewGraphicResourceRegistry(allocRef func() pdfgo.Reference) *GraphicResourc
 		patterns:     make(map[string]patternItem),
 		resourceRefs: make(map[string]pdfgo.Reference),
 	}
-}
-
-// OpacityGS 获取或创建指定八位透明度对应的共享ExtGState对象
-// 入参: alpha 八位透明度值
-// 返回: pdfgo.Name 状态名, pdfgo.Reference 对象引用
-func (r *GraphicResourceRegistry) OpacityGS(alpha uint8) (pdfgo.Name, pdfgo.Reference) {
-	name := pdfgo.Name("GS" + strconv.Itoa(int(alpha)))
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if ref, ok := r.extGStates[alpha]; ok {
-		return name, ref
-	}
-	ref := r.allocRef()
-	a := pdfgo.Real(float64(alpha) / 255.0)
-	dict := pdfgo.Dictionary{"Type": pdfgo.Name("ExtGState"), "CA": a, "ca": a}
-	r.extGStates[alpha] = ref
-	r.pendingObjs = append(r.pendingObjs, pendingDictObj{ref: ref, dict: dict})
-	return name, ref
-}
-
-// ShadingPattern 获取或创建按完整字典内容去重的渐变Pattern对象
-// 入参: gradient 画布渐变, m 变换矩阵
-// 返回: pdfgo.Name Pattern名, pdfgo.Reference 对象引用
-func (r *GraphicResourceRegistry) ShadingPattern(gradient canvas.Gradient, m canvas.Matrix) (pdfgo.Name, pdfgo.Reference) {
-	dict := buildShadingPatternDict(gradient, m)
-	var keyBuf bytes.Buffer
-	appendPDFObject(&keyBuf, dict)
-	key := keyBuf.String()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if item, ok := r.patterns[key]; ok {
-		return item.name, item.ref
-	}
-	ref := r.allocRef()
-	name := pdfgo.Name("P" + strconv.Itoa(r.patternSeq))
-	r.patternSeq++
-	r.patterns[key] = patternItem{name: name, ref: ref}
-	r.pendingObjs = append(r.pendingObjs, pendingDictObj{ref: ref, dict: dict})
-	return name, ref
-}
-
-// FlushPending 将新增的ExtGState与ShadingPattern字典流式写入对象流并清空待写队列
-// 入参: writer 流式PDF写出器
-// 返回: error 写入错误
-func (r *GraphicResourceRegistry) FlushPending(writer *StreamWriter) error {
-	r.mu.Lock()
-	items := r.pendingObjs
-	r.pendingObjs = nil
-	r.mu.Unlock()
-	for _, item := range items {
-		if err := writer.WriteObject(item.ref, item.dict); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ResourceDictRef 复用或流式写出完全相同的Resources间接字典对象，供同资源页面共享
-// 入参: writer 流式PDF写出器, res 资源集合
-// 返回: pdfgo.Reference 资源字典引用, error 写入错误
-func (r *GraphicResourceRegistry) ResourceDictRef(writer *StreamWriter, res *ContentResources) (pdfgo.Reference, error) {
-	key := res.Key()
-	r.mu.Lock()
-	if ref, ok := r.resourceRefs[key]; ok {
-		r.mu.Unlock()
-		return ref, nil
-	}
-	ref := r.allocRef()
-	r.resourceRefs[key] = ref
-	r.mu.Unlock()
-	if err := writer.WriteObject(ref, res.Dictionary()); err != nil {
-		return pdfgo.Reference{}, err
-	}
-	return ref, nil
 }
 
 // FormXObjectDict 构造标准PDF Form XObject流字典，可选附加透明组隔离字典
@@ -143,18 +81,6 @@ func FormXObjectDict(widthMM, heightMM float64, resourcesRef pdfgo.Reference, tr
 		}
 	}
 	return dict
-}
-
-// pendingDictObj 记录待流式写出的非流字典资源对象
-type pendingDictObj struct {
-	ref  pdfgo.Reference
-	dict pdfgo.Dictionary
-}
-
-// patternItem 保存已登记的渐变Pattern资源名与引用
-type patternItem struct {
-	name pdfgo.Name
-	ref  pdfgo.Reference
 }
 
 // buildShadingPatternDict 按ISO 32000-1构造线性或径向渐变PatternType 2字典
@@ -264,4 +190,78 @@ func unpremultiplyGradientStop(c color.RGBA) pdfgo.Array {
 	}
 	a := float64(c.A) / 255.0
 	return pdfgo.Array{pdfgo.Real(float64(c.R) / 255.0 / a), pdfgo.Real(float64(c.G) / 255.0 / a), pdfgo.Real(float64(c.B) / 255.0 / a)}
+}
+
+// OpacityGS 获取或创建指定八位透明度对应的共享ExtGState对象
+// 入参: alpha 八位透明度值
+// 返回: pdfgo.Name 状态名, pdfgo.Reference 对象引用
+func (r *GraphicResourceRegistry) OpacityGS(alpha uint8) (pdfgo.Name, pdfgo.Reference) {
+	name := pdfgo.Name("GS" + strconv.Itoa(int(alpha)))
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if ref, ok := r.extGStates[alpha]; ok {
+		return name, ref
+	}
+	ref := r.allocRef()
+	a := pdfgo.Real(float64(alpha) / 255.0)
+	dict := pdfgo.Dictionary{"Type": pdfgo.Name("ExtGState"), "CA": a, "ca": a}
+	r.extGStates[alpha] = ref
+	r.pendingObjs = append(r.pendingObjs, pendingDictObj{ref: ref, dict: dict})
+	return name, ref
+}
+
+// ShadingPattern 获取或创建按完整字典内容去重的渐变Pattern对象
+// 入参: gradient 画布渐变, m 变换矩阵
+// 返回: pdfgo.Name Pattern名, pdfgo.Reference 对象引用
+func (r *GraphicResourceRegistry) ShadingPattern(gradient canvas.Gradient, m canvas.Matrix) (pdfgo.Name, pdfgo.Reference) {
+	dict := buildShadingPatternDict(gradient, m)
+	var keyBuf bytes.Buffer
+	appendPDFObject(&keyBuf, dict)
+	key := keyBuf.String()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if item, ok := r.patterns[key]; ok {
+		return item.name, item.ref
+	}
+	ref := r.allocRef()
+	name := pdfgo.Name("P" + strconv.Itoa(r.patternSeq))
+	r.patternSeq++
+	r.patterns[key] = patternItem{name: name, ref: ref}
+	r.pendingObjs = append(r.pendingObjs, pendingDictObj{ref: ref, dict: dict})
+	return name, ref
+}
+
+// FlushPending 将新增的ExtGState与ShadingPattern字典流式写入对象流并清空待写队列
+// 入参: writer 流式PDF写出器
+// 返回: error 写入错误
+func (r *GraphicResourceRegistry) FlushPending(writer *StreamWriter) error {
+	r.mu.Lock()
+	items := r.pendingObjs
+	r.pendingObjs = nil
+	r.mu.Unlock()
+	for _, item := range items {
+		if err := writer.WriteObject(item.ref, item.dict); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ResourceDictRef 复用或流式写出完全相同的Resources间接字典对象，供同资源页面共享
+// 入参: writer 流式PDF写出器, res 资源集合
+// 返回: pdfgo.Reference 资源字典引用, error 写入错误
+func (r *GraphicResourceRegistry) ResourceDictRef(writer *StreamWriter, res *ContentResources) (pdfgo.Reference, error) {
+	key := res.Key()
+	r.mu.Lock()
+	if ref, ok := r.resourceRefs[key]; ok {
+		r.mu.Unlock()
+		return ref, nil
+	}
+	ref := r.allocRef()
+	r.resourceRefs[key] = ref
+	r.mu.Unlock()
+	if err := writer.WriteObject(ref, res.Dictionary()); err != nil {
+		return pdfgo.Reference{}, err
+	}
+	return ref, nil
 }

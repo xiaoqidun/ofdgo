@@ -47,163 +47,6 @@ type InvoiceBinding struct {
 	ObjectID string `json:"objectId"`
 }
 
-// AppendInvoicePages 追加可搜索的发票信息页，字段内折行、字段间分页，不修改已有页面
-// 每字段对应一个完整文字对象，单字段超过页面容量时失败；绑定持久化由调用方处理
-// 入参: ctx 取消上下文, invoice 发票数据, options 字体与页面尺寸
-// 返回: []InvoiceBinding 新增字段绑定, error 排版或字体错误
-func (e *Editor) AppendInvoicePages(ctx context.Context, invoice Invoice, options InvoiceLayout) ([]InvoiceBinding, error) {
-	if e == nil || ctx == nil {
-		return nil, fmt.Errorf("editor and context are required")
-	}
-	if options.Font == "" {
-		return nil, fmt.Errorf("invoice font resource is required")
-	}
-	if options.FontSize == 0 {
-		options.FontSize = 4
-	}
-	if options.PageWidth == 0 {
-		options.PageWidth = 210
-	}
-	if options.PageHeight == 0 {
-		options.PageHeight = 297
-	}
-	if options.Margin == 0 {
-		options.Margin = 15
-	}
-	for _, value := range []float64{options.FontSize, options.PageWidth, options.PageHeight, options.Margin} {
-		if !finite(value) || value <= 0 {
-			return nil, fmt.Errorf("invoice layout dimensions must be positive and finite")
-		}
-	}
-	width, height := options.PageWidth-2*options.Margin, options.PageHeight-2*options.Margin
-	if width <= 0 || height <= 0 {
-		return nil, fmt.Errorf("invoice margins leave no page area")
-	}
-	var bindings []InvoiceBinding
-	err := e.Transaction(func(editor *Editor) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		metrics, err := editor.editorFont(options.Font)
-		if err != nil {
-			return err
-		}
-		page, y := -1, options.Margin
-		for _, field := range invoiceLayoutFields(invoice) {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if field.value == "" {
-				continue
-			}
-			labelWidth := math.Min(width*.4, options.FontSize*8)
-			gap := options.FontSize
-			label := TextObject{Font: options.Font, Size: options.FontSize, Boundary: fmt.Sprintf("0 0 %s %s", ofdNumber(labelWidth), ofdNumber(height))}
-			value := TextObject{Font: options.Font, Size: options.FontSize, Boundary: fmt.Sprintf("0 0 %s %s", ofdNumber(width-labelWidth-gap), ofdNumber(height))}
-			labelHeight, err := invoiceLayoutText(&label, field.label, metrics)
-			if err != nil {
-				return fmt.Errorf("invoice label %s: %w", field.field, err)
-			}
-			valueHeight, err := invoiceLayoutText(&value, field.value, metrics)
-			if err != nil {
-				return fmt.Errorf("invoice field %s: %w", field.field, err)
-			}
-			rowHeight := math.Max(labelHeight, valueHeight)
-			if page < 0 || y+rowHeight > options.PageHeight-options.Margin {
-				page, err = editor.AddPage(options.PageWidth, options.PageHeight)
-				if err != nil {
-					return err
-				}
-				y = options.Margin
-			}
-			label.Boundary = fmt.Sprintf("%s %s %s %s", ofdNumber(options.Margin), ofdNumber(y), ofdNumber(labelWidth), ofdNumber(rowHeight))
-			value.Boundary = fmt.Sprintf("%s %s %s %s", ofdNumber(options.Margin+labelWidth+gap), ofdNumber(y), ofdNumber(width-labelWidth-gap), ofdNumber(rowHeight))
-			if _, err := editor.AddObject(page, GraphicObject{Type: "TextObject", TextObject: label}); err != nil {
-				return err
-			}
-			id, err := editor.AddObject(page, GraphicObject{Type: "TextObject", TextObject: value})
-			if err != nil {
-				return err
-			}
-			bindings = append(bindings, InvoiceBinding{Field: field.field, Item: field.item, Page: page, ObjectID: id})
-			y += rowHeight + options.FontSize*.5
-		}
-		if len(bindings) == 0 {
-			return fmt.Errorf("invoice has no display fields")
-		}
-		return ctx.Err()
-	})
-	if err != nil {
-		return nil, err
-	}
-	return bindings, nil
-}
-
-// SyncInvoicePages 原子更新显式绑定的普通横向文字，不新增、移动或缩小对象
-// 不接受重复绑定、空文本、缺失对象及超出原框的内容；可嵌入上层事务与结构化数据一起提交
-// 入参: ctx 取消上下文, invoice 发票数据, bindings 当前文档字段绑定
-// 返回: error 绑定、字体或容量错误
-func (e *Editor) SyncInvoicePages(ctx context.Context, invoice Invoice, bindings []InvoiceBinding) error {
-	if e == nil || ctx == nil {
-		return fmt.Errorf("editor and context are required")
-	}
-	return e.Transaction(func(editor *Editor) error {
-		objects, fields := make(map[string]bool), make(map[string]bool)
-		for _, binding := range bindings {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			objectKey := fmt.Sprintf("%d/%s", binding.Page, editorResourceID(binding.ObjectID))
-			fieldKey := fmt.Sprintf("%d/%s", binding.Item, binding.Field)
-			if binding.ObjectID == "" || objects[objectKey] || fields[fieldKey] {
-				return fmt.Errorf("ambiguous invoice binding %q", binding.Field)
-			}
-			objects[objectKey], fields[fieldKey] = true, true
-			value, err := invoiceBindingValue(invoice, binding)
-			if err != nil {
-				return err
-			}
-			page, err := editor.page(binding.Page)
-			if err != nil {
-				return err
-			}
-			matches := 0
-			for _, layer := range page.Content.Layer {
-				for _, candidate := range layer.Objects {
-					if sameResourceID(editorObjectID(candidate), binding.ObjectID) {
-						matches++
-					}
-				}
-			}
-			if matches != 1 {
-				return fmt.Errorf("invoice binding %q requires one text object", binding.Field)
-			}
-			object, err := editor.Object(binding.Page, binding.ObjectID)
-			if err != nil {
-				return err
-			}
-			if object.Type != "TextObject" {
-				return fmt.Errorf("invoice binding %q is not text", binding.Field)
-			}
-			text := &object.TextObject
-			if text.CTM != "" || text.Clips != nil || text.Italic || text.Weight > 400 || text.DrawParam != "" || text.Stroke != nil && *text.Stroke || text.HScale != 0 && text.HScale != 1 {
-				return fmt.Errorf("invoice binding %q requires plain untransformed text", binding.Field)
-			}
-			metrics, err := editor.editorFont(text.Font)
-			if err != nil {
-				return err
-			}
-			if _, err := invoiceLayoutText(text, value, metrics); err != nil {
-				return fmt.Errorf("invoice field %s: %w", binding.Field, err)
-			}
-			if err := editor.UpdateObject(binding.Page, binding.ObjectID, object); err != nil {
-				return err
-			}
-		}
-		return ctx.Err()
-	})
-}
-
 // invoiceLayoutField 保存票面字段及独立标签
 type invoiceLayoutField struct {
 	field, label, value string
@@ -538,6 +381,352 @@ func invoiceLayoutText(text *TextObject, value string, metrics FontMetrics) (flo
 	return math.Ceil((bottom-top)*1e6) / 1e6, nil
 }
 
+// invoiceSlotText 用字体步进及轮廓填充单一原基线槽，保留可搜索文字和显式字形映射
+// 入参: ctx 取消上下文, text 目标对象, value 剩余文字, offset 原文偏移, boundaries 字素边界, x和y 原点, right 右界, box 原框, visible 原可见范围, obstacles 外部障碍, metrics 字体, mapping 原映射
+// 返回: int 已容纳码点数, error 可递延缺字, error 度量错误
+func invoiceSlotText(ctx context.Context, text *TextObject, value []rune, offset int, boundaries map[int]bool, x, y, right float64, box, visible Box, obstacles []Box, metrics FontMetrics, mapping map[rune]uint16) (int, error, error) {
+	if metrics.UnitsPerEm() == 0 {
+		return 0, nil, fmt.Errorf("invalid invoice font units")
+	}
+	unit, cursor := text.Size/float64(metrics.UnitsPerEm()), x
+	scale := text.HScale
+	if scale == 0 {
+		scale = 1
+	}
+	count := 0
+	var missing error
+	var advances, glyphs []string
+	for i, char := range value {
+		if err := ctx.Err(); err != nil {
+			return 0, nil, err
+		}
+		glyph := mapping[char]
+		if glyph == 0 {
+			glyph = metrics.GlyphIndex(char)
+		}
+		if glyph == 0 {
+			missing = missingGlyphError(text.Font, []rune{char})
+			break
+		}
+		var bounds Box
+		var err error
+		if provider, ok := metrics.(FontGlyphBounds); ok {
+			bounds, err = provider.GlyphBounds(glyph, text.Size)
+		} else if outlines, ok := metrics.(FontOutlines); ok {
+			var outline GeometryPath
+			outline, err = outlines.GlyphOutline(glyph, text.Size)
+			if err == nil {
+				bounds, err = outline.Bounds()
+			}
+		} else {
+			return 0, nil, fmt.Errorf("invoice slot requires glyph outline metrics")
+		}
+		if err != nil {
+			return 0, nil, err
+		}
+		advance := float64(metrics.GlyphAdvance(glyph)) * unit * scale
+		bounds.X, bounds.W = bounds.X*scale, bounds.W*scale
+		if !finite(advance) || advance < 0 || !finite(bounds.X) || !finite(bounds.Y) || !finite(bounds.W) || !finite(bounds.H) {
+			return 0, nil, fmt.Errorf("invalid invoice glyph geometry")
+		}
+		if cursor+advance > right+1e-6 || cursor+bounds.X < -1e-6 || cursor+bounds.X+bounds.W > right+1e-6 || y+bounds.Y < -1e-6 || y+bounds.Y+bounds.H > box.H+1e-6 {
+			break
+		}
+		blocked := false
+		if bounds.W > 0 && bounds.H > 0 {
+			for _, obstacle := range obstacles {
+				left := math.Max(box.X+cursor+bounds.X, obstacle.X)
+				top := math.Max(box.Y+y+bounds.Y, obstacle.Y)
+				right := math.Min(box.X+cursor+bounds.X+bounds.W, obstacle.X+obstacle.W)
+				bottom := math.Min(box.Y+y+bounds.Y+bounds.H, obstacle.Y+obstacle.H)
+				if right > left+1e-6 && bottom > top+1e-6 && (visible.W <= 0 || visible.H <= 0 || left < visible.X-1e-6 || top < visible.Y-1e-6 || right > visible.X+visible.W+1e-6 || bottom > visible.Y+visible.H+1e-6) {
+					blocked = true
+					break
+				}
+			}
+		}
+		if blocked {
+			break
+		}
+		advances = append(advances, ofdNumber(advance))
+		glyphs = append(glyphs, strconv.Itoa(int(glyph)))
+		cursor += advance
+		if boundaries[offset+i+1] {
+			count = i + 1
+		}
+	}
+	text.TextCode = []TextCode{{X: text.TextCode[0].X, Y: text.TextCode[0].Y, Value: escapeOFDText(string(value[:count]))}}
+	text.CGTransform, text.layout = nil, nil
+	if count > 0 {
+		text.TextCode[0].DeltaX = strings.Join(advances[:count-1], " ")
+		text.CGTransform = []CGTransform{{CodePosition: 0, CodeCount: count, GlyphCount: count, Glyphs: strings.Join(glyphs[:count], " ")}}
+	}
+	return count, missing, nil
+}
+
+// invoiceCheckReflowReferences 检查当前文档快照中指向待重排页的标准导航及已识别标引
+// 排除本次发票自身的标引，不推测未知扩展中的引用，也不读取其他文档或历史入口
+// 入参: ctx 取消上下文, e 当前编辑器, ownedPageIDs 待替换页面标识, ownStructureIndex 自有标引索引，-1表示无
+// 返回: error 引用冲突、结构读取或取消错误
+func invoiceCheckReflowReferences(ctx context.Context, e *Editor, ownedPageIDs []string, ownStructureIndex int) error {
+	if ctx == nil || e == nil {
+		return fmt.Errorf("editor and context are required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	owned := make(map[string]bool, len(ownedPageIDs))
+	for _, id := range ownedPageIDs {
+		key := editorResourceID(id)
+		if key == "" {
+			return fmt.Errorf("invalid generated invoice page identifier")
+		}
+		owned[key] = true
+	}
+	reader, err := e.Reader(ctx)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	structures, err := reader.StructureContext(ctx)
+	if err != nil {
+		return err
+	}
+	if ownStructureIndex < -1 || ownStructureIndex >= len(structures) {
+		return fmt.Errorf("invoice structure index out of range")
+	}
+	var checkStructure func(*StructureNode) error
+	checkStructure = func(node *StructureNode) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if node == nil {
+			return nil
+		}
+		for _, reference := range node.References {
+			if owned[editorResourceID(reference.PageID)] {
+				return fmt.Errorf("generated invoice page is referenced by another structure")
+			}
+		}
+		for i := range node.Children {
+			if err := checkStructure(&node.Children[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for index, structure := range structures {
+		if index == ownStructureIndex {
+			continue
+		}
+		if structure.Error != "" {
+			return fmt.Errorf("cannot inspect invoice reflow references: %s", structure.Error)
+		}
+		if err := checkStructure(structure.Root); err != nil {
+			return err
+		}
+	}
+	_, files, err := reader.versionDependencies(ctx, reader.documentRoot, nil, nil)
+	if err != nil {
+		return err
+	}
+	var walk func(*editorXML) error
+	walk = func(node *editorXML) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !node.matchesOFD(node.name.Local) {
+			return nil
+		}
+		if node.matchesOFD("Data") && node.parent != nil && node.parent.matchesOFD("Extension") {
+			return nil
+		}
+		if node.matchesOFD("Dest") && node.parent != nil && (node.parent.matchesOFD("Goto") || node.parent.matchesOFD("Bookmark") || node.parent.matchesOFD("OutlineElem")) && owned[editorResourceID(node.attr("PageID"))] {
+			return fmt.Errorf("generated invoice page is referenced by navigation")
+		}
+		if node.matchesOFD("Extension") && owned[editorResourceID(node.attr("RefId"))] {
+			return fmt.Errorf("generated invoice page is referenced by an extension")
+		}
+		for _, child := range node.children {
+			if err := walk(child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, file := range slices.Sorted(maps.Keys(files)) {
+		data, err := reader.readFileViewContext(ctx, file)
+		if err != nil {
+			return err
+		}
+		root, err := parseEditorXMLContext(ctx, data)
+		if err != nil {
+			return err
+		}
+		if err := walk(root); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+// AppendInvoicePages 追加可搜索的发票信息页，字段内折行、字段间分页，不修改已有页面
+// 每字段对应一个完整文字对象，单字段超过页面容量时失败；绑定持久化由调用方处理
+// 入参: ctx 取消上下文, invoice 发票数据, options 字体与页面尺寸
+// 返回: []InvoiceBinding 新增字段绑定, error 排版或字体错误
+func (e *Editor) AppendInvoicePages(ctx context.Context, invoice Invoice, options InvoiceLayout) ([]InvoiceBinding, error) {
+	if e == nil || ctx == nil {
+		return nil, fmt.Errorf("editor and context are required")
+	}
+	if options.Font == "" {
+		return nil, fmt.Errorf("invoice font resource is required")
+	}
+	if options.FontSize == 0 {
+		options.FontSize = 4
+	}
+	if options.PageWidth == 0 {
+		options.PageWidth = 210
+	}
+	if options.PageHeight == 0 {
+		options.PageHeight = 297
+	}
+	if options.Margin == 0 {
+		options.Margin = 15
+	}
+	for _, value := range []float64{options.FontSize, options.PageWidth, options.PageHeight, options.Margin} {
+		if !finite(value) || value <= 0 {
+			return nil, fmt.Errorf("invoice layout dimensions must be positive and finite")
+		}
+	}
+	width, height := options.PageWidth-2*options.Margin, options.PageHeight-2*options.Margin
+	if width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("invoice margins leave no page area")
+	}
+	var bindings []InvoiceBinding
+	err := e.Transaction(func(editor *Editor) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		metrics, err := editor.editorFont(options.Font)
+		if err != nil {
+			return err
+		}
+		page, y := -1, options.Margin
+		for _, field := range invoiceLayoutFields(invoice) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if field.value == "" {
+				continue
+			}
+			labelWidth := math.Min(width*.4, options.FontSize*8)
+			gap := options.FontSize
+			label := TextObject{Font: options.Font, Size: options.FontSize, Boundary: fmt.Sprintf("0 0 %s %s", ofdNumber(labelWidth), ofdNumber(height))}
+			value := TextObject{Font: options.Font, Size: options.FontSize, Boundary: fmt.Sprintf("0 0 %s %s", ofdNumber(width-labelWidth-gap), ofdNumber(height))}
+			labelHeight, err := invoiceLayoutText(&label, field.label, metrics)
+			if err != nil {
+				return fmt.Errorf("invoice label %s: %w", field.field, err)
+			}
+			valueHeight, err := invoiceLayoutText(&value, field.value, metrics)
+			if err != nil {
+				return fmt.Errorf("invoice field %s: %w", field.field, err)
+			}
+			rowHeight := math.Max(labelHeight, valueHeight)
+			if page < 0 || y+rowHeight > options.PageHeight-options.Margin {
+				page, err = editor.AddPage(options.PageWidth, options.PageHeight)
+				if err != nil {
+					return err
+				}
+				y = options.Margin
+			}
+			label.Boundary = fmt.Sprintf("%s %s %s %s", ofdNumber(options.Margin), ofdNumber(y), ofdNumber(labelWidth), ofdNumber(rowHeight))
+			value.Boundary = fmt.Sprintf("%s %s %s %s", ofdNumber(options.Margin+labelWidth+gap), ofdNumber(y), ofdNumber(width-labelWidth-gap), ofdNumber(rowHeight))
+			if _, err := editor.AddObject(page, GraphicObject{Type: "TextObject", TextObject: label}); err != nil {
+				return err
+			}
+			id, err := editor.AddObject(page, GraphicObject{Type: "TextObject", TextObject: value})
+			if err != nil {
+				return err
+			}
+			bindings = append(bindings, InvoiceBinding{Field: field.field, Item: field.item, Page: page, ObjectID: id})
+			y += rowHeight + options.FontSize*.5
+		}
+		if len(bindings) == 0 {
+			return fmt.Errorf("invoice has no display fields")
+		}
+		return ctx.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return bindings, nil
+}
+
+// SyncInvoicePages 原子更新显式绑定的普通横向文字，不新增、移动或缩小对象
+// 不接受重复绑定、空文本、缺失对象及超出原框的内容；可嵌入上层事务与结构化数据一起提交
+// 入参: ctx 取消上下文, invoice 发票数据, bindings 当前文档字段绑定
+// 返回: error 绑定、字体或容量错误
+func (e *Editor) SyncInvoicePages(ctx context.Context, invoice Invoice, bindings []InvoiceBinding) error {
+	if e == nil || ctx == nil {
+		return fmt.Errorf("editor and context are required")
+	}
+	return e.Transaction(func(editor *Editor) error {
+		objects, fields := make(map[string]bool), make(map[string]bool)
+		for _, binding := range bindings {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			objectKey := fmt.Sprintf("%d/%s", binding.Page, editorResourceID(binding.ObjectID))
+			fieldKey := fmt.Sprintf("%d/%s", binding.Item, binding.Field)
+			if binding.ObjectID == "" || objects[objectKey] || fields[fieldKey] {
+				return fmt.Errorf("ambiguous invoice binding %q", binding.Field)
+			}
+			objects[objectKey], fields[fieldKey] = true, true
+			value, err := invoiceBindingValue(invoice, binding)
+			if err != nil {
+				return err
+			}
+			page, err := editor.page(binding.Page)
+			if err != nil {
+				return err
+			}
+			matches := 0
+			for _, layer := range page.Content.Layer {
+				for _, candidate := range layer.Objects {
+					if sameResourceID(editorObjectID(candidate), binding.ObjectID) {
+						matches++
+					}
+				}
+			}
+			if matches != 1 {
+				return fmt.Errorf("invoice binding %q requires one text object", binding.Field)
+			}
+			object, err := editor.Object(binding.Page, binding.ObjectID)
+			if err != nil {
+				return err
+			}
+			if object.Type != "TextObject" {
+				return fmt.Errorf("invoice binding %q is not text", binding.Field)
+			}
+			text := &object.TextObject
+			if text.CTM != "" || text.Clips != nil || text.Italic || text.Weight > 400 || text.DrawParam != "" || text.Stroke != nil && *text.Stroke || text.HScale != 0 && text.HScale != 1 {
+				return fmt.Errorf("invoice binding %q requires plain untransformed text", binding.Field)
+			}
+			metrics, err := editor.editorFont(text.Font)
+			if err != nil {
+				return err
+			}
+			if _, err := invoiceLayoutText(text, value, metrics); err != nil {
+				return fmt.Errorf("invoice field %s: %w", binding.Field, err)
+			}
+			if err := editor.UpdateObject(binding.Page, binding.ObjectID, object); err != nil {
+				return err
+			}
+		}
+		return ctx.Err()
+	})
+}
+
 // layoutInvoiceReferenceSlots 按原图元框和基线分配变长字段，空TextCode保留原ID和原框，不借用跨列空间或改变引用
 // 入参: ctx 取消上下文, bindings 有序图元槽位, before 原文字, value 新文字, font 字体覆盖, fontData 字体数据
 // 返回: error 引用、字体、布局或容量错误
@@ -752,194 +941,5 @@ func (e *Editor) layoutInvoiceReferenceSlots(ctx context.Context, bindings []Inv
 		}
 	}
 	e.replaceLayers(bindings[0].Page, layers)
-	return ctx.Err()
-}
-
-// invoiceSlotText 用字体步进及轮廓填充单一原基线槽，保留可搜索文字和显式字形映射
-// 入参: ctx 取消上下文, text 目标对象, value 剩余文字, offset 原文偏移, boundaries 字素边界, x和y 原点, right 右界, box 原框, visible 原可见范围, obstacles 外部障碍, metrics 字体, mapping 原映射
-// 返回: int 已容纳码点数, error 可递延缺字, error 度量错误
-func invoiceSlotText(ctx context.Context, text *TextObject, value []rune, offset int, boundaries map[int]bool, x, y, right float64, box, visible Box, obstacles []Box, metrics FontMetrics, mapping map[rune]uint16) (int, error, error) {
-	if metrics.UnitsPerEm() == 0 {
-		return 0, nil, fmt.Errorf("invalid invoice font units")
-	}
-	unit, cursor := text.Size/float64(metrics.UnitsPerEm()), x
-	scale := text.HScale
-	if scale == 0 {
-		scale = 1
-	}
-	count := 0
-	var missing error
-	var advances, glyphs []string
-	for i, char := range value {
-		if err := ctx.Err(); err != nil {
-			return 0, nil, err
-		}
-		glyph := mapping[char]
-		if glyph == 0 {
-			glyph = metrics.GlyphIndex(char)
-		}
-		if glyph == 0 {
-			missing = missingGlyphError(text.Font, []rune{char})
-			break
-		}
-		var bounds Box
-		var err error
-		if provider, ok := metrics.(FontGlyphBounds); ok {
-			bounds, err = provider.GlyphBounds(glyph, text.Size)
-		} else if outlines, ok := metrics.(FontOutlines); ok {
-			var outline GeometryPath
-			outline, err = outlines.GlyphOutline(glyph, text.Size)
-			if err == nil {
-				bounds, err = outline.Bounds()
-			}
-		} else {
-			return 0, nil, fmt.Errorf("invoice slot requires glyph outline metrics")
-		}
-		if err != nil {
-			return 0, nil, err
-		}
-		advance := float64(metrics.GlyphAdvance(glyph)) * unit * scale
-		bounds.X, bounds.W = bounds.X*scale, bounds.W*scale
-		if !finite(advance) || advance < 0 || !finite(bounds.X) || !finite(bounds.Y) || !finite(bounds.W) || !finite(bounds.H) {
-			return 0, nil, fmt.Errorf("invalid invoice glyph geometry")
-		}
-		if cursor+advance > right+1e-6 || cursor+bounds.X < -1e-6 || cursor+bounds.X+bounds.W > right+1e-6 || y+bounds.Y < -1e-6 || y+bounds.Y+bounds.H > box.H+1e-6 {
-			break
-		}
-		blocked := false
-		if bounds.W > 0 && bounds.H > 0 {
-			for _, obstacle := range obstacles {
-				left := math.Max(box.X+cursor+bounds.X, obstacle.X)
-				top := math.Max(box.Y+y+bounds.Y, obstacle.Y)
-				right := math.Min(box.X+cursor+bounds.X+bounds.W, obstacle.X+obstacle.W)
-				bottom := math.Min(box.Y+y+bounds.Y+bounds.H, obstacle.Y+obstacle.H)
-				if right > left+1e-6 && bottom > top+1e-6 && (visible.W <= 0 || visible.H <= 0 || left < visible.X-1e-6 || top < visible.Y-1e-6 || right > visible.X+visible.W+1e-6 || bottom > visible.Y+visible.H+1e-6) {
-					blocked = true
-					break
-				}
-			}
-		}
-		if blocked {
-			break
-		}
-		advances = append(advances, ofdNumber(advance))
-		glyphs = append(glyphs, strconv.Itoa(int(glyph)))
-		cursor += advance
-		if boundaries[offset+i+1] {
-			count = i + 1
-		}
-	}
-	text.TextCode = []TextCode{{X: text.TextCode[0].X, Y: text.TextCode[0].Y, Value: escapeOFDText(string(value[:count]))}}
-	text.CGTransform, text.layout = nil, nil
-	if count > 0 {
-		text.TextCode[0].DeltaX = strings.Join(advances[:count-1], " ")
-		text.CGTransform = []CGTransform{{CodePosition: 0, CodeCount: count, GlyphCount: count, Glyphs: strings.Join(glyphs[:count], " ")}}
-	}
-	return count, missing, nil
-}
-
-// invoiceCheckReflowReferences 检查当前文档快照中指向待重排页的标准导航及已识别标引
-// 排除本次发票自身的标引，不推测未知扩展中的引用，也不读取其他文档或历史入口
-// 入参: ctx 取消上下文, e 当前编辑器, ownedPageIDs 待替换页面标识, ownStructureIndex 自有标引索引，-1表示无
-// 返回: error 引用冲突、结构读取或取消错误
-func invoiceCheckReflowReferences(ctx context.Context, e *Editor, ownedPageIDs []string, ownStructureIndex int) error {
-	if ctx == nil || e == nil {
-		return fmt.Errorf("editor and context are required")
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	owned := make(map[string]bool, len(ownedPageIDs))
-	for _, id := range ownedPageIDs {
-		key := editorResourceID(id)
-		if key == "" {
-			return fmt.Errorf("invalid generated invoice page identifier")
-		}
-		owned[key] = true
-	}
-	reader, err := e.Reader(ctx)
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
-	structures, err := reader.StructureContext(ctx)
-	if err != nil {
-		return err
-	}
-	if ownStructureIndex < -1 || ownStructureIndex >= len(structures) {
-		return fmt.Errorf("invoice structure index out of range")
-	}
-	var checkStructure func(*StructureNode) error
-	checkStructure = func(node *StructureNode) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if node == nil {
-			return nil
-		}
-		for _, reference := range node.References {
-			if owned[editorResourceID(reference.PageID)] {
-				return fmt.Errorf("generated invoice page is referenced by another structure")
-			}
-		}
-		for i := range node.Children {
-			if err := checkStructure(&node.Children[i]); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	for index, structure := range structures {
-		if index == ownStructureIndex {
-			continue
-		}
-		if structure.Error != "" {
-			return fmt.Errorf("cannot inspect invoice reflow references: %s", structure.Error)
-		}
-		if err := checkStructure(structure.Root); err != nil {
-			return err
-		}
-	}
-	_, files, err := reader.versionDependencies(ctx, reader.documentRoot, nil, nil)
-	if err != nil {
-		return err
-	}
-	var walk func(*editorXML) error
-	walk = func(node *editorXML) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if !node.matchesOFD(node.name.Local) {
-			return nil
-		}
-		if node.matchesOFD("Data") && node.parent != nil && node.parent.matchesOFD("Extension") {
-			return nil
-		}
-		if node.matchesOFD("Dest") && node.parent != nil && (node.parent.matchesOFD("Goto") || node.parent.matchesOFD("Bookmark") || node.parent.matchesOFD("OutlineElem")) && owned[editorResourceID(node.attr("PageID"))] {
-			return fmt.Errorf("generated invoice page is referenced by navigation")
-		}
-		if node.matchesOFD("Extension") && owned[editorResourceID(node.attr("RefId"))] {
-			return fmt.Errorf("generated invoice page is referenced by an extension")
-		}
-		for _, child := range node.children {
-			if err := walk(child); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	for _, file := range slices.Sorted(maps.Keys(files)) {
-		data, err := reader.readFileViewContext(ctx, file)
-		if err != nil {
-			return err
-		}
-		root, err := parseEditorXMLContext(ctx, data)
-		if err != nil {
-			return err
-		}
-		if err := walk(root); err != nil {
-			return err
-		}
-	}
 	return ctx.Err()
 }

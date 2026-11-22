@@ -40,6 +40,193 @@ type ObjectInfo struct {
 	Position     ObjectPosition
 }
 
+// editorObjectPosition 对象所属图层及层内索引
+type editorObjectPosition struct {
+	layer int
+	index int
+}
+
+// editorObjectIndex 复用最近页面的只读对象位置，图层容器替换后重新建立
+type editorObjectIndex struct {
+	layers    []Layer
+	positions map[string]editorObjectPosition
+}
+
+// compareEditorPosition 比较对象在页面结构中的先后顺序
+// 入参: a 第一个对象的位置, b 第二个对象的位置
+// 返回: int 比较结果
+func compareEditorPosition(a, b editorObjectPosition) int {
+	if value := cmp.Compare(a.layer, b.layer); value != 0 {
+		return value
+	}
+	return cmp.Compare(a.index, b.index)
+}
+
+// orderEditorObjects 调整选区层级，保持选中及未选中对象各自的相对顺序
+// 入参: objects 同容器对象, selected 选中状态, order 排序方向
+func orderEditorObjects[T any](objects []T, selected []bool, order string) {
+	switch order {
+	case "up":
+		for i := len(objects) - 2; i >= 0; i-- {
+			if selected[i] && !selected[i+1] {
+				objects[i], objects[i+1] = objects[i+1], objects[i]
+				selected[i], selected[i+1] = false, true
+			}
+		}
+	case "down":
+		for i := 1; i < len(objects); i++ {
+			if selected[i] && !selected[i-1] {
+				objects[i], objects[i-1] = objects[i-1], objects[i]
+				selected[i], selected[i-1] = false, true
+			}
+		}
+	default:
+		ordered := make([]T, 0, len(objects))
+		for _, takeSelected := range []bool{order == "bottom", order != "bottom"} {
+			for i, object := range objects {
+				if selected[i] == takeSelected {
+					ordered = append(ordered, object)
+				}
+			}
+		}
+		copy(objects, ordered)
+	}
+}
+
+// editorDistribution 计算等间距平移，位置相同时按原绘制顺序排序
+// 入参: boxes 可见范围, indexes 绘制位置, axis 分布方向
+// 返回: []Matrix 页面平移, error 错误信息
+func editorDistribution(boxes []Box, indexes []editorObjectPosition, axis string) ([]Matrix, error) {
+	matrices := make([]Matrix, len(boxes))
+	for i := range matrices {
+		matrices[i] = IdentityMatrix()
+	}
+	if len(boxes) < 3 {
+		return matrices, nil
+	}
+	positions, sizes := make([]float64, len(boxes)), make([]float64, len(boxes))
+	order := make([]int, len(boxes))
+	total := 0.0
+	for i, box := range boxes {
+		positions[i], sizes[i] = box.X, box.W
+		if axis == "vertical" {
+			positions[i], sizes[i] = box.Y, box.H
+		}
+		order[i] = i
+		total += sizes[i]
+	}
+	slices.SortFunc(order, func(i, j int) int {
+		if c := cmp.Compare(positions[i], positions[j]); c != 0 {
+			return c
+		}
+		return compareEditorPosition(indexes[i], indexes[j])
+	})
+	first, last := order[0], order[len(order)-1]
+	gap := (positions[last] + sizes[last] - positions[first] - total) / float64(len(order)-1)
+	for i, index := range order[:len(order)-1] {
+		step := sizes[index] + gap
+		if basegeom.Equal(step, 0) {
+			step = 0
+		}
+		if step < 0 || step == 0 && compareEditorPosition(indexes[index], indexes[order[i+1]]) > 0 {
+			return nil, fmt.Errorf("overlap prevents ordered equal-gap distribution")
+		}
+	}
+	next := positions[first] + sizes[first] + gap
+	for _, index := range order[1 : len(order)-1] {
+		position := next
+		next += sizes[index] + gap
+		if basegeom.Equal(position, positions[index]) {
+			continue
+		}
+		dx, dy := position-positions[index], 0.0
+		if axis == "vertical" {
+			dx, dy = 0, dx
+		}
+		matrices[index] = TranslationMatrix(dx, dy)
+	}
+	return matrices, nil
+}
+
+// editorAlignment 计算对象范围到目标边缘或中心的平移
+// 入参: box 对象范围, target 目标范围, alignment 对齐方式
+// 返回: Matrix 页面平移
+func editorAlignment(box, target Box, alignment string) Matrix {
+	matrix := IdentityMatrix()
+	switch alignment {
+	case "left":
+		matrix.e = target.X - box.X
+	case "center":
+		matrix.e = target.X + (target.W-box.W)/2 - box.X
+	case "right":
+		matrix.e = target.X + target.W - box.W - box.X
+	case "top":
+		matrix.f = target.Y - box.Y
+	case "middle":
+		matrix.f = target.Y + (target.H-box.H)/2 - box.Y
+	case "bottom":
+		matrix.f = target.Y + target.H - box.H - box.Y
+	}
+	if basegeom.Equal(matrix.e, 0) {
+		matrix.e = 0
+	}
+	if basegeom.Equal(matrix.f, 0) {
+		matrix.f = 0
+	}
+	return matrix
+}
+
+// editorObjectID 获取可创作对象的标准标识
+// 入参: object 图形对象
+// 返回: string 对象标识，不支持的类型返回空字符串
+func editorObjectID(object GraphicObject) string {
+	switch object.Type {
+	case "TextObject":
+		return object.TextObject.ID
+	case "PathObject":
+		return object.PathObject.ID
+	case "ImageObject":
+		return object.ImageObject.ID
+	case "CompositeObject", "CompositeGraphicUnit":
+		return object.CompositeGraphicUnit.ID
+	}
+	return ""
+}
+
+// richTextObjectRemoved 判断标引中的原图元标识或其重映射目标是否已全部被移除
+// 入参: rawKey 原始图元标识, links 图元编号重映射图, removed 本次移除的图元集合
+// 返回: bool 是否应当从标引中移除该引用
+func richTextObjectRemoved(rawKey string, links map[string][]string, removed map[string]bool) bool {
+	if rawKey == "" {
+		return false
+	}
+	if removed[rawKey] || len(links[rawKey]) == 0 {
+		return removed[rawKey]
+	}
+	seen := make(map[string]bool)
+	var allRemoved func(string) bool
+	allRemoved = func(cur string) bool {
+		if removed[cur] {
+			return true
+		}
+		if seen[cur] {
+			return true
+		}
+		seen[cur] = true
+		next := links[cur]
+		if len(next) == 0 {
+			return false
+		}
+		for _, target := range next {
+			if !allRemoved(target) {
+				return false
+			}
+		}
+		return true
+	}
+	return allRemoved(rawKey)
+}
+
 // Objects 按绘制顺序获取选区的独立快照，保留编辑中的段落信息
 // 入参: page 页面索引, ids 对象标识，不得重复
 // 返回: []GraphicObject 独立对象副本, error 错误信息
@@ -250,7 +437,7 @@ func (e *Editor) DistributeObjects(page int, ids []string, axis string) error {
 	}
 	var updates []GraphicObject
 	for i, matrix := range matrices {
-		if matrix == IdentityMatrix {
+		if matrix == IdentityMatrix() {
 			continue
 		}
 		object, err := cloneEditorObject(objects[i])
@@ -353,18 +540,6 @@ func (e *Editor) DeleteObjects(page int, ids []string) error {
 		}
 		return e.deleteObjects(page, ids)
 	})
-}
-
-// editorObjectPosition 对象所属图层及层内索引
-type editorObjectPosition struct {
-	layer int
-	index int
-}
-
-// editorObjectIndex 复用最近页面的只读对象位置，图层容器替换后重新建立
-type editorObjectIndex struct {
-	layers    []Layer
-	positions map[string]editorObjectPosition
 }
 
 // objectPositions 获取页面的对象位置索引，重复编号保留第一个匹配
@@ -499,7 +674,11 @@ func (e *Editor) copyObjectsContext(ctx context.Context, page int, objects []Gra
 	for i := 0; i < len(prepared); {
 		style := layerStyles[i]
 		if target == len(layers) || layers[target].DrawParam != style {
-			layers = append(layers, Layer{ID: e.nextID(), Type: "Body", DrawParam: style})
+			layerID, err := e.nextID()
+			if err != nil {
+				return nil, err
+			}
+			layers = append(layers, Layer{ID: layerID, Type: "Body", DrawParam: style})
 			target = len(layers) - 1
 		}
 		end := i + 1
@@ -524,13 +703,6 @@ func (e *Editor) copyObjectsContext(ctx context.Context, page int, objects []Gra
 	committed = true
 	e.replacePreparedLayers(page, layers)
 	return result, nil
-}
-
-// appendOwnedObjects 接收本库生成对象的所有权，全部校验后提交一次撤销记录
-// 入参: ctx 取消上下文, page 目标页, objects 无原文和标识且调用方不再修改的对象
-// 返回: error 校验或取消错误，失败时不提交页面内容
-func (e *Editor) appendOwnedObjects(ctx context.Context, page int, objects []GraphicObject) error {
-	return (&editorValidation{Editor: e}).appendOwnedObjects(ctx, page, objects)
 }
 
 // appendOwnedObjects 在资源不变的构建会话内复用校验结果，接收对象所有权
@@ -593,7 +765,12 @@ func (v *editorValidation) appendOwnedObjects(ctx context.Context, page int, obj
 	}
 	e.maxID += uint64(len(objects))
 	if target == len(layers) || layers[target].DrawParam != "" {
-		layers = append(layers, Layer{ID: e.nextID(), Type: "Body"})
+		layerID, err := e.nextID()
+		if err != nil {
+			e.maxID -= uint64(len(objects))
+			return err
+		}
+		layers = append(layers, Layer{ID: layerID, Type: "Body"})
 		target = len(layers) - 1
 	}
 	if len(layers[target].Objects) == 0 {
@@ -817,6 +994,9 @@ func (e *Editor) updateObjectOrigins(page int, objects []GraphicObject, preserve
 		return nil
 	}
 	apply := func(e *Editor, objects []GraphicObject, origins map[string]*editorObjectOrigin) {
+		if _, loadErr := e.page(page); loadErr != nil {
+			return
+		}
 		layers := slices.Clone(e.pages[page].Content.Layer)
 		cloned := make(map[int]bool)
 		for _, index := range indexes {
@@ -1005,179 +1185,4 @@ func (e *Editor) cleanupRichTextMetadata(page int, ids []string) error {
 		}
 	}
 	return nil
-}
-
-// compareEditorPosition 比较对象在页面结构中的先后顺序
-// 入参: a 第一个对象的位置, b 第二个对象的位置
-// 返回: int 比较结果
-func compareEditorPosition(a, b editorObjectPosition) int {
-	if value := cmp.Compare(a.layer, b.layer); value != 0 {
-		return value
-	}
-	return cmp.Compare(a.index, b.index)
-}
-
-// orderEditorObjects 调整选区层级，保持选中及未选中对象各自的相对顺序
-// 入参: objects 同容器对象, selected 选中状态, order 排序方向
-func orderEditorObjects[T any](objects []T, selected []bool, order string) {
-	switch order {
-	case "up":
-		for i := len(objects) - 2; i >= 0; i-- {
-			if selected[i] && !selected[i+1] {
-				objects[i], objects[i+1] = objects[i+1], objects[i]
-				selected[i], selected[i+1] = false, true
-			}
-		}
-	case "down":
-		for i := 1; i < len(objects); i++ {
-			if selected[i] && !selected[i-1] {
-				objects[i], objects[i-1] = objects[i-1], objects[i]
-				selected[i], selected[i-1] = false, true
-			}
-		}
-	default:
-		ordered := make([]T, 0, len(objects))
-		for _, takeSelected := range []bool{order == "bottom", order != "bottom"} {
-			for i, object := range objects {
-				if selected[i] == takeSelected {
-					ordered = append(ordered, object)
-				}
-			}
-		}
-		copy(objects, ordered)
-	}
-}
-
-// editorDistribution 计算等间距平移，位置相同时按原绘制顺序排序
-// 入参: boxes 可见范围, indexes 绘制位置, axis 分布方向
-// 返回: []Matrix 页面平移, error 错误信息
-func editorDistribution(boxes []Box, indexes []editorObjectPosition, axis string) ([]Matrix, error) {
-	matrices := make([]Matrix, len(boxes))
-	for i := range matrices {
-		matrices[i] = IdentityMatrix
-	}
-	if len(boxes) < 3 {
-		return matrices, nil
-	}
-	positions, sizes := make([]float64, len(boxes)), make([]float64, len(boxes))
-	order := make([]int, len(boxes))
-	total := 0.0
-	for i, box := range boxes {
-		positions[i], sizes[i] = box.X, box.W
-		if axis == "vertical" {
-			positions[i], sizes[i] = box.Y, box.H
-		}
-		order[i] = i
-		total += sizes[i]
-	}
-	slices.SortFunc(order, func(i, j int) int {
-		if c := cmp.Compare(positions[i], positions[j]); c != 0 {
-			return c
-		}
-		return compareEditorPosition(indexes[i], indexes[j])
-	})
-	first, last := order[0], order[len(order)-1]
-	gap := (positions[last] + sizes[last] - positions[first] - total) / float64(len(order)-1)
-	for i, index := range order[:len(order)-1] {
-		step := sizes[index] + gap
-		if basegeom.Equal(step, 0) {
-			step = 0
-		}
-		if step < 0 || step == 0 && compareEditorPosition(indexes[index], indexes[order[i+1]]) > 0 {
-			return nil, fmt.Errorf("overlap prevents ordered equal-gap distribution")
-		}
-	}
-	next := positions[first] + sizes[first] + gap
-	for _, index := range order[1 : len(order)-1] {
-		position := next
-		next += sizes[index] + gap
-		if basegeom.Equal(position, positions[index]) {
-			continue
-		}
-		dx, dy := position-positions[index], 0.0
-		if axis == "vertical" {
-			dx, dy = 0, dx
-		}
-		matrices[index] = TranslationMatrix(dx, dy)
-	}
-	return matrices, nil
-}
-
-// editorAlignment 计算对象范围到目标边缘或中心的平移
-// 入参: box 对象范围, target 目标范围, alignment 对齐方式
-// 返回: Matrix 页面平移
-func editorAlignment(box, target Box, alignment string) Matrix {
-	matrix := IdentityMatrix
-	switch alignment {
-	case "left":
-		matrix.e = target.X - box.X
-	case "center":
-		matrix.e = target.X + (target.W-box.W)/2 - box.X
-	case "right":
-		matrix.e = target.X + target.W - box.W - box.X
-	case "top":
-		matrix.f = target.Y - box.Y
-	case "middle":
-		matrix.f = target.Y + (target.H-box.H)/2 - box.Y
-	case "bottom":
-		matrix.f = target.Y + target.H - box.H - box.Y
-	}
-	if basegeom.Equal(matrix.e, 0) {
-		matrix.e = 0
-	}
-	if basegeom.Equal(matrix.f, 0) {
-		matrix.f = 0
-	}
-	return matrix
-}
-
-// editorObjectID 获取可创作对象的标准标识
-// 入参: object 图形对象
-// 返回: string 对象标识，不支持的类型返回空字符串
-func editorObjectID(object GraphicObject) string {
-	switch object.Type {
-	case "TextObject":
-		return object.TextObject.ID
-	case "PathObject":
-		return object.PathObject.ID
-	case "ImageObject":
-		return object.ImageObject.ID
-	case "CompositeObject", "CompositeGraphicUnit":
-		return object.CompositeGraphicUnit.ID
-	}
-	return ""
-}
-
-// richTextObjectRemoved 判断标引中的原图元标识或其重映射目标是否已全部被移除
-// 入参: rawKey 原始图元标识, links 图元编号重映射图, removed 本次移除的图元集合
-// 返回: bool 是否应当从标引中移除该引用
-func richTextObjectRemoved(rawKey string, links map[string][]string, removed map[string]bool) bool {
-	if rawKey == "" {
-		return false
-	}
-	if removed[rawKey] || len(links[rawKey]) == 0 {
-		return removed[rawKey]
-	}
-	seen := make(map[string]bool)
-	var allRemoved func(string) bool
-	allRemoved = func(cur string) bool {
-		if removed[cur] {
-			return true
-		}
-		if seen[cur] {
-			return true
-		}
-		seen[cur] = true
-		next := links[cur]
-		if len(next) == 0 {
-			return false
-		}
-		for _, target := range next {
-			if !allRemoved(target) {
-				return false
-			}
-		}
-		return true
-	}
-	return allRemoved(rawKey)
 }

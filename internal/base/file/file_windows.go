@@ -44,10 +44,10 @@ func Open(name string) (*os.File, error) {
 	return os.NewFile(uintptr(handle), name), nil
 }
 
-// Replace 替换目标，目标不存在时重命名
+// replace 替换目标，目标不存在时重命名
 // 入参: source 临时路径, target 目标路径
 // 返回: error 替换错误
-func Replace(source, target string) error {
+func replace(source, target string) error {
 	fromPath, err := nativePath(source)
 	if err != nil {
 		return err
@@ -74,19 +74,70 @@ func Replace(source, target string) error {
 	return &os.LinkError{Op: "replace", Old: source, New: target, Err: err}
 }
 
-// nativePath 转换绝对长路径
+// nativePath 转换并规整绝对长路径
 // 入参: name 路径
 // 返回: string 原生长路径, error 转换错误
 func nativePath(name string) (string, error) {
-	if strings.HasPrefix(name, `\\?\`) {
-		return name, nil
+	normalized := strings.ReplaceAll(name, "/", `\`)
+	if strings.HasPrefix(normalized, `\\?\`) {
+		rest := normalized[4:]
+		if len(rest) >= 4 && strings.EqualFold(rest[:4], `UNC\`) {
+			if uncRest := strings.TrimLeft(rest[4:], `\`); uncRest != "" {
+				clean := filepath.Clean(`\\` + uncRest)
+				if strings.HasPrefix(clean, `\\`) {
+					return `\\?\UNC\` + clean[2:], nil
+				}
+			}
+			return filepath.Clean(normalized), nil
+		}
+		if isDrivePath(rest) {
+			clean, err := filepath.Abs(rest)
+			if err != nil {
+				clean = filepath.Clean(rest)
+			}
+			if strings.HasPrefix(clean, `\\`) {
+				return `\\?\UNC\` + clean[2:], nil
+			}
+			return `\\?\` + clean, nil
+		}
+		return filepath.Clean(normalized), nil
 	}
-	path, err := filepath.Abs(name)
+	path, err := filepath.Abs(normalized)
 	if err != nil {
 		return "", err
+	}
+	if strings.HasPrefix(path, `\\?\`) {
+		return path, nil
 	}
 	if strings.HasPrefix(path, `\\`) {
 		return `\\?\UNC\` + path[2:], nil
 	}
 	return `\\?\` + path, nil
+}
+
+// lockKey 生成Windows下大小写归一化并规整长路径前缀的进程内互斥锁键
+// 入参: name 原生路径
+// 返回: string 归一化锁键
+func lockKey(name string) string {
+	lower := strings.ToLower(strings.ReplaceAll(name, "/", `\`))
+	if strings.HasPrefix(lower, `\\?\unc\`) {
+		if rest := strings.TrimLeft(lower[8:], `\`); rest != "" {
+			return filepath.Clean(`\\` + rest)
+		}
+		return filepath.Clean(lower)
+	}
+	if strings.HasPrefix(lower, `\\?\`) {
+		return filepath.Clean(lower[4:])
+	}
+	return filepath.Clean(lower)
+}
+
+// isDrivePath 判断路径是否以Windows盘符开头
+// 入参: name 去掉扩展前缀后的路径
+// 返回: bool 是否以盘符开头
+func isDrivePath(name string) bool {
+	if len(name) < 2 || name[1] != ':' {
+		return false
+	}
+	return name[0] >= 'a' && name[0] <= 'z' || name[0] >= 'A' && name[0] <= 'Z'
 }

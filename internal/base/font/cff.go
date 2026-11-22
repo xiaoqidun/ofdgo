@@ -27,6 +27,9 @@ import (
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
+// cffDict 使用float64存储所有数值，以统一处理整数和实数
+type cffDict map[int][]float64
+
 // WrapCFFToOTF 将CFF裸数据包装为OpenType字体格式
 // 入参: cffData CFF字体数据
 // 返回: []byte OTF字体数据, map[rune]uint16 字符映射, error 错误信息
@@ -355,9 +358,6 @@ func GetCFFCIDRuneMap(data []byte) map[uint16]rune {
 func CFFCIDToGID(data []byte) map[uint16]uint16 {
 	return cffCIDToGIDFromCFF(getCFFData(data))
 }
-
-// cffDict 使用float64存储所有数值，以统一处理整数和实数
-type cffDict map[int][]float64
 
 // cffCIDToGIDFromCFF 从已提取的CFF表构造CID到GID反查表，非CID字体返回nil
 // 入参: cffData 裸CFF数据

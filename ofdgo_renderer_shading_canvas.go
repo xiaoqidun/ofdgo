@@ -34,6 +34,12 @@ type shdPaint struct {
 	sample   func(float64) color.RGBA
 }
 
+// repeatAxialGradient 轴向重复渐变
+type repeatAxialGradient struct {
+	*canvas.LinearGradient
+	period float64
+}
+
 // newShdPaint 创建渐变画刷
 // 入参: gradient 渐变对象, extend 延伸方向, mapType 绘制方式, mapUnit 渐变区间长度
 // 返回: *shdPaint 渐变画刷
@@ -51,156 +57,6 @@ func newShdPaint(gradient canvas.Gradient, extend, mapType string, mapUnit float
 		period = math.Max(math.SmallestNonzeroFloat64, mapUnit/length)
 	}
 	return &shdPaint{gradient: gradient, view: canvas.Identity, extend: flags, mapType: mapType, period: period}
-}
-
-// sampledRaster 保留原双圆或轴向几何与周期，不把ICC采样器降为端点渐变
-// 返回: rasterGradientCanvas 局部坐标采样器
-func (s *shdPaint) sampledRaster() rasterGradientCanvas {
-	gradient := &RasterGradient{Sample: s.sample, Spread: &RasterSpread{Extend: s.extend, MapType: s.mapType, Period: s.period}}
-	var stops canvas.Grad
-	switch g := s.gradient.(type) {
-	case *canvas.LinearGradient:
-		gradient.Start, gradient.End, stops = rasterPoint(g.Start), rasterPoint(g.End), g.Grad
-	case *canvas.RadialGradient:
-		gradient.Kind = RasterRadial
-		gradient.Start, gradient.End, gradient.R0, gradient.R1, stops = rasterPoint(g.C0), rasterPoint(g.C1), g.R0, g.R1, g.Grad
-	}
-	gradient.Stops = make([]ColorStop, len(stops))
-	for i, stop := range stops {
-		gradient.Stops[i] = ColorStop{Offset: stop.Offset, Color: stop.Color}
-	}
-	return rasterGradientCanvas{gradient: gradient}
-}
-
-// rangeLimits 限制渐变延伸区间
-// 入参: lo 区间起点, hi 区间终点
-// 返回: float64 起点, float64 终点
-func (s *shdPaint) rangeLimits(lo, hi float64) (float64, float64) {
-	if s.extend&1 == 0 {
-		lo = math.Max(lo, 0)
-	}
-	if s.extend&2 == 0 {
-		hi = math.Min(hi, 1)
-	}
-	return lo, hi
-}
-
-// repeatAxialGradient 轴向重复渐变
-type repeatAxialGradient struct {
-	*canvas.LinearGradient
-	period float64
-}
-
-// At 获取重复区间内的渐变颜色
-// 入参: x X坐标, y Y坐标
-// 返回: color.RGBA 渐变颜色
-func (g *repeatAxialGradient) At(x, y float64) color.RGBA {
-	d := g.End.Sub(g.Start)
-	t := (canvas.Point{X: x, Y: y}).Sub(g.Start).Dot(d) / d.Dot(d) / g.period
-	return g.Grad.At(t - math.Floor(t))
-}
-
-// SetColorSpace 转换重复渐变颜色空间
-// 入参: space 颜色空间
-// 返回: canvas.Gradient 渐变对象
-func (g *repeatAxialGradient) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
-	return &repeatAxialGradient{LinearGradient: g.LinearGradient.SetColorSpace(space).(*canvas.LinearGradient), period: g.period}
-}
-
-// drawSampledShading 按输出精度采样后端不能原生表达的局部渐变，不改写OFD对象
-// 入参: ctx 绘制上下文, path 已裁剪轮廓, view 渐变变换, gradient 渐变采样器
-func (r *Renderer) drawSampledShading(ctx *canvas.Context, path *canvas.Path, view canvas.Matrix, gradient rasterGradientCanvas) {
-	if path.Empty() {
-		return
-	}
-	bounds := path.Bounds().And(shdCanvasBounds(ctx))
-	if bounds.W() <= 0 || bounds.H() <= 0 {
-		return
-	}
-	scale := r.DPI / 25.4
-	w, h := math.Ceil(bounds.W()*scale), math.Ceil(bounds.H()*scale)
-	page := &RasterPage{Width: w / scale, Height: h / scale, DPI: r.DPI}
-	if _, _, err := page.PixelSize(); err != nil {
-		r.renderError = err
-		return
-	}
-	compiler := &canvasPageCompiler{page: page, geometry: r.backends.Geometry}
-	style := ctx.Style
-	style.Fill = canvas.Paint{Gradient: gradient}
-	compiler.RenderPath(path.Copy().Transform(view.Inv()), style, canvas.Identity.Translate(-bounds.X0, -bounds.Y0).Mul(view))
-	if compiler.err != nil {
-		r.renderError = compiler.err
-		return
-	}
-	raster := r.internalRasterBackend()
-	if raster == nil {
-		r.renderError = fmt.Errorf("shading raster: %w", ErrBackendUnavailable)
-		return
-	}
-	img, err := raster.Render(page)
-	if err != nil {
-		r.renderError = err
-		return
-	}
-	ctx.DrawImage(bounds.X0, bounds.Y0, img, canvas.DPMM(scale))
-}
-
-// drawShdPath 绘制渐变路径并保持图形轮廓不变
-// 入参: ctx 画布上下文, path 填充路径, view 渐变变换
-func (r *Renderer) drawShdPath(ctx *canvas.Context, path *canvas.Path, view canvas.Matrix) {
-	if err := r.outputContext().Err(); err != nil {
-		r.renderError = err
-		return
-	}
-	if gradient, ok := ctx.Style.Fill.Gradient.(rasterGradientCanvas); ok {
-		if _, compiling := ctx.Renderer.(*canvasPageCompiler); !compiling {
-			if _, measuring := ctx.Renderer.(*boundsRenderer); !measuring {
-				r.drawSampledShading(ctx, path, view, gradient)
-				return
-			}
-		}
-	}
-	if gradient, ok := ctx.Style.Fill.Gradient.(*repeatAxialGradient); ok {
-		if err := drawRepeatAxialPath(ctx, path, gradient, view, r.outputContext()); err != nil {
-			r.renderError = err
-		}
-		return
-	}
-	if view == canvas.Identity {
-		ctx.DrawPath(0, 0, path)
-		return
-	}
-	origin := ctx.CoordView().Dot(canvas.Point{})
-	m := ctx.CoordSystemView().Mul(ctx.View()).Translate(origin.X, origin.Y).Mul(view)
-	ctx.RenderPath(path.Copy().Transform(view.Inv()), ctx.Style, m)
-}
-
-// parseFillPaint 将公共画刷转换为Canvas对象
-// 入参: fillColor 填充颜色节点, x X坐标, y Y坐标, pageH 页面高度
-// 返回: any 填充画刷
-func (r *Renderer) parseFillPaint(fillColor *FillColor, x, y, pageH float64) any {
-	paint, err := r.ResolvePaint(fillColor)
-	if err != nil {
-		r.renderError = err
-		return nil
-	}
-	switch paint.Kind {
-	case PaintNone, PaintPattern:
-		return nil
-	case PaintLinear, PaintRadial:
-		return canvasShading(paint, x, y, pageH)
-	case PaintMesh:
-		return &shdPaint{gradient: newRasterGradientCanvas(&RasterGradient{Kind: RasterMesh, Mesh: paint.Mesh}), view: canvas.Matrix{{1, 0, x}, {0, -1, pageH - y}}}
-	default:
-		return paint.Color
-	}
-}
-
-// parseStrokePaint 解析勾边画刷
-// 入参: strokeColor 勾边颜色节点, x X坐标, y Y坐标, pageH 页面高度
-// 返回: any 勾边画刷
-func (r *Renderer) parseStrokePaint(strokeColor *StrokeColor, x, y, pageH float64) any {
-	return r.parseFillPaint((*FillColor)(strokeColor), x, y, pageH)
 }
 
 // resolveShdPaint 解析渐变画刷和裁剪区域
@@ -490,4 +346,148 @@ func axialShdClip(gradient *canvas.LinearGradient, extend int, bounds canvas.Rec
 		return &canvas.Path{}
 	}
 	return area.ToPath().Transform(axis)
+}
+
+// sampledRaster 保留原双圆或轴向几何与周期，不把ICC采样器降为端点渐变
+// 返回: rasterGradientCanvas 局部坐标采样器
+func (s *shdPaint) sampledRaster() rasterGradientCanvas {
+	gradient := &RasterGradient{Sample: s.sample, Spread: &RasterSpread{Extend: s.extend, MapType: s.mapType, Period: s.period}}
+	var stops canvas.Grad
+	switch g := s.gradient.(type) {
+	case *canvas.LinearGradient:
+		gradient.Start, gradient.End, stops = rasterPoint(g.Start), rasterPoint(g.End), g.Grad
+	case *canvas.RadialGradient:
+		gradient.Kind = RasterRadial
+		gradient.Start, gradient.End, gradient.R0, gradient.R1, stops = rasterPoint(g.C0), rasterPoint(g.C1), g.R0, g.R1, g.Grad
+	}
+	gradient.Stops = make([]ColorStop, len(stops))
+	for i, stop := range stops {
+		gradient.Stops[i] = ColorStop{Offset: stop.Offset, Color: stop.Color}
+	}
+	return rasterGradientCanvas{gradient: gradient}
+}
+
+// rangeLimits 限制渐变延伸区间
+// 入参: lo 区间起点, hi 区间终点
+// 返回: float64 起点, float64 终点
+func (s *shdPaint) rangeLimits(lo, hi float64) (float64, float64) {
+	if s.extend&1 == 0 {
+		lo = math.Max(lo, 0)
+	}
+	if s.extend&2 == 0 {
+		hi = math.Min(hi, 1)
+	}
+	return lo, hi
+}
+
+// At 获取重复区间内的渐变颜色
+// 入参: x X坐标, y Y坐标
+// 返回: color.RGBA 渐变颜色
+func (g *repeatAxialGradient) At(x, y float64) color.RGBA {
+	d := g.End.Sub(g.Start)
+	t := (canvas.Point{X: x, Y: y}).Sub(g.Start).Dot(d) / d.Dot(d) / g.period
+	return g.Grad.At(t - math.Floor(t))
+}
+
+// SetColorSpace 转换重复渐变颜色空间
+// 入参: space 颜色空间
+// 返回: canvas.Gradient 渐变对象
+func (g *repeatAxialGradient) SetColorSpace(space canvas.ColorSpace) canvas.Gradient {
+	return &repeatAxialGradient{LinearGradient: g.LinearGradient.SetColorSpace(space).(*canvas.LinearGradient), period: g.period}
+}
+
+// drawSampledShading 按输出精度采样后端不能原生表达的局部渐变，不改写OFD对象
+// 入参: ctx 绘制上下文, path 已裁剪轮廓, view 渐变变换, gradient 渐变采样器
+func (r *Renderer) drawSampledShading(ctx *canvas.Context, path *canvas.Path, view canvas.Matrix, gradient rasterGradientCanvas) {
+	if path.Empty() {
+		return
+	}
+	bounds := path.Bounds().And(shdCanvasBounds(ctx))
+	if bounds.W() <= 0 || bounds.H() <= 0 {
+		return
+	}
+	scale := r.dpi / 25.4
+	w, h := math.Ceil(bounds.W()*scale), math.Ceil(bounds.H()*scale)
+	page := &RasterPage{Width: w / scale, Height: h / scale, DPI: r.dpi}
+	if _, _, err := page.PixelSize(); err != nil {
+		r.renderError = err
+		return
+	}
+	compiler := &canvasPageCompiler{page: page, geometry: r.backends.Geometry}
+	style := ctx.Style
+	style.Fill = canvas.Paint{Gradient: gradient}
+	compiler.RenderPath(path.Copy().Transform(view.Inv()), style, canvas.Identity.Translate(-bounds.X0, -bounds.Y0).Mul(view))
+	if compiler.err != nil {
+		r.renderError = compiler.err
+		return
+	}
+	raster := r.internalRasterBackend()
+	if raster == nil {
+		r.renderError = fmt.Errorf("shading raster: %w", ErrBackendUnavailable)
+		return
+	}
+	img, err := raster.Render(r.outputContext(), page)
+	if err != nil {
+		r.renderError = err
+		return
+	}
+	ctx.DrawImage(bounds.X0, bounds.Y0, img, canvas.DPMM(scale))
+}
+
+// drawShdPath 绘制渐变路径并保持图形轮廓不变
+// 入参: ctx 画布上下文, path 填充路径, view 渐变变换
+func (r *Renderer) drawShdPath(ctx *canvas.Context, path *canvas.Path, view canvas.Matrix) {
+	if err := r.outputContext().Err(); err != nil {
+		r.renderError = err
+		return
+	}
+	if gradient, ok := ctx.Style.Fill.Gradient.(rasterGradientCanvas); ok {
+		if _, compiling := ctx.Renderer.(*canvasPageCompiler); !compiling {
+			if _, measuring := ctx.Renderer.(*boundsRenderer); !measuring {
+				r.drawSampledShading(ctx, path, view, gradient)
+				return
+			}
+		}
+	}
+	if gradient, ok := ctx.Style.Fill.Gradient.(*repeatAxialGradient); ok {
+		if err := drawRepeatAxialPath(ctx, path, gradient, view, r.outputContext()); err != nil {
+			r.renderError = err
+		}
+		return
+	}
+	if view == canvas.Identity {
+		ctx.DrawPath(0, 0, path)
+		return
+	}
+	origin := ctx.CoordView().Dot(canvas.Point{})
+	m := ctx.CoordSystemView().Mul(ctx.View()).Translate(origin.X, origin.Y).Mul(view)
+	ctx.RenderPath(path.Copy().Transform(view.Inv()), ctx.Style, m)
+}
+
+// parseFillPaint 将公共画刷转换为Canvas对象
+// 入参: fillColor 填充颜色节点, x X坐标, y Y坐标, pageH 页面高度
+// 返回: any 填充画刷
+func (r *Renderer) parseFillPaint(fillColor *FillColor, x, y, pageH float64) any {
+	paint, err := r.ResolvePaint(fillColor)
+	if err != nil {
+		r.renderError = err
+		return nil
+	}
+	switch paint.Kind {
+	case PaintNone, PaintPattern:
+		return nil
+	case PaintLinear, PaintRadial:
+		return canvasShading(paint, x, y, pageH)
+	case PaintMesh:
+		return &shdPaint{gradient: newRasterGradientCanvas(&RasterGradient{Kind: RasterMesh, Mesh: paint.Mesh}), view: canvas.Matrix{{1, 0, x}, {0, -1, pageH - y}}}
+	default:
+		return paint.Color
+	}
+}
+
+// parseStrokePaint 解析勾边画刷
+// 入参: strokeColor 勾边颜色节点, x X坐标, y Y坐标, pageH 页面高度
+// 返回: any 勾边画刷
+func (r *Renderer) parseStrokePaint(strokeColor *StrokeColor, x, y, pageH float64) any {
+	return r.parseFillPaint((*FillColor)(strokeColor), x, y, pageH)
 }

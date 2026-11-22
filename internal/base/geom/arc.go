@@ -19,42 +19,10 @@ import (
 	"math"
 )
 
-// Curves 按毫米误差上限将端点式椭圆弧转换为三次贝塞尔曲线，其他指令保持原样
-// 入参: tolerance 正有限误差上限
-// 返回: Path 独立路径, error 参数错误
-func (p Path) Curves(tolerance float64) (Path, error) {
-	if err := p.Validate(); err != nil {
-		return nil, err
-	}
-	if !positive(tolerance) {
-		return nil, fmt.Errorf("invalid curve tolerance")
-	}
-	result := make(Path, 0, len(p))
-	var current, start Point
-	for _, s := range p {
-		switch s.Verb {
-		case Move:
-			start = s.End
-		case Arc:
-			curves, err := ArcCurves(current, s, tolerance)
-			if err != nil {
-				return nil, err
-			}
-			result = append(result, curves...)
-			current = s.End
-			continue
-		case ClosePath:
-			result = append(result, s)
-			current = start
-			continue
-		case Line, Quad, Cubic:
-		default:
-			return nil, fmt.Errorf("unsupported geometry command %d", s.Verb)
-		}
-		result = append(result, s)
-		current = s.End
-	}
-	return result, nil
+// geometryArc 保存中心式椭圆及有向参数区间
+type geometryArc struct {
+	center, u, v Point
+	theta, delta float64
 }
 
 // ArcCurves 按标准端点参数求椭圆中心，只在绘制边界近似弧线
@@ -91,33 +59,6 @@ func ArcCurves(start Point, arc Segment, tolerance float64) (Path, error) {
 	}
 	result[len(result)-1].End = arc.End
 	return result, nil
-}
-
-// geometryArc 保存中心式椭圆及有向参数区间
-type geometryArc struct {
-	center, u, v Point
-	theta, delta float64
-}
-
-// point 计算椭圆参数对应的坐标
-// 入参: angle 参数角
-// 返回: Point 椭圆上的点
-func (a geometryArc) point(angle float64) Point {
-	s, c := math.Sincos(angle)
-	return Point{a.center.X + a.u.X*c + a.v.X*s, a.center.Y + a.u.Y*c + a.v.Y*s}
-}
-
-// fraction 判断参数角是否位于有向弧段内
-// 入参: angle 参数角
-// 返回: float64 弧段比例
-func (a geometryArc) fraction(angle float64) float64 {
-	d := math.Mod(angle-a.theta, 2*math.Pi)
-	if a.delta > 0 && d < 0 {
-		d += 2 * math.Pi
-	} else if a.delta < 0 && d > 0 {
-		d -= 2 * math.Pi
-	}
-	return d / a.delta
 }
 
 // centerArc 将端点式圆弧解析为中心式，统一半径修正和方向语义
@@ -179,4 +120,63 @@ func arcCoordinateMean(a, b float64) float64 {
 		return a/2 + b/2
 	}
 	return value
+}
+
+// Curves 按毫米误差上限将端点式椭圆弧转换为三次贝塞尔曲线，其他指令保持原样
+// 入参: tolerance 正有限误差上限
+// 返回: Path 独立路径, error 参数错误
+func (p Path) Curves(tolerance float64) (Path, error) {
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+	if !positive(tolerance) {
+		return nil, fmt.Errorf("invalid curve tolerance")
+	}
+	result := make(Path, 0, len(p))
+	var current, start Point
+	for _, s := range p {
+		switch s.Verb {
+		case Move:
+			start = s.End
+		case Arc:
+			curves, err := ArcCurves(current, s, tolerance)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, curves...)
+			current = s.End
+			continue
+		case ClosePath:
+			result = append(result, s)
+			current = start
+			continue
+		case Line, Quad, Cubic:
+		default:
+			return nil, fmt.Errorf("unsupported geometry command %d", s.Verb)
+		}
+		result = append(result, s)
+		current = s.End
+	}
+	return result, nil
+}
+
+// point 计算椭圆参数对应的坐标
+// 入参: angle 参数角
+// 返回: Point 椭圆上的点
+func (a geometryArc) point(angle float64) Point {
+	s, c := math.Sincos(angle)
+	return Point{a.center.X + a.u.X*c + a.v.X*s, a.center.Y + a.u.Y*c + a.v.Y*s}
+}
+
+// fraction 判断参数角是否位于有向弧段内
+// 入参: angle 参数角
+// 返回: float64 弧段比例
+func (a geometryArc) fraction(angle float64) float64 {
+	d := math.Mod(angle-a.theta, 2*math.Pi)
+	if a.delta > 0 && d < 0 {
+		d += 2 * math.Pi
+	} else if a.delta < 0 && d > 0 {
+		d -= 2 * math.Pi
+	}
+	return d / a.delta
 }

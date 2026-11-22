@@ -1,12 +1,10 @@
 importScripts("./wasm_exec.js");
 
 const engines = new Map();
-let resolveRuntime;
-let rejectRuntime;
+const runtime = {};
+const runtimeReady = new Promise((resolve, reject) => { runtime.resolve = resolve; runtime.reject = reject; });
 let fontSequence = 0;
 let engineMemory = null;
-const runtimeReady = new Promise((resolve, reject) => { resolveRuntime = resolve; rejectRuntime = reject; });
-runtimeReady.catch(() => {});
 
 function requestFont(engine, id, signal, name, done) {
 	const fontRequests = engine.fontRequests;
@@ -23,78 +21,6 @@ function requestFont(engine, id, signal, name, done) {
 	});
 	self.postMessage({ engineID: engine.id, id, type: "font", request, name });
 }
-self.onmessage = ({ data }) => {
-	if (data.type === "module") {
-		if (data.error) exitWASM(new Error(data.error));
-		else loadWASM(data.module).catch(exitWASM);
-		return;
-	}
-	const engineID = data.engineID;
-	if (typeof engineID !== "string" || !engineID) {
-		self.postMessage({ engineID, id: data.id, ok: false, error: "missing engine ID" });
-		return;
-	}
-	if (data.type === "open") {
-		if (engines.has(engineID)) {
-			self.postMessage({ engineID, type: "exit", error: "engine already exists" });
-			return;
-		}
-		const engine = { id: engineID, operations: new Map(), fontRequests: new Map(), active: new Set(), closed: false, outputFormats: null };
-		engines.set(engineID, engine);
-		engine.pending = runtimeReady.then(async () => {
-			if (engine.closed) return;
-			const opened = JSON.parse(globalThis.ofdgoEngineOpen(engineID));
-			if (!opened.ok) throw new Error(opened.error);
-			const backends = JSON.parse(await globalThis.ofdgoEngineCall(engineID, "ofdgoRenderBackends", null));
-			if (!backends.ok) throw new Error(backends.error);
-			if (!engine.closed) self.postMessage({ engineID, type: "ready", backends: backends.data, memory: engineMemory.buffer.byteLength });
-		}).catch(error => {
-			engine.closed = true;
-			self.postMessage({ engineID, type: "exit", error: error.message });
-		});
-		return;
-	}
-	const engine = engines.get(engineID);
-	if (!engine && data.type === "close") {
-		self.postMessage({ engineID, type: "closed" });
-		return;
-	}
-	if (!engine || engine.closed && data.type !== "close") {
-		self.postMessage({ engineID, id: data.id, ok: false, error: "unknown or closed engine" });
-		return;
-	}
-	if (data.type === "close") {
-		engine.closed = true;
-		for (const operation of engine.operations.values()) operation.abort();
-		engine.pending.then(async () => {
-			await Promise.all([...engine.active]);
-			await runtimeReady;
-			globalThis.ofdgoEngineClose(engineID);
-			engines.delete(engineID);
-			self.postMessage({ engineID, type: "closed" });
-		}).catch(() => engines.delete(engineID));
-		return;
-	}
-	if (data.type === "font") {
-		engine.fontRequests.get(data.request)?.(data);
-		engine.fontRequests.delete(data.request);
-		return;
-	}
-	if (data.type === "cancel") {
-		engine.operations.get(data.id)?.abort();
-		return;
-	}
-	engine.operations.set(data.id, new AbortController());
-	engine.pending = engine.pending.then(() => {
-		const operation = (data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" ? handleBatchMessage(engine, data) : handleMessage(engine, data)).catch(error => {
-			engine.operations.delete(data.id);
-			self.postMessage({ engineID, id: data.id, ok: false, error: error.message });
-		});
-		engine.active.add(operation);
-		operation.finally(() => engine.active.delete(operation));
-		if (data.name !== "ofdgoSaveSnapshot") return operation;
-	});
-};
 
 async function availableOutput(directory, base, format) {
 	for (let suffix = 0; ; suffix++) {
@@ -277,7 +203,7 @@ async function handleMessage(engine, { id, name, args }) {
 		if (name === "ofdgoChangeResource" && (args[0] === "add" || args[0] === "replace")) {
 			args[4] = new Uint8Array(new FileReaderSync().readAsArrayBuffer(args[4]));
 		}
-		if (["ofdgoImagePageSize", "ofdgoImagePreview"].includes(name) && args[0] instanceof Blob) args[0] = new Uint8Array(new FileReaderSync().readAsArrayBuffer(args[0]));
+		if (name === "ofdgoImagePreview" && args[0] instanceof Blob) args[0] = new Uint8Array(new FileReaderSync().readAsArrayBuffer(args[0]));
 		if (name === "ofdgoImportImages") {
 			const files = args[0], reader = new FileReaderSync();
 			args[0] = files.map(file => file.name);
@@ -373,7 +299,7 @@ async function handleMessage(engine, { id, name, args }) {
 		signal?.throwIfAborted();
 		const result = typeof payload === "string" ? JSON.parse(payload) : payload;
 		if (result.ok && name === "ofdgoOpenPDF") engine.pdf = engine.pdfSource = true;
-		if (result.ok && (name === "ofdgoOpen" || name === "ofdgoCreateDocument")) engine.pdf = engine.pdfSource = false;
+		if (result.ok && (name === "ofdgoOpen" || name === "ofdgoCreateDocument" || name === "ofdgoImportImages" && Number(args[2]) < 0)) engine.pdf = engine.pdfSource = false;
 		if (result.ok && name === "ofdgoLoadPDF" && result.data.done) engine.pdf = false;
 		if (started !== null && result.ok) result.elapsed = performance.now() - started;
 		if (cancellable && !importing && !converting && !processingFonts && !resources && result.ok) {
@@ -415,7 +341,7 @@ async function handleMessage(engine, { id, name, args }) {
 }
 
 function exitWASM(err) {
-	rejectRuntime(err || new Error("引擎运行中断"));
+	runtime.reject(err || new Error("引擎运行中断"));
 	self.postMessage({ type: "exit", error: err?.message || "引擎运行中断" });
 	self.close();
 }
@@ -427,8 +353,81 @@ async function loadWASM(module) {
 	self.postMessage({ type: "progress", phase: "start", text: "正在启动引擎", percent: 58 });
 	go.run(instance).then(exitWASM, exitWASM);
 	if (!go.exited) {
-		resolveRuntime();
+		runtime.resolve();
 	}
 }
 
+runtimeReady.catch(() => {});
+self.onmessage = ({ data }) => {
+	if (data.type === "module") {
+		if (data.error) exitWASM(new Error(data.error));
+		else loadWASM(data.module).catch(exitWASM);
+		return;
+	}
+	const engineID = data.engineID;
+	if (typeof engineID !== "string" || !engineID) {
+		self.postMessage({ engineID, id: data.id, ok: false, error: "missing engine ID" });
+		return;
+	}
+	if (data.type === "open") {
+		if (engines.has(engineID)) {
+			self.postMessage({ engineID, type: "exit", error: "engine already exists" });
+			return;
+		}
+		const engine = { id: engineID, operations: new Map(), fontRequests: new Map(), active: new Set(), closed: false, outputFormats: null };
+		engines.set(engineID, engine);
+		engine.pending = runtimeReady.then(async () => {
+			if (engine.closed) return;
+			const opened = JSON.parse(globalThis.ofdgoEngineOpen(engineID));
+			if (!opened.ok) throw new Error(opened.error);
+			const backends = JSON.parse(await globalThis.ofdgoEngineCall(engineID, "ofdgoRenderBackends", null));
+			if (!backends.ok) throw new Error(backends.error);
+			if (!engine.closed) self.postMessage({ engineID, type: "ready", backends: backends.data, memory: engineMemory.buffer.byteLength });
+		}).catch(error => {
+			engine.closed = true;
+			self.postMessage({ engineID, type: "exit", error: error.message });
+		});
+		return;
+	}
+	const engine = engines.get(engineID);
+	if (!engine && data.type === "close") {
+		self.postMessage({ engineID, type: "closed" });
+		return;
+	}
+	if (!engine || engine.closed && data.type !== "close") {
+		self.postMessage({ engineID, id: data.id, ok: false, error: "unknown or closed engine" });
+		return;
+	}
+	if (data.type === "close") {
+		engine.closed = true;
+		for (const operation of engine.operations.values()) operation.abort();
+		engine.pending.then(async () => {
+			await Promise.all([...engine.active]);
+			await runtimeReady;
+			globalThis.ofdgoEngineClose(engineID);
+			engines.delete(engineID);
+			self.postMessage({ engineID, type: "closed" });
+		}).catch(() => engines.delete(engineID));
+		return;
+	}
+	if (data.type === "font") {
+		engine.fontRequests.get(data.request)?.(data);
+		engine.fontRequests.delete(data.request);
+		return;
+	}
+	if (data.type === "cancel") {
+		engine.operations.get(data.id)?.abort();
+		return;
+	}
+	engine.operations.set(data.id, new AbortController());
+	engine.pending = engine.pending.then(() => {
+		const operation = (data.name === "ofdgoConvertFile" || data.name === "ofdgoPackFiles" ? handleBatchMessage(engine, data) : handleMessage(engine, data)).catch(error => {
+			engine.operations.delete(data.id);
+			self.postMessage({ engineID, id: data.id, ok: false, error: error.message });
+		});
+		engine.active.add(operation);
+		operation.finally(() => engine.active.delete(operation));
+		if (data.name !== "ofdgoSaveSnapshot") return operation;
+	});
+};
 self.postMessage({ type: "module" });

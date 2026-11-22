@@ -8,6 +8,7 @@ import { MM_TO_PX, SCROLL_SEGMENT_SIZE, createPageView } from "./ofdgo_view.js";
 const COMPACT_LAYOUT = window.matchMedia("(max-width: 900px)");
 const DEFAULT_IMAGE_DPI = 300;
 const SEARCH_MATCH_LIMIT = 10000;
+const PAGE_SELECT_LIMIT = 1000;
 const OBJECT_CLIPBOARD_TYPE = "application/x-ofdgo-objects";
 const RESOURCE_KINDS = [["Font", "字体"], ["Image", "图片"], ["Audio", "音频"], ["Video", "视频"], ["Attachment", "附件"], ["ColorSpace", "色彩"], ["DrawParam", "样式"]];
 const SETTINGS_KINDS = [["bookmarks", "书签"], ["actions", "动作"], ["templates", "模板"], ["layers", "图层"], ["permissions", "权限"], ["vPreferences", "视图"], ["extensions", "扩展"]];
@@ -42,24 +43,6 @@ const sealPosition = Object.fromEntries(["Layer", "Stamp", "Image"].map(name => 
 const workspace = { tabs: [], active: null, sequence: 0, nextID: 0, switching: false, closing: false, objectClipboard: null, textClipboard: null, batchCredentials: null };
 const busyControls = new Set();
 const credentialWaiters = [];
-
-let resourceManager = createResourceManager();
-let settings = createSettings();
-let invoicePanel = createInvoicePanel();
-let state = createDocumentState();
-let remoteDownload = null;
-let wasmWorker = null;
-let wasmRequestID = 0;
-let wasmRecoveryTimer = 0;
-let credentialRequest = null;
-let documentDialogs = null;
-let confirmationTask = Promise.resolve();
-let cancelPageTouch = null;
-let createImagePicker = null;
-let aboutBackdrop = false;
-let sealPreview = null;
-let structureXMLSequence = 0;
-
 const el = {
 	appearanceButton: document.querySelector("#appearanceButton"),
 	appearancePanel: document.querySelector("#appearancePanel"),
@@ -699,11 +682,28 @@ const pageView = createPageView({
 	get tabs() { return workspace.tabs; },
 	callRenderPage, callWASM, canvasEditor, clearRegionHighlights, documentTab, el,
 	enablePageDrag, formatSize, isDocumentSelection, isForegroundDocument, mountAnnotationNotes,
-	mountEditorObjects, mountPageLinks, nextFrame, pageCan, pageStatus,
+	mountEditorObjects, mountPageLinks, nextFrame, pageCan, pageIndexByID, pageStatus,
 	releaseMediaPlayers, renderSearchHighlights, loadEditorMembers, scheduleOpenActions, selectThumbnailPage,
-	setBusy, setProgress, setStatus, showError, syncPageSelection,
+	setBusy, setPageOpenAction, setProgress, setStatus, showError, syncPageSelection,
 	updateControls, updateEditorTools, wasmRequests,
 });
+
+let resourceManager = createResourceManager();
+let settings = createSettings();
+let invoicePanel = createInvoicePanel();
+let state = createDocumentState();
+let remoteDownload = null;
+let wasmWorker = null;
+let wasmRequestID = 0;
+let wasmRecoveryTimer = 0;
+let credentialRequest = null;
+let documentDialogs = null;
+let confirmationTask = Promise.resolve();
+let cancelPageTouch = null;
+let createImagePicker = null;
+let aboutBackdrop = false;
+let sealPreview = null;
+let structureXMLSequence = 0;
 
 function createResourceManager() {
 	return { kind: "Font", scope: "", views: new Map(), items: [], filteredItems: [], start: -1, end: -1, selected: null, references: [], referenceOffset: 0, targets: [], pick: null, busy: false, sequence: 0, url: null, fileAction: null };
@@ -882,6 +882,7 @@ function activeNativeIDs(skipTab = null) {
 		collect(tab.state.ofdBytes);
 		collect(tab.state.saveHandle);
 		collect(tab.state.importFile);
+		for (const file of tab.opening?.files || []) collect(file);
 		for (const entry of tab.state.createImageQueue?.entries || []) collect(entry.file);
 	}
 	for (const item of batch.items) collect(item.file);
@@ -1052,7 +1053,7 @@ resourceElements.Add.addEventListener("click", () => {
 	else if (kind === "Image") {
 		const tab = documentTab(), scope = documentPanelScope(tab.state);
 		openInsertPanel();
-		if (documentDialogs) documentDialogs.request(el.insertPanel, tab).then(() => {
+		documentDialogs.request(el.insertPanel, tab).then(() => {
 			if (isForegroundDocument(tab) && scope === documentPanelScope(tab.state) && resourceElements.Panel.open && tab.resources.kind === "Image") resourceElements.Add.focus({preventScroll: true});
 		});
 	}
@@ -1720,7 +1721,7 @@ el.ofdButton.addEventListener("click", openOFDFile);
 el.closeButton.addEventListener("pointerdown", event => event.preventDefault());
 el.closeButton.addEventListener("click", () => closeDocument().catch(error => showError(error, false)));
 batchElements.Button.addEventListener("click", () => {
-	documentDialogs?.detachOther(batchElements.Panel);
+	documentDialogs.detachOther(batchElements.Panel);
 	updateBatchControls();
 	batchElements.Panel.showModal();
 	renderBatchList(true);
@@ -1793,7 +1794,7 @@ fontBindingElements.File.addEventListener("change", async () => {
 	const update = action => {
 		if (!current()) return;
 		if (isForegroundDocument(tab)) action();
-		else documentDialogs?.updateFor(tab, fontBindingElements.Panel, () => { if (current() && isForegroundDocument(tab)) action(); });
+		else documentDialogs.updateFor(tab, fontBindingElements.Panel, () => { if (current() && isForegroundDocument(tab)) action(); });
 	};
 	if (isForegroundDocument(tab)) fontBindingElements.File.value = "";
 	try {
@@ -1820,7 +1821,7 @@ fontBindingElements.Form.addEventListener("submit", async event => {
 	const update = action => {
 		if (tab.closed) return;
 		if (isForegroundDocument(tab)) action();
-		else documentDialogs?.updateFor(tab, fontBindingElements.Panel, () => { if (!tab.closed && isForegroundDocument(tab)) action(); });
+		else documentDialogs.updateFor(tab, fontBindingElements.Panel, () => { if (!tab.closed && isForegroundDocument(tab)) action(); });
 	};
 	if (!font || document.body.hasAttribute("data-busy") || !fontBindingElements.Form.reportValidity()) return;
 	const choice = fontBinding.choices[Number(fontBindingElements.Source.value)];
@@ -1964,6 +1965,8 @@ el.signPanel.addEventListener("close", () => {
 });
 el.signForm.addEventListener("submit", signDocument);
 document.querySelector("#signPick").addEventListener("click", openSealPosition);
+el.viewerPanel.addEventListener("pointerdown", pageView.hydrateTargetTextLayer, true);
+el.viewerPanel.addEventListener("dblclick", pageView.hydrateTargetTextLayer, true);
 el.viewerPanel.addEventListener("pointerdown", beginSealDrag, true);
 el.viewerPanel.addEventListener("pointerdown", pickResourceObject, true);
 document.addEventListener("keydown", event => {
@@ -2259,7 +2262,7 @@ function handleKeyDown(event) {
 	}
 	if (nativeHost && (event.ctrlKey || event.metaKey) && (key === "Tab" || key.toLowerCase() === "w")) {
 		event.preventDefault();
-		if (document.body.hasAttribute("data-busy") || documentDialogs?.applicationOpen() || formDialogOpen() && !documentTab().print?.context && !batchElements.Panel.open) return;
+		if (document.body.hasAttribute("data-busy") || documentDialogs.applicationOpen() || formDialogOpen() && !documentTab().print?.context && !batchElements.Panel.open) return;
 		if (key.toLowerCase() === "w") closeTab(documentTab());
 		else {
 			const count = workspace.tabs.length, index = workspace.tabs.indexOf(documentTab());
@@ -2396,14 +2399,19 @@ async function openAboutPanel() {
 		return;
 	}
 	if (!el.aboutPanel.open) return;
-	if (!raw) {
+	const value = raw.trim();
+	if (!value || value.toLowerCase() === "develop") {
 		el.aboutVersion.textContent = "develop";
 		return;
 	}
-	const match = /^(\d+)-([0-9a-f]{40}|[0-9a-f]{64})$/i.exec(raw);
+	if (/^[vV]?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*))?(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(value)) {
+		el.aboutVersion.textContent = value;
+		return;
+	}
+	const match = /^(\d+)-([0-9a-f]{40}|[0-9a-f]{64})$/i.exec(value);
 	const seconds = Number(match?.[1]);
 	const date = new Date(seconds * 1000);
-	if (!match || !Number.isSafeInteger(seconds) || Number.isNaN(date.getTime())) {
+	if (!match || !Number.isSafeInteger(seconds) || seconds <= 0 || Number.isNaN(date.getTime())) {
 		el.aboutVersion.textContent = "版本信息异常";
 		return;
 	}
@@ -3047,7 +3055,7 @@ async function closeApplicationWindow() {
 function createDocumentTab(value = createDocumentState()) {
 	return { id: ++workspace.nextID, state: value, resources: createResourceManager(), settings: createSettings(),
 		invoice: createInvoicePanel(), worker: null, promise: null, closed: false, localFonts: [], view: null, status: STATUS.ready,
-		busy: false, progress: null, opening: null, touched: Date.now() };
+		busy: false, progress: null, opening: null, pendingAutoFonts: false, touched: Date.now() };
 }
 
 function advanceDocumentSequence() {
@@ -3142,7 +3150,8 @@ function detachDocumentView() {
 	const tab = documentTab();
 	if (sealPreview) finishSealPosition(true);
 	if (resourceElements.Panel.open) rememberResourceView();
-	documentDialogs?.suspend(tab);
+	documentDialogs.suspend(tab);
+	releaseMediaPlayers(null, tab);
 	if (!credentialRequest?.batch) {
 		tab.credentials = credentialRequest;
 		credentialRequest = null;
@@ -3191,12 +3200,8 @@ function detachDocumentView() {
 	state.documentSelection = null;
 	cancelPageTouch?.();
 	pageView.endPan();
-	if (!documentDialogs) clearSecurityForms();
-	if (resourceElements.Panel.open) rememberResourceView();
 	workspace.resourceView = null;
-	if (documentDialogs) {
-		for (const player of resourceElements.Viewer.querySelectorAll("audio, video")) player.pause();
-	} else releaseResourcePreview();
+	for (const player of resourceElements.Viewer.querySelectorAll("audio, video")) player.pause();
 	resourceManager.sequence++;
 	settings.sequence++;
 	fontBinding.sequence++;
@@ -3209,10 +3214,6 @@ function detachDocumentView() {
 	canvasEditor.cancelNudge();
 	canvasEditor.clear();
 	canvasEditor.setTool("");
-	if (!documentDialogs) for (const panel of [resourceElements.Panel, settingsElements.Panel, el.closePanel, el.attachmentDialog, el.createPanel,
-		el.insertPanel, fontBindingElements.Panel, el.pagePanel, el.paragraphPanel, el.infoPanel, el.documentPanel,
-		el.versionPanel, el.annotationNote, el.annotationCreate, el.objectPicker, el.importPanel, el.batchPagesPanel,
-		el.objectStylePanel, el.objectBoundsPanel, el.outlinePanel, el.structureDialog]) panel.close();
 }
 
 function attachDocumentTab(tab) {
@@ -3250,7 +3251,7 @@ function attachDocumentTab(tab) {
 	renderSearchResults();
 	el.ofdInput.value = "";
 	canvasEditor.pendingSelection = tab.view?.selection || null;
-	documentDialogs?.setOwner(tab);
+	documentDialogs.setOwner(tab);
 	if (el.createPanel.open && state.createImageQueue) renderCreateImages();
 	workspace.resourceView = resourceElements.Panel.open ? resourceManager : null;
 	pageView.setContinuous(state.continuous);
@@ -3331,10 +3332,16 @@ async function mountDocumentTab(tab) {
 			setBusy(false);
 			return;
 		}
+		let configured = false;
 		if (tab.configurePending && !state.wasmExited) {
 			setBusy(true, "正在同步文档", null);
 			state.doc = await callWASM("ofdgoConfigure", await fontManager.files(fontManager.records()), state.renderAnnotations);
 			tab.configurePending = false;
+			configured = true;
+			state.pageCache.clear();
+			state.thumbCache.clear();
+			state.detachedPages.clear();
+			pageView.releasePageResources(state);
 		}
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
 		if (tab.refreshPending) {
@@ -3344,12 +3351,14 @@ async function mountDocumentTab(tab) {
 			state.documentSelection = null;
 			canvasEditor.pendingSelection = null;
 		}
+		const pendingAutoFonts = Boolean(tab.pendingAutoFonts) && (!state.sourcePDF || state.pdfComplete || Boolean(state.editorInfo));
 		await openDocument({ doc: state.wasmExited ? undefined : state.doc, documentIndex: state.doc.documentIndex, versionID: state.doc.documentVersion, pageIndex: state.pageIndex, fitMode: state.fitMode || "free", scale: state.scale,
-			skipAutoFonts: !tab.initialLoad, keepSearch: !tab.refreshPending, keepCache: !tab.refreshPending, restoreTab: !tab.initialLoad, resetScroll: Boolean(tab.initialLoad), openSeq });
+			skipAutoFonts: !tab.initialLoad && !pendingAutoFonts, keepLocalFonts: !tab.initialLoad && pendingAutoFonts, keepSearch: !tab.refreshPending, keepCache: !tab.refreshPending && !configured, restoreTab: !tab.initialLoad, resetScroll: Boolean(tab.initialLoad), openSeq });
 		if (!isForegroundDocument(tab) || openSeq !== state.openSeq) return;
 		tab.configurePending = false;
 		tab.initialLoad = false;
 		tab.refreshPending = false;
+		if (pendingAutoFonts) tab.pendingAutoFonts = false;
 		if (view?.anchor) pageView.restoreScaleAnchor(view.anchor);
 		showNavigation(view?.navigation || el.pagesTab);
 		el.navigationContent.scrollTop = view?.navigationTop || 0;
@@ -3368,8 +3377,9 @@ async function mountDocumentTab(tab) {
 	tab.controlsPending = false;
 	setStatus(tab.status);
 	setBusy(Boolean(tab.opening || tab.editTask || tab.state.exporting), tab.progress?.text || "", tab.progress?.percent ?? null, tab.status, tab);
-	if (documentDialogs) await resumeDocumentPanels(tab);
+	await resumeDocumentPanels(tab);
 	if (isForegroundDocument(tab) && state.searchPaused && !tab.busy) searchDocument();
+	if (isForegroundDocument(tab) && tab.pendingAutoFonts && !tab.busy) runPendingAutoFonts(tab);
 }
 
 async function releaseDocumentTab(tab) {
@@ -3382,14 +3392,16 @@ async function releaseDocumentTab(tab) {
 		if (!prepared && workspace.objectClipboard === clipboard) workspace.objectClipboard = null;
 	}
 	tab.closed = true;
+	releaseMediaPlayers(null, tab);
 	for (const control of editorInputs.values()) {
 		if (control.pending?.tab === tab) { control.pending = null; control.handled = true; }
 	}
 	tab.print?.destroy();
 	tab.print = null;
+	const openingFiles = tab.opening?.files || null;
 	tab.opening?.controller.abort();
 	tab.opening = null;
-	documentDialogs?.release(tab);
+	documentDialogs.release(tab);
 	tab.credentials?.resolve(null);
 	tab.credentials = null;
 	await markWASMExited(tab.state.wasmSeq, null, tab);
@@ -3410,7 +3422,7 @@ async function releaseDocumentTab(tab) {
 	tab.settings.drafts.clear();
 	tab.invoice.views.clear();
 	tab.invoice.drafts.clear();
-	const nativeResources = [tab.state.ofdBytes, tab.state.saveHandle, tab.state.importFile];
+	const nativeResources = [tab.state.ofdBytes, tab.state.saveHandle, tab.state.importFile, openingFiles];
 	tab.state.ofdBytes = null;
 	tab.state.saveHandle = null;
 	tab.state.importFile = null;
@@ -3467,11 +3479,10 @@ async function requestCloseAction(title, message, save, tab = documentTab()) {
 		el.closePanel.returnValue = "cancel";
 		el.closePanel.inert = false;
 	};
-	if (documentDialogs && !workspace.closing) return documentDialogs.request(el.closePanel, tab, setup);
+	if (!workspace.closing) return documentDialogs.request(el.closePanel, tab, setup);
 	setup();
 	const choice = new Promise(resolve => el.closePanel.addEventListener("close", () => resolve(el.closePanel.returnValue), { once: true }));
-	if (documentDialogs) documentDialogs.showApplication(el.closePanel);
-	else el.closePanel.showModal();
+	documentDialogs.showApplication(el.closePanel);
 	try {
 		return await choice;
 	} finally {
@@ -3698,8 +3709,10 @@ async function switchReadingVersion(id) {
 			state.pageCache.clear();
 			state.thumbCache.clear();
 			state.detachedPages.clear();
+			pageView.releasePageResources(state);
 			state.pageIndex = 0;
 			tab.view = null;
+			tab.pendingAutoFonts = true;
 			await refreshDocumentTab(tab);
 			return true;
 		}
@@ -3892,7 +3905,10 @@ async function switchDocument(index) {
 	const previous = state.doc.documentIndex || 0;
 	if (index === previous) return;
 	if (!await canvasEditor.commitNudge() || !await canvasEditor.commitText() || !await canvasEditor.commitCrop()) {
-		if (isForegroundDocument(tab)) el.documentSelect.value = String(previous);
+		if (isForegroundDocument(tab)) {
+			el.documentSelect.value = String(previous);
+			el.documentSelect.title = el.documentSelect.selectedOptions[0]?.title || "切换文档";
+		}
 		return;
 	}
 	if (!isForegroundDocument(tab) || document.body.hasAttribute("data-busy")) return;
@@ -3932,8 +3948,10 @@ async function switchDocument(index) {
 			state.pageCache.clear();
 			state.thumbCache.clear();
 			state.detachedPages.clear();
+			pageView.releasePageResources(state);
 			state.pageIndex = 0;
 			tab.view = null;
+			tab.pendingAutoFonts = true;
 			await refreshDocumentTab(tab);
 			return;
 		}
@@ -3948,6 +3966,7 @@ async function switchDocument(index) {
 		}
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) {
 			el.documentSelect.value = String(previous);
+			el.documentSelect.title = el.documentSelect.selectedOptions[0]?.title || "切换文档";
 			showError(error, false);
 		}
 	} finally {
@@ -3987,6 +4006,7 @@ async function toggleEditor() {
 		if (!await canvasEditor.commitCrop() || !current()) return;
 		const anchor = pageView.scaleAnchor(0);
 		state.editing = !state.editing;
+		state.detachedPages.clear();
 		renderDocumentFonts();
 		canvasEditor.clear();
 		canvasEditor.setTool("");
@@ -4044,6 +4064,7 @@ async function toggleEditor() {
 			state.pageCache.clear();
 			state.thumbCache.clear();
 			state.detachedPages.clear();
+			pageView.releasePageResources(state);
 			updateWorkspaceDirty();
 			await refreshDocumentTab(tab);
 			return;
@@ -4150,18 +4171,18 @@ function updateCreateDirection(matchPaper = false) {
 	updateCreateImagePreviews();
 }
 
-function releaseCreateImages(tab) {
+function releaseCreateImages(tab, releaseFiles = true) {
 	const queue = tab.state.createImageQueue;
 	if (!queue) return;
 	queue.observer?.disconnect();
 	const files = [];
 	for (const entry of queue.entries) {
 		if (entry.url) URL.revokeObjectURL(entry.url);
-		if (entry.file) files.push(entry.file);
+		if (releaseFiles && entry.file) files.push(entry.file);
 	}
 	queue.entries.length = 0;
 	tab.state.createImageQueue = null;
-	releaseNative(files);
+	if (files.length) releaseNative(files);
 }
 
 function addCreateImages() {
@@ -4377,8 +4398,9 @@ async function createDocument(event) {
 	copyApplicationPreferences(tab.state);
 	tab.state.imageImporting = images;
 	tab.state.fileName = `${title.replace(/[\\/:*?"<>|]+/g, "_").replace(/\.ofd$/i, "")}.ofd`;
-	const request = {controller: new AbortController()};
+	const request = {controller: new AbortController(), files: imageRequest?.[0] || null};
 	tab.opening = request;
+	if (images) releaseCreateImages(previous, false);
 	el.createPanel.close();
 	const replace = !workspace.switching && !previous.state.doc && !previous.opening && !previous.state.dirty && !previous.error;
 	const index = workspace.tabs.indexOf(previous);
@@ -4426,6 +4448,7 @@ async function createDocument(event) {
 		if (tab.opening === request) tab.opening = null;
 		tab.state.imageImporting = false;
 		if (!accepted && tab.worker) await markWASMExited(tab.state.wasmSeq, null, tab);
+		if (nativeHost && imageRequest?.[0]?.length) await releaseNative(imageRequest[0], tab);
 		if (!tab.closed) setBusy(false, "", 0, "", tab);
 		if (isForegroundDocument(tab)) updateControls();
 		renderDocumentTabs();
@@ -5436,6 +5459,7 @@ async function insertObject(event) {
 			state.pageCache.clear();
 			state.thumbCache.clear();
 			state.detachedPages.clear();
+			pageView.releasePageResources(state);
 			await refreshDocumentTab(tab);
 			return;
 		}
@@ -5707,7 +5731,7 @@ async function changeDocument(name, item, ...args) {
 	if (name === "ofdgoProcessFonts") state.fontProcessResult = null;
 	setBusy(true, importing ? name === "ofdgoImportDocuments" ? "正在导入文档" : "正在导入页面" : name === "ofdgoProcessFonts" ? args[0] === 2 ? "正在外置字体" : "正在嵌入字体" : "", null);
 	const progressTimer = name === "ofdgoChangeFontBinding" ? window.setTimeout(() => {
-		if (openSeq === state.openSeq && document.body.hasAttribute("data-busy")) {
+		if (isForegroundDocument(tab) && openSeq === state.openSeq && document.body.hasAttribute("data-busy")) {
 			el.progressPanel.hidden = false;
 			setProgress("正在处理字体", null);
 		}
@@ -5753,6 +5777,7 @@ async function changeDocument(name, item, ...args) {
 				tab.state.pageCache.clear();
 				tab.state.thumbCache.clear();
 				tab.state.detachedPages.clear();
+				pageView.releasePageResources(tab.state);
 				await refreshDocumentTab(tab);
 			}
 			return;
@@ -5946,6 +5971,7 @@ async function refreshFontBinding(doc, openSeq) {
 	state.pageCache.clear();
 	state.thumbCache.clear();
 	state.detachedPages.clear();
+	pageView.releasePageResources(state);
 	canvasEditor.clear();
 	try {
 		try {
@@ -6045,15 +6071,19 @@ async function refreshEditorPage(doc, index, openSeq, clearSelection = false) {
 
 async function openOFDFile() {
 	if (workspace.closing) return;
+	if (fontManager.canReadLocal() && (nativeHost || fontManager.permission === "granted") && !fontManager.catalogLoaded) {
+		fontManager.queryLocal().catch(() => {});
+	}
 	if (!nativeHost && window.showOpenFilePicker) {
 		try {
 			const handles = await window.showOpenFilePicker({multiple: true, types: [{description: "OFD、PDF", accept: {"application/ofd": [".ofd"], "application/pdf": [".pdf"]}}]});
-			await requestLocalFontsBeforeOpen();
+			if (fontManager.canReadLocal() && fontManager.permission === "granted" && !fontManager.catalogLoaded) {
+				await fontManager.queryLocal().catch(() => {});
+			}
 			await Promise.all(handles.map(async handle => openOFD(await handle.getFile(), null, handle)));
 		} catch (error) { if (error.name !== "AbortError") showError(error, !state.doc); }
 		return;
 	}
-	await requestLocalFontsBeforeOpen();
 	el.ofdInput.value = "";
 	el.ofdInput.click();
 }
@@ -6246,7 +6276,7 @@ async function openNativeDocument(file) {
 async function openNativeFiles(files, launch = false) {
 	if (launch) {
 		for (let i = 0; i < files.length; i++) {
-			while (!workspace.closing && (workspace.switching || batchElements.Panel.open || documentDialogs?.applicationOpen())) {
+			while (!workspace.closing && (workspace.switching || batchElements.Panel.open || documentDialogs.applicationOpen())) {
 				await new Promise(resolve => setTimeout(resolve, 100));
 			}
 			if (workspace.closing) {
@@ -6788,19 +6818,20 @@ async function downloadRemoteDocument(options, tab = documentTab(), controller =
 }
 
 async function openOFD(file, remote = null, handle = file?.handle) {
-	if (workspace.closing) return;
-	if (!file) {
+	if (workspace.closing || !file) {
+		await releaseNative([file, handle]);
 		return;
 	}
 	if (!remote && !isDocumentFile(file)) {
 		el.ofdInput.value = "";
+		await releaseNative([file, handle]);
 		showError(new Error("选择 OFD、PDF 文件"), !state.doc);
 		return;
 	}
 	const previous = documentTab();
 	const tab = createDocumentTab();
 	copyApplicationPreferences(tab.state);
-	const request = {controller: new AbortController()};
+	const request = {controller: new AbortController(), files: [file, handle]};
 	tab.opening = request;
 	tab.state.fileName = file.name || remote?.name || STATUS.opening;
 	tab.status = STATUS.opening;
@@ -6839,7 +6870,7 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 			if (!current()) return;
 			let converted;
 			try {
-				converted = await openWithCredentials(await fontManager.files(fontManager.records()), tab.state.openSeq, bytes, false, true, tab);
+				converted = await openWithCredentials(await fontManager.files(fontManager.userFonts), tab.state.openSeq, bytes, false, true, tab);
 			} finally {
 				if (current()) {
 					tab.state.exportRequestID = 0;
@@ -6882,10 +6913,12 @@ async function openOFD(file, remote = null, handle = file?.handle) {
 		if (!accepted && !tab.closed) setBusy(false, "", 0, "", tab);
 		renderDocumentTabs();
 		const source = tab.state.ofdBytes;
-		if (!accepted && tab.worker) {
-			await markWASMExited(tab.state.wasmSeq, null, tab);
+		if (!accepted) {
+			if (tab.worker) await markWASMExited(tab.state.wasmSeq, null, tab);
 			tab.state.ofdBytes = null;
-			await releaseNative(source, tab);
+			await releaseNative([source, file, handle], tab);
+		} else if (handle && handle !== tab.state.saveHandle) {
+			await releaseNative(handle);
 		}
 	}
 	return accepted;
@@ -6965,7 +6998,7 @@ async function loadLocalFonts() {
 			await applyFontChange(tab);
 		}
 	} catch (err) {
-		tab.status = err?.name === "NotAllowedError" ? "系统字体未授权" : String(err.message || err);
+		tab.status = err?.name === "NotAllowedError" ? "系统字体未授权" : err?.name === "SecurityError" ? "点击系统字体可自动匹配" : String(err.message || err);
 		if (isForegroundDocument(tab)) setStatus(tab.status);
 	} finally {
 		tab.fontTask = false;
@@ -6986,7 +7019,7 @@ async function requestLocalFontsBeforeOpen() {
 		tab.status = available.length ? `已授权${available.length}种字体` : "暂无系统字体";
 		if (isForegroundDocument(tab)) setStatus(tab.status);
 	} catch (err) {
-		tab.status = err?.name === "NotAllowedError" ? "系统字体未授权" : String(err.message || err);
+		tab.status = err?.name === "NotAllowedError" ? "系统字体未授权" : err?.name === "SecurityError" ? "点击系统字体可自动匹配" : String(err.message || err);
 		if (isForegroundDocument(tab)) setStatus(tab.status);
 	} finally {
 		tab.fontTask = false;
@@ -7001,15 +7034,63 @@ async function autoLoadDocumentLocalFonts(openSeq, tab = documentTab(), append =
 	}
 	setProgress("正在匹配字体", 62, STATUS.fonts, tab);
 	try {
-		const available = fontManager.catalogLoaded ? fontManager.catalog : await fontManager.queryLocal();
+		const available = fontManager.catalogLoaded ? fontManager.catalog : await (fontManager.catalogPromise || fontManager.queryLocal());
 		if (tab.closed || openSeq !== state.openSeq) {
 			return false;
 		}
 		return await loadDocumentLocalFonts(available, openSeq, tab, append);
 	} catch (err) {
-		tab.status = err?.name === "NotAllowedError" ? "系统字体未授权" : String(err.message || err);
+		tab.status = err?.name === "NotAllowedError" ? "系统字体未授权" : err?.name === "SecurityError" ? "点击系统字体可自动匹配" : String(err.message || err);
 		if (isForegroundDocument(tab) && openSeq === state.openSeq) setStatus(tab.status);
 		return false;
+	}
+}
+
+async function runDocumentAutoLocalFonts(openSeq, tab = documentTab()) {
+	const state = tab.state;
+	if (!tab || tab.closed || !isForegroundDocument(tab) || !state.doc || openSeq !== state.openSeq) return false;
+	if (tab.fontTask || document.body.hasAttribute("data-busy")) {
+		tab.pendingAutoFonts = true;
+		return false;
+	}
+	const previousStatus = tab.status;
+	tab.pendingAutoFonts = false;
+	tab.fontTask = true;
+	setBusy(true, "", 0, "", tab);
+	try {
+		const loaded = await autoLoadDocumentLocalFonts(openSeq, tab, true);
+		if (loaded && isForegroundDocument(tab) && openSeq === state.openSeq) {
+			await applyFontChange(tab);
+			return true;
+		}
+		if (!loaded && isForegroundDocument(tab) && openSeq === state.openSeq && tab.status === STATUS.fonts) {
+			setStatus(previousStatus || pageStatus(state.pageIndex, state.doc?.pageCount || 0));
+		}
+		return false;
+	} finally {
+		tab.fontTask = false;
+		setBusy(false, "", 0, "", tab);
+	}
+}
+
+async function runPendingAutoFonts(tab = documentTab()) {
+	if (!tab || tab.closed || !tab.pendingAutoFonts || !isForegroundDocument(tab)) return;
+	const state = tab.state;
+	if (!state.doc || !state.ready || tab.opening || tab.editTask || tab.fontTask || document.body.hasAttribute("data-busy") || canvasEditor.input || canvasEditor.crop) return;
+	if (state.sourcePDF && !state.pdfComplete && !state.editorInfo) return;
+	tab.pendingAutoFonts = false;
+	if (!fontManager.canReadLocal() || fontManager.permission === "denied") return;
+	const openSeq = state.openSeq;
+	if (state.doc.detailsPending || !state.doc.fonts?.length || state.doc.fonts.some(font => font.status === "pending")) {
+		loadDocumentDetails(openSeq);
+		return;
+	}
+	const needsLocalFonts = state.doc.fonts.some(font => font.used > 0 && !font.embedded && (font.status === "missing" || font.status === "fallback"));
+	if (!needsLocalFonts) return;
+	if (nativeHost || fontManager.permission === "granted" || fontManager.catalogLoaded || fontManager.catalogPromise) {
+		await runDocumentAutoLocalFonts(openSeq, tab);
+	} else if (fontManager.permission === "prompt" && !tab.error && !state.doc.detailsError) {
+		setStatus("文档含未内嵌字体，可点击系统字体自动匹配");
 	}
 }
 
@@ -7211,14 +7292,20 @@ async function changeDisplayMode(mode = state.renderMode) {
 	} catch (err) {
 		state.renderDPI = previous.dpi;
 		state.renderMode = previous.mode;
-		state.pageCache.clear();
-		state.thumbCache.clear();
-		state.detachedPages.clear();
 		if (isForegroundDocument(tab)) {
 			el.imageDPI.value = String(previous.dpi);
 			pageView.resetPageLoading();
+			state.pageCache.clear();
+			state.thumbCache.clear();
+			state.detachedPages.clear();
+			pageView.releasePageResources(state);
 			updateDisplayControls();
 			showError(err, false);
+		} else {
+			state.pageCache.clear();
+			state.thumbCache.clear();
+			state.detachedPages.clear();
+			pageView.releasePageResources(state);
 		}
 	}
 }
@@ -7388,7 +7475,7 @@ function finishCredentials(credentials) {
 		if (!credentialRequest && !workspace.batchCredentials) credentialRequest = documentTab().credentials || null;
 		notifyCredentialsAvailable();
 	};
-	if (wasOpen && request.batch && documentDialogs) el.credentialsPanel.addEventListener("close", complete, { once: true });
+	if (wasOpen && request.batch) el.credentialsPanel.addEventListener("close", complete, { once: true });
 	else complete();
 }
 
@@ -7422,15 +7509,14 @@ async function requestCredentials(code, openSeq, pdf = false, tab = documentTab(
 		prepareCredentialsDialog(request, code, pdf, fileName, tab.credentialType);
 		el.progressPanel.hidden = true;
 	};
-	if (documentDialogs) documentDialogs.openFor(tab, el.credentialsPanel, setup);
-	else { setup(); el.credentialsPanel.showModal(); }
+	documentDialogs.openFor(tab, el.credentialsPanel, setup);
 	if (isForegroundDocument(tab)) (el.credentialsType.value === "certificate" ? el.credentialsCertificate : el.credentialsPassword).focus();
 	return promise;
 }
 
 async function requestBatchCredentials(code, pdf = false, fileName = "") {
 	while (!batch.canceled) {
-		if (workspace.batchCredentials || credentialRequest || el.credentialsPanel.open || documentDialogs?.current()?.stack.includes(el.credentialsPanel)) {
+		if (workspace.batchCredentials || credentialRequest || el.credentialsPanel.open || documentDialogs.current()?.stack.includes(el.credentialsPanel)) {
 			await new Promise(resolve => credentialWaiters.push(resolve));
 			continue;
 		}
@@ -7438,8 +7524,7 @@ async function requestBatchCredentials(code, pdf = false, fileName = "") {
 			const request = { resolve, batch: true };
 			workspace.batchCredentials = request;
 			prepareCredentialsDialog(request, code, pdf, fileName, batch.credentialType);
-			if (documentDialogs) documentDialogs.showApplication(el.credentialsPanel, { allowStacked: true });
-			else el.credentialsPanel.showModal();
+			documentDialogs.showApplication(el.credentialsPanel, { allowStacked: true });
 			(el.credentialsType.value === "certificate" ? el.credentialsCertificate : el.credentialsPassword).focus();
 		});
 	}
@@ -7457,6 +7542,10 @@ async function openWithCredentials(fonts, openSeq, data = state.ofdBytes, import
 		while (current()) {
 			try {
 				if (pdf) {
+					if (fontManager.canReadLocal() && (nativeHost || fontManager.permission === "granted" || fontManager.catalogPromise) && !fontManager.catalogLoaded) {
+						await (fontManager.catalogPromise || fontManager.queryLocal()).catch(() => {});
+						if (!current()) break;
+					}
 					state.pdfComplete = false;
 					tab.pdfTask = null;
 					const result = await callWASM("ofdgoOpenPDF", data, fonts, credentials?.password || null, state.renderAnnotations);
@@ -7580,7 +7669,10 @@ async function openDocument(options = {}) {
 			await openDocument({
 				pageIndex,
 				fitMode: state.fitMode,
+				scale: state.scale,
 				resetScroll: options.resetScroll,
+				keepSearch: options.keepSearch,
+				restoreTab: options.restoreTab,
 				skipAutoFonts: true,
 				openSeq,
 				reuseSession: true,
@@ -7592,10 +7684,11 @@ async function openDocument(options = {}) {
 		if (openSeq !== state.openSeq) {
 			return;
 		}
-		const pageFonts = state.sourcePDF && !nativeHost && !state.editorInfo ? await fontManager.files(fontManager.records()) : fonts;
+		const needsPageSource = !nativeHost && !state.editorInfo && !doc.encryption?.encrypted && Boolean(state.ofdBytes);
+		const pageFonts = needsPageSource ? (fonts ?? await fontManager.files(fontManager.records())) : null;
 		if (state.editing) await initializeTextFont(tab);
 		if (openSeq !== state.openSeq) return;
-		tab.worker.configurePages?.(!state.editorInfo && !doc.encryption?.encrypted && state.ofdBytes ? {
+		tab.worker.configurePages?.(needsPageSource ? {
 			file: state.ofdBytes, fonts: pageFonts, pdf: state.sourcePDF, fontNames: state.sourcePDF ? [...fontManager.localEntries().keys()] : [], annotations: state.renderAnnotations, document: doc.documentIndex, version: doc.documentVersion
 		} : null);
 		if (options.keepPreview) {
@@ -7609,12 +7702,13 @@ async function openDocument(options = {}) {
 				details = prepared.detailsError ? null : prepared;
 				Object.assign(doc, { detailsPending: false, detailsError: "" }, prepared);
 			}
-			if (thumbnailPreviews) {
-				for (const page of doc.pages) {
-					const preview = thumbnailPreviews.get(page.id);
-					if (preview) state.thumbCache.set(page.index, { ...preview, previewOnly: true });
+			if (thumbnailPreviews?.size) {
+				for (const [id, preview] of thumbnailPreviews) {
+					const index = pageIndexByID(doc.pages, id);
+					if (index >= 0) state.thumbCache.set(index, { ...preview, previewOnly: true });
 				}
 			}
+			pageView.releasePageResources(state);
 			const indices = new Set([pageIndex, ...previewIDs.map(id => pageIndexByID(doc.pages, id)).filter(index => index >= 0)]);
 			for (const index of indices) {
 				await pageView.loadPageData(index, { openSeq, priority: 0, refresh: true });
@@ -7626,6 +7720,12 @@ async function openDocument(options = {}) {
 		if (options.clearSelection) canvasEditor.clear();
 		if (options.selection) canvasEditor.pendingSelection = options.selection;
 		pageView.resetPageFlow(options.keepPreview || options.keepCache);
+		if (!options.keepPreview) {
+			const placeholder = document.createElement("div");
+			placeholder.className = "page-list-placeholder";
+			placeholder.textContent = "正在加载页面";
+			el.pageList.replaceChildren(placeholder);
+		}
 		const hideForOpenAction = initialActions && doc.hasOpenAction === true;
 		pageView.renderPageFlow();
 		el.pageFrame.style.visibility = hideForOpenAction ? "hidden" : "";
@@ -7693,6 +7793,7 @@ async function openDocument(options = {}) {
 		if (!options.reuseSession && !options.doc) {
 			state.ofdBytes = null;
 			state.doc = null;
+			el.pageList.replaceChildren();
 			renderSecurity();
 			updateControls();
 		}
@@ -7714,14 +7815,31 @@ function completePDF(tab) {
 		while (current()) {
 			await new Promise(resolve => setTimeout(resolve, 0));
 			if (!current()) break;
-			const result = await callTabWASM(tab, "ofdgoLoadPDF");
+			let result;
+			try {
+				result = await callTabWASM(tab, "ofdgoLoadPDF");
+			} catch (err) {
+				if (err?.name === "AbortError" && current() && !state.wasmExited) {
+					if (state.editorInfo || state.pdfComplete) {
+						tab.pdfTask = null;
+						return;
+					}
+					continue;
+				}
+				throw err;
+			}
 			if (!current()) break;
 			if (!result.done) continue;
 			state.pdfComplete = true;
 			tab.pdfTask = null;
 			state.conversionWarnings = JSON.parse(result.warnings || "null") || [];
-			if (!state.editorInfo) Object.assign(state.doc, result.doc);
+			if (!state.editorInfo && result.doc) {
+				const normalized = normalizeDocument(result.doc);
+				if (normalized && !normalized.pages && state.doc?.pages) delete normalized.pages;
+				Object.assign(state.doc, normalized);
+			}
 			if (isForegroundDocument(tab)) loadDocumentDetails(state.openSeq);
+			else tab.pendingAutoFonts = true;
 			return;
 		}
 		throw new DOMException("文档已关闭", "AbortError");
@@ -7759,16 +7877,18 @@ async function loadDocumentDetails(openSeq, details) {
 			const info = await callWASM("ofdgoDocumentInfo", true);
 			if (openSeq !== state.openSeq) return;
 			if (!info.detailsPending) {
-				const knownFonts = new Set((state.doc.fonts || []).map(font => font.id));
-				const missingFonts = info.fonts?.some(font => font.used > 0 && font.status === "missing" && !knownFonts.has(font.id));
+				const needsLocalFonts = info.fonts?.some(font => font.used > 0 && !font.embedded && (font.status === "missing" || font.status === "fallback"));
 				Object.assign(state.doc, info, { detailsPending: false, detailsError: "" });
 				renderMeta();
-				if (missingFonts && fontManager.permission === "granted" && !document.body.hasAttribute("data-busy")) {
-					setBusy(true);
-					try {
-						if (await autoLoadDocumentLocalFonts(openSeq, tab, true) && openSeq === state.openSeq) await applyFontChange(tab);
-					} finally {
-						setBusy(false, "", 0, "", tab);
+				if (needsLocalFonts && fontManager.canReadLocal() && fontManager.permission !== "denied") {
+					if (nativeHost || fontManager.permission === "granted" || fontManager.catalogLoaded || fontManager.catalogPromise) {
+						if (!document.body.hasAttribute("data-busy") && !tab.fontTask) {
+							await runDocumentAutoLocalFonts(openSeq, tab);
+						} else {
+							tab.pendingAutoFonts = true;
+						}
+					} else if (fontManager.permission === "prompt" && !fontManager.catalogLoaded && !tab.error && !state.doc.detailsError && isForegroundDocument(tab) && openSeq === state.openSeq) {
+						setStatus("文档含未内嵌字体，可点击系统字体自动匹配");
 					}
 				}
 				return;
@@ -7883,7 +8003,9 @@ function settingsSelect(container, label, id, choices, value, change) {
 	row.className = "form-row";
 	title.textContent = label;
 	field.id = `settings${id}`;
-	field.replaceChildren(...choices.map(([value, text]) => new Option(text, String(value))));
+	const fragment = document.createDocumentFragment();
+	for (const [choiceValue, text] of choices) fragment.append(new Option(text, String(choiceValue)));
+	field.replaceChildren(fragment);
 	if (value != null && choices.some(([key]) => String(key) === String(value))) field.value = String(value);
 	if (change) field.addEventListener("change", () => { rememberSettingsDraft(); change(field.value); });
 	row.append(title, field);
@@ -8816,7 +8938,10 @@ async function loadInvoiceObjects(draft) {
 	const data = await pageView.loadPageData(page);
 	if (!isForegroundDocument(tab) || invoiceCurrent() !== draft || draft.page !== page || sequence !== settings.sequence || !field.isConnected) return;
 	const objects = (data.objects || []).filter(item => !item.scoped && item.type === "TextObject");
-	field.replaceChildren(new Option("选择", ""), ...objects.map(item => new Option(`${item.id} · ${(item.text || "文字").slice(0, 60)}`, item.id)));
+	const fragment = document.createDocumentFragment();
+	fragment.append(new Option("选择", ""));
+	for (const item of objects) fragment.append(new Option(`${item.id} · ${(item.text || "文字").slice(0, 60)}`, item.id));
+	field.replaceChildren(fragment);
 	field.value = draft.object;
 }
 
@@ -9050,7 +9175,7 @@ async function commitInvoice(draft, request) {
 }
 
 function settingsPages(container, id, value, change) {
-	return settingsSelect(container, "页码", id, state.doc.pages.map((page, index) => [index, `第${index + 1}页`]), value, change);
+	return settingsSelect(container, "页码", id, pageSelectChoices(state.doc.pageCount || 0, index => index, value, state.pageIndex), value, change);
 }
 
 function outlineSettingsChoices() {
@@ -9126,9 +9251,9 @@ function renderDestinationFields(container, dest = {}) {
 	const type = dest?.Type || "XYZ";
 	settingsSelect(container, "定位", "DestType", [["XYZ", "坐标"], ["Fit", "适页"], ["FitH", "适宽"], ["FitV", "适高"], ["FitR", "区域"]], type, () => updateDestinationFields());
 	const index = pageIndexByID(state.doc.pages, dest?.PageID);
-	const pages = state.doc.pages.map((page, index) => [page.id, `第${index + 1}页`]);
+	const pages = pageSelectChoices(state.doc.pageCount || 0, idx => pageIDAt(state.doc, idx), index, settings.page, state.pageIndex);
 	if (dest?.PageID && index < 0) pages.push([dest.PageID, "页面缺失"]);
-	settingsSelect(container, "页码", "DestPage", pages, index >= 0 ? state.doc.pages[index].id : dest?.PageID || state.doc.pages[settings.page]?.id);
+	settingsSelect(container, "页码", "DestPage", pages, index >= 0 ? pageIDAt(state.doc, index) : dest?.PageID || pageIDAt(state.doc, settings.page));
 	for (const [id, label] of [["Left", "左侧"], ["Top", "顶部"], ["Right", "右侧"], ["Bottom", "底部"], ["Zoom", "缩放"]]) {
 		const field = settingsField(container, label, id, dest?.[`Omit${id}`] ? "" : dest?.[id] ?? "", "number");
 		field.placeholder = id === "Zoom" ? "保持" : "默认";
@@ -9314,7 +9439,14 @@ async function loadSettingsObjects() {
 	try {
 		const data = await pageView.loadPageData(page);
 		if (!isForegroundDocument(tab) || sequence !== settings.sequence || page !== settings.page || openSeq !== state.openSeq) return;
-		field.replaceChildren(new Option("选择", ""), ...(data.objects || []).filter(item => ["TextObject", "PathObject", "CompositeObject", "CompositeGraphicUnit"].includes(item.type) && !item.scoped).map(item => new Option(`${item.id} · ${item.text || "图元"}`, item.id)));
+		const fragment = document.createDocumentFragment();
+		fragment.append(new Option("选择", ""));
+		for (const item of data.objects || []) {
+			if (["TextObject", "PathObject", "CompositeObject", "CompositeGraphicUnit"].includes(item.type) && !item.scoped) {
+				fragment.append(new Option(`${item.id} · ${item.text || "图元"}`, item.id));
+			}
+		}
+		field.replaceChildren(fragment);
 	} catch (error) { if (isForegroundDocument(tab) && sequence === settings.sequence) settingsElements.Status.textContent = error.message; }
 	finally { if (isForegroundDocument(tab) && sequence === settings.sequence) { field.disabled = false; field.dispatchEvent(new Event("change")); } }
 }
@@ -9733,7 +9865,7 @@ async function openResourceManagement() {
 	if (resourceManager.pick) { finishResourcePick(); return; }
 	resourceElements.Panel.showModal();
 	renderResourceTabs();
-	resourceElements.Page.replaceChildren(...state.doc.pages.map((page, index) => new Option(`第${index + 1}页`, String(index))));
+	populatePageSelect(resourceElements.Page, state.doc.pageCount || 0, state.pageIndex, index => String(index));
 	resourceElements.Page.value = String(state.pageIndex);
 	await resourceTask(loadManagedResources);
 }
@@ -9880,7 +10012,7 @@ async function renderResourceList() {
 	resourceElements.List.closest(".resource-list-container").scrollTop = view?.scroll || 0;
 	await selectManagedResource(selected, saved?.reference);
 	if (!isForegroundDocument(tab) || !resourceElements.Panel.open || resourceManager.selected !== selected) return;
-	if (saved && (resourceElements.Page.value !== saved.page || resourceElements.Object.value !== saved.object) && [...resourceElements.Page.options].some(option => option.value === saved.page)) {
+	if (saved && (resourceElements.Page.value !== saved.page || resourceElements.Object.value !== saved.object) && ensurePageSelectOption(resourceElements.Page, saved.page)) {
 		resourceElements.Page.value = saved.page;
 		await loadResourceTargets(saved.object);
 		if (isForegroundDocument(tab)) updateResourceControls();
@@ -9955,7 +10087,12 @@ async function loadManagedReferences(index = 0) {
 	resourceManager.references = references;
 	resourceManager.referenceOffset = offset;
 	const roles = {Font: "字体", ResourceID: "资源", Substitution: "替换", ImageMask: "蒙版", Thumbnail: "缩略", AttachID: "附件"};
-	resourceElements.Reference.replaceChildren(...references.map((ref, index) => new Option(`${ref.page >= 0 ? `第${ref.page + 1}页` : ref.file}${ref.object ? ` · ${ref.object}` : ""} · ${roles[ref.role] || ref.role}`, String(offset + index))));
+	const refFragment = document.createDocumentFragment();
+	for (let index = 0; index < references.length; index++) {
+		const ref = references[index];
+		refFragment.append(new Option(`${ref.page >= 0 ? `第${ref.page + 1}页` : ref.file}${ref.object ? ` · ${ref.object}` : ""} · ${roles[ref.role] || ref.role}`, String(offset + index)));
+	}
+	resourceElements.Reference.replaceChildren(refFragment);
 	if (!references.length) resourceElements.Reference.add(new Option(!item || item.complete ? "暂无引用" : "引用未知", ""));
 	else resourceElements.Reference.value = String(index);
 	resourceElements.Reference.title = count ? `${offset + 1}-${offset + references.length} / ${count}` : "";
@@ -10005,7 +10142,7 @@ function updateResourceControls() {
 async function syncResourceReference() {
 	const tab = documentTab(), resourceManager = tab.resources;
 	const reference = resourceManager.references[Number(resourceElements.Reference.value) - resourceManager.referenceOffset];
-	if (reference?.page >= 0) resourceElements.Page.value = String(reference.page);
+	if (reference?.page >= 0 && ensurePageSelectOption(resourceElements.Page, reference.page)) resourceElements.Page.value = String(reference.page);
 	await loadResourceTargets(reference?.page >= 0 ? reference.object : "");
 	if (isForegroundDocument(tab)) updateResourceControls();
 }
@@ -10128,7 +10265,7 @@ function pickResourceObject(event) {
 		const choose = async item => {
 			if (!isForegroundDocument(tab) || resourceManager.pick !== picking || picking.sequence !== state.openSeq) return;
 			finishResourcePick();
-			resourceElements.Page.value = String(item.index);
+			if (ensurePageSelectOption(resourceElements.Page, item.index)) resourceElements.Page.value = String(item.index);
 			await loadResourceTargets(item.id);
 			if (isForegroundDocument(tab)) resourceElements.Status.textContent = "";
 		};
@@ -10160,7 +10297,7 @@ async function changeManagedResource(action, item, file) {
 		await loadManagedResources(tab);
 		if (!isForegroundDocument(tab)) return;
 		if (action === "bind" || action === "unbind") {
-			resourceElements.Page.value = String(page);
+			if (ensurePageSelectOption(resourceElements.Page, page)) resourceElements.Page.value = String(page);
 			await loadResourceTargets(object);
 			if (isForegroundDocument(tab)) resourceElements.Status.textContent = action === "bind" ? "已绑定" : "已解绑";
 		}
@@ -10185,25 +10322,28 @@ async function previewManagedResource() {
 	}
 	const item = resourceManager.selected;
 	if (!item?.file) return;
-	if (state.doc.encryption?.encrypted && !await requestConfirmation("资源将按明文读取，是否继续？")) return;
-	releaseResourcePreview();
 	const sequence = resourceManager.sequence, openSeq = state.openSeq;
+	if (state.doc.encryption?.encrypted && !await requestConfirmation("资源将按明文读取，是否继续？")) return;
+	if (!isForegroundDocument(tab) || !resourceElements.Panel.open || resourceManager.selected !== item || sequence !== resourceManager.sequence || openSeq !== state.openSeq) return;
+	releaseResourcePreview();
+	const previewSequence = resourceManager.sequence;
 	let result;
 	try {
 		result = item.kind === "Font"
 			? await callWASM("ofdgoFontPreview", item.id)
 			: await callWASM("ofdgoExportResource", JSON.stringify([item.kind, item.id]), null);
 	} catch (error) {
-		if (sequence !== resourceManager.sequence || openSeq !== state.openSeq || !resourceElements.Panel.open) return;
+		if (!isForegroundDocument(tab) || previewSequence !== resourceManager.sequence || openSeq !== state.openSeq || !resourceElements.Panel.open) return;
 		if (item.kind === "Font") throw new Error("字体无法预览", {cause: error});
 		throw error;
 	} finally {
 		state.exportRequestID = 0;
 		if (isForegroundDocument(tab)) el.cancelExportButton.hidden = true;
 	}
-	if (sequence !== resourceManager.sequence || openSeq !== state.openSeq || !resourceElements.Panel.open) return;
+	if (!isForegroundDocument(tab) || previewSequence !== resourceManager.sequence || openSeq !== state.openSeq || !resourceElements.Panel.open) return;
 	const format = item.kind === "Font" ? "svg" : item.format.toLowerCase();
 	const mime = {svg: "image/svg+xml", mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", m4a: "audio/mp4", mp4: "video/mp4", webm: "video/webm", png: "image/png", jpeg: "image/jpeg", jpg: "image/jpeg", bmp: "image/bmp"}[format] || "application/octet-stream";
+	if (resourceManager.url) URL.revokeObjectURL(resourceManager.url);
 	resourceManager.url = URL.createObjectURL(new Blob([result.bytes || result.blob], {type: mime}));
 	const image = item.kind === "Image" || item.kind === "Font";
 	const element = document.createElement(image ? "img" : item.kind === "Audio" ? "audio" : "video");
@@ -10211,9 +10351,9 @@ async function previewManagedResource() {
 	if (image) element.alt = item.name;
 	else { element.controls = true; element.preload = "metadata"; }
 	element.addEventListener("error", () => {
-		if (sequence === resourceManager.sequence && openSeq === state.openSeq) resourceElements.Status.textContent = "浏览器无法预览此格式";
+		if (isForegroundDocument(tab) && previewSequence === resourceManager.sequence && openSeq === state.openSeq) resourceElements.Status.textContent = "浏览器无法预览此格式";
 	});
-	resourceElements.Viewer.append(element);
+	resourceElements.Viewer.replaceChildren(element);
 	resourceElements.Viewer.hidden = false;
 }
 
@@ -10367,7 +10507,7 @@ async function applyEncryption(event) {
 	const update = action => {
 		if (!valid()) return;
 		if (active()) action();
-		else documentDialogs?.updateFor(tab, el.encryptionPanel, () => { if (active()) action(); });
+		else documentDialogs.updateFor(tab, el.encryptionPanel, () => { if (active()) action(); });
 	};
 	if (state.saving) { event.preventDefault(); return; }
 	event.preventDefault();
@@ -10656,7 +10796,7 @@ async function signDocument(event) {
 	const update = action => {
 		if (!valid()) return;
 		if (active()) action();
-		else documentDialogs?.updateFor(tab, el.signPanel, () => { if (active()) action(); });
+		else documentDialogs.updateFor(tab, el.signPanel, () => { if (active()) action(); });
 	};
 	if (state.saving) { event.preventDefault(); return; }
 	event.preventDefault();
@@ -10770,7 +10910,7 @@ async function verifyDocument(event) {
 	const update = action => {
 		if (!valid()) return;
 		if (active()) action();
-		else documentDialogs?.updateFor(tab, el.verifyPanel, () => { if (active()) action(); });
+		else documentDialogs.updateFor(tab, el.verifyPanel, () => { if (active()) action(); });
 	};
 	if (!state.doc || document.body.hasAttribute("data-busy")) return;
 	const files = Object.fromEntries(["Roots", "Certs", "TimeRoots", "Tokens", "CRLs", "OCSP"].map(name => [name, Array.from(el[`verify${name}`].files || [])]));
@@ -11202,7 +11342,12 @@ async function runBatch() {
 	let packed = false;
 	let batchFontKey = "";
 	const results = new Array(jobs.length);
+	const needsLocalFonts = jobs.some(item => /\.pdf$/i.test(item.file.name) || !["ofd", "txt"].includes(item.format || defaultFormat.value)
+		|| (item.format || defaultFormat.value) === "ofd" && batchElements.FontMode.value === "1");
 	try {
+		if (needsLocalFonts && fontManager.canReadLocal() && (nativeHost || fontManager.permission === "granted") && !fontManager.catalogLoaded) {
+			fontManager.queryLocal().catch(() => {});
+		}
 		if (archive) {
 			zipFile = await saveFilePicker({ suggestedName: "转换结果.zip", types: [{ description: "ZIP", accept: { "application/zip": [".zip"] } }] });
 			if (nativeHost) {
@@ -11215,9 +11360,8 @@ async function runBatch() {
 			}
 		} else destination = await directoryPicker();
 		if (batch.canceled) return;
-		if (jobs.some(item => /\.pdf$/i.test(item.file.name) || !["ofd", "txt"].includes(item.format || defaultFormat.value)
-			|| (item.format || defaultFormat.value) === "ofd" && batchElements.FontMode.value === "1")) {
-			await requestLocalFontsBeforeOpen();
+		if (needsLocalFonts && fontManager.canReadLocal() && (nativeHost || fontManager.permission === "granted") && !fontManager.catalogLoaded) {
+			await fontManager.queryLocal().catch(() => {});
 		}
 		if (batch.canceled) return;
 		batch.localFonts = fontManager.localEntries();
@@ -11401,6 +11545,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 	let savedRevision = null;
 	let encryptionDirty = false;
 	let snapshotPrepared = false;
+	let snapshotPending = false;
 	let finishSave;
 	const saveCompletion = saving && indices === null ? new Promise(resolve => { finishSave = resolve; }) : null;
 	if (saveCompletion) tab.saveCompletion = saveCompletion;
@@ -11449,6 +11594,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			savedRevision = state.editorInfo?.revision;
 			encryptionDirty = state.encryptionDirty;
 			await callWASM("ofdgoPrepareSave");
+			snapshotPending = true;
 			if (tab.closed || wasmSeq !== state.wasmSeq) return;
 		}
 		if (saving && indices === null && !readingSave && !pdfLossySave) {
@@ -11462,6 +11608,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 			: saving ? await callWASM(snapshotPrepared ? "ofdgoSaveSnapshot" : "ofdgoSaveDocument", indices, ...outputOptions, destination) : whole
 			? await callWASM("ofdgoExportDocument", format.value, dpi, indices, state.renderBackend, ...outputOptions, file)
 			: await callWASM("ofdgoExportPage", pageIndex, format.value, dpi, state.renderBackend, ...outputOptions, file);
+		if (snapshotPrepared) snapshotPending = false;
 		if (tab.closed || wasmSeq !== state.wasmSeq) {
 			return;
 		}
@@ -11562,7 +11709,7 @@ async function exportFile(whole, indices = null, value = el.exportFormat.value, 
 		}
 	} finally {
 		try {
-			if (snapshotPrepared) await callWASM("ofdgoDiscardSave").catch(() => {});
+			if (snapshotPending) await callWASM("ofdgoDiscardSave").catch(() => {});
 			if (previousHandle) await releaseNative(previousHandle);
 			if (file && file !== state.saveHandle) await releaseNative(file);
 			state.exportCancel = null;
@@ -11617,18 +11764,21 @@ function cancelExport() {
 	cancelOperation(requestID);
 }
 
-function releaseMediaPlayers(surface) {
-	for (const [id, entry] of state.mediaPlayers || []) {
+function releaseMediaPlayers(surface, tab = documentTab()) {
+	const players = tab?.state?.mediaPlayers;
+	if (!players) return;
+	for (const [id, entry] of [...players]) {
 		if (surface && (entry.surface !== surface || entry.floating)) continue;
-		releaseMediaPlayer(id, entry);
+		releaseMediaPlayer(id, entry, tab);
 	}
 }
 
-function releaseMediaPlayer(id, entry) {
-	if (state.mediaPlayers?.get(id) !== entry) return;
-	state.mediaPlayers.delete(id);
+function releaseMediaPlayer(id, entry, tab = documentTab()) {
+	const players = tab?.state?.mediaPlayers;
+	if (players?.get(id) !== entry) return;
+	players.delete(id);
 	for (const [requestID, request] of wasmRequests) {
-		if (request.tab === documentTab() && request.mediaID === id) cancelOperation(requestID);
+		if (request.tab === tab && request.mediaID === id) cancelOperation(requestID);
 	}
 	entry.finish?.();
 	closeMediaWindow(entry);
@@ -11652,7 +11802,7 @@ function closeMediaWindow(entry) {
 	entry.opener = null;
 }
 
-function placeMediaPlayer(id, entry) {
+function placeMediaPlayer(id, entry, tab = documentTab()) {
 	const box = entry.placement;
 	if (!box) return;
 	const element = entry.element;
@@ -11672,15 +11822,15 @@ function placeMediaPlayer(id, entry) {
 			close.className = "small-button";
 			close.textContent = "关闭";
 			close.title = `关闭${label}`;
-			close.addEventListener("click", () => releaseMediaPlayer(id, entry));
+			close.addEventListener("click", () => releaseMediaPlayer(id, entry, tab));
 			dialog.addEventListener("keydown", event => {
 				if (event.key !== "Escape") return;
 				event.preventDefault();
 				event.stopPropagation();
-				releaseMediaPlayer(id, entry);
+				releaseMediaPlayer(id, entry, tab);
 			});
 			dialog.addEventListener("close", () => {
-				if (entry.dialog === dialog) releaseMediaPlayer(id, entry);
+				if (entry.dialog === dialog) releaseMediaPlayer(id, entry, tab);
 			});
 			header.append(title, close);
 			dialog.append(header, element);
@@ -11707,6 +11857,7 @@ function placeMediaPlayer(id, entry) {
 }
 
 async function playMediaAction(link, page, surface) {
+	const tab = documentTab(), state = tab.state;
 	const action = link.sound || link.movie;
 	const id = action?.resourceID;
 	if (!id || !surface || !page) return;
@@ -11717,7 +11868,7 @@ async function playMediaAction(link, page, surface) {
 	if (operator === "Stop" || operator === "Pause") {
 		if (entry) entry.operation = (entry.operation || 0) + 1;
 		if (operator === "Stop") {
-			if (entry) releaseMediaPlayer(id, entry);
+			if (entry) releaseMediaPlayer(id, entry, tab);
 		} else if (entry) {
 			entry.paused = true;
 			entry.element?.pause();
@@ -11730,10 +11881,13 @@ async function playMediaAction(link, page, surface) {
 		if (!entry) {
 			entry = { surface };
 			players.set(id, entry);
-			entry.pending = callWASM("ofdgoExportMedia", id, null).then(data => {
-				if (seq !== state.openSeq || players.get(id) !== entry) return;
+			entry.pending = callTabWASM(tab, "ofdgoExportMedia", id, null).then(data => {
+				if (tab.closed || !isForegroundDocument(tab) || seq !== state.openSeq || players.get(id) !== entry) {
+					if (players.get(id) === entry) releaseMediaPlayer(id, entry, tab);
+					return;
+				}
 				if (!entry.floating && !entry.surface.isConnected) {
-					releaseMediaPlayer(id, entry);
+					releaseMediaPlayer(id, entry, tab);
 					return;
 				}
 				const element = document.createElement(data.kind === "Video" ? "video" : "audio");
@@ -11745,9 +11899,12 @@ async function playMediaAction(link, page, surface) {
 				element.className = "page-media";
 				element.addEventListener("error", () => {
 					entry.finish?.();
-					if (seq === state.openSeq && players.get(id) === entry) setStatus("媒体无法播放");
+					if (isForegroundDocument(tab) && seq === state.openSeq && players.get(id) === entry) setStatus("媒体无法播放");
 				});
-				placeMediaPlayer(id, entry);
+				placeMediaPlayer(id, entry, tab);
+			}, err => {
+				if (players.get(id) === entry && !entry.element) players.delete(id);
+				throw err;
 			});
 		}
 		if (operator === "Play") {
@@ -11759,13 +11916,13 @@ async function playMediaAction(link, page, surface) {
 		entry.paused = false;
 		const operation = entry.operation = (entry.operation || 0) + 1;
 		await entry.pending;
-		if (seq !== state.openSeq || players.get(id) !== entry || operation !== entry.operation || !entry.element?.isConnected) return false;
+		if (tab.closed || !isForegroundDocument(tab) || seq !== state.openSeq || players.get(id) !== entry || operation !== entry.operation || !entry.element?.isConnected) return false;
 		const element = entry.element;
 		if (link.sound) {
 			element.volume = Math.max(0, Math.min(100, action.volume ?? 100)) / 100;
 			element.loop = !!action.repeat;
 		}
-		placeMediaPlayer(id, entry);
+		placeMediaPlayer(id, entry, tab);
 		let ended;
 		if (link.sound && action.synchronous && !action.repeat) {
 			ended = new Promise(resolve => {
@@ -11780,10 +11937,8 @@ async function playMediaAction(link, page, surface) {
 		try { await element.play(); } catch (err) { entry.finish?.(); throw err; }
 		if (ended) return await ended;
 	} catch (err) {
-		if (players.get(id) === entry && seq === state.openSeq) {
-			if (!entry?.element) players.delete(id);
-			setStatus(err.message || "媒体无法播放");
-		}
+		if (players.get(id) === entry && !entry?.element) players.delete(id);
+		if (isForegroundDocument(tab) && seq === state.openSeq) setStatus(err.message || "媒体无法播放");
 		return false;
 	}
 }
@@ -12316,7 +12471,7 @@ function copySelection(event) {
 	const hasUnrenderedMiddle = startPage >= 0 && endPage > startPage + 1 && (() => {
 		for (let page = startPage + 1; page < endPage; page++) {
 			const shell = pageView.pageShell(page);
-			if (!shell || !shell.classList.contains("rendered")) return true;
+			if (!shell || !shell.classList.contains("rendered") || shell.dataset.textPending === "1") return true;
 		}
 		return false;
 	})();
@@ -12961,6 +13116,7 @@ function normalizeDocument(doc) {
 	if (!doc.defaultPageSize || count <= 0 || doc.pages?.length >= count) return doc;
 	const baseWidth = doc.defaultPageSize.width || 210;
 	const baseHeight = doc.defaultPageSize.height || 297;
+	const pageIds = Array.isArray(doc.pageIds) ? doc.pageIds : null;
 	const overrides = new Map();
 	const idToIndex = new Map();
 	const rawOverrides = doc.pageOverrides;
@@ -12984,7 +13140,7 @@ function normalizeDocument(doc) {
 		const ov = overrides.get(index);
 		return {
 			index,
-			id: ov?.id !== undefined ? ov.id : String(index + 1),
+			id: ov?.id !== undefined ? ov.id : pageIds && index < pageIds.length ? pageIds[index] : String(index + 1),
 			width: ov?.width ?? baseWidth,
 			height: ov?.height ?? baseHeight,
 			hasOpenAction: ov?.hasOpenAction ?? false,
@@ -13059,10 +13215,164 @@ function normalizeDocument(doc) {
 			}
 			return Reflect.has(target, prop);
 		},
+		set(target, prop, value, receiver) {
+			if (typeof prop === "string") {
+				const idx = Number(prop);
+				if (Number.isInteger(idx) && idx >= 0 && idx < count && String(idx) === prop) {
+					const previous = overrides.get(idx);
+					const oldID = previous?.id ?? (pageIds && idx < pageIds.length ? pageIds[idx] : String(idx + 1));
+					const oldKey = referenceIDKey(oldID);
+					if (idToIndex.get(oldKey) === idx) idToIndex.delete(oldKey);
+					overrides.set(idx, value);
+					cache.set(idx, value);
+					if (value?.id !== undefined) idToIndex.set(referenceIDKey(value.id), idx);
+					return true;
+				}
+			}
+			return Reflect.set(target, prop, value, receiver);
+		},
+		ownKeys(target) {
+			const keys = new Array(count + 1);
+			for (let i = 0; i < count; i++) keys[i] = String(i);
+			keys[count] = "length";
+			for (const key of Reflect.ownKeys(target)) {
+				if (key === "length") continue;
+				if (typeof key === "string") {
+					const idx = Number(key);
+					if (Number.isInteger(idx) && idx >= 0 && idx < count && String(idx) === key) continue;
+				}
+				keys.push(key);
+			}
+			return keys;
+		},
+		getOwnPropertyDescriptor(target, prop) {
+			if (prop === "length") return { value: count, writable: true, enumerable: false, configurable: false };
+			if (typeof prop === "string") {
+				const idx = Number(prop);
+				if (Number.isInteger(idx) && idx >= 0 && idx < count && String(idx) === prop) {
+					return { value: getPage(idx), writable: true, enumerable: true, configurable: true };
+				}
+			}
+			return Reflect.getOwnPropertyDescriptor(target, prop);
+		},
 	});
-	sparsePagesMeta.set(pages, { count, overrides, idToIndex });
+	sparsePagesMeta.set(pages, { count, overrides, idToIndex, pageIds, idIndexBuilt: false, cache, makePage });
 	doc.pages = pages;
 	return doc;
+}
+
+function pageIDAt(doc, index) {
+	if (!doc || index < 0 || index >= (doc.pageCount || 0)) return "";
+	const sparse = sparsePagesMeta.get(doc.pages);
+	if (sparse) {
+		const ov = sparse.overrides.get(index);
+		if (ov?.id !== undefined) return ov.id;
+		if (sparse.pageIds && index < sparse.pageIds.length) return sparse.pageIds[index];
+		return String(index + 1);
+	}
+	return doc.pages?.[index]?.id ?? String(index + 1);
+}
+
+function allPageIDSet(doc = state.doc) {
+	const ids = new Set();
+	if (!doc) return ids;
+	const count = doc.pageCount || 0;
+	const sparse = sparsePagesMeta.get(doc.pages);
+	if (sparse) {
+		for (let i = 0; i < count; i++) {
+			const id = sparse.overrides.get(i)?.id ?? (sparse.pageIds && i < sparse.pageIds.length ? sparse.pageIds[i] : String(i + 1));
+			ids.add(id);
+		}
+		return ids;
+	}
+	for (let i = 0; i < count; i++) {
+		const page = doc.pages[i];
+		if (page) ids.add(page.id);
+	}
+	return ids;
+}
+
+function pageSelectIndices(count, ...anchors) {
+	if (count <= PAGE_SELECT_LIMIT) {
+		const all = new Array(count);
+		for (let i = 0; i < count; i++) all[i] = i;
+		return all;
+	}
+	const set = new Set();
+	const addRange = (start, end) => {
+		const from = Math.max(0, start), to = Math.min(count - 1, end);
+		for (let i = from; i <= to; i++) set.add(i);
+	};
+	addRange(0, 99);
+	addRange(count - 100, count - 1);
+	for (const anchor of anchors) {
+		const index = Number(anchor);
+		if (Number.isInteger(index) && index >= 0 && index < count) addRange(index - 150, index + 150);
+	}
+	return [...set].sort((a, b) => a - b);
+}
+
+function pageSelectChoices(count, valueOf, ...anchors) {
+	const indices = pageSelectIndices(count, ...anchors);
+	const choices = new Array(indices.length);
+	for (let i = 0; i < indices.length; i++) {
+		const index = indices[i];
+		choices[i] = [valueOf(index), `第${index + 1}页`];
+	}
+	return choices;
+}
+
+function populatePageSelect(select, count, selectedIndex, valueOf) {
+	const fragment = document.createDocumentFragment();
+	for (const index of pageSelectIndices(count, selectedIndex, state.pageIndex)) {
+		fragment.append(new Option(`第${index + 1}页`, valueOf(index)));
+	}
+	select.replaceChildren(fragment);
+}
+
+function ensurePageSelectOption(select, pageIndex) {
+	const index = Number(pageIndex);
+	const count = state.doc?.pageCount || 0;
+	if (!Number.isInteger(index) || index < 0 || index >= count) return false;
+	const value = String(index);
+	for (const option of select.options) {
+		if (option.value === value) return true;
+	}
+	const option = new Option(`第${index + 1}页`, value);
+	let before = null;
+	for (const existing of select.options) {
+		if (Number(existing.value) > index) {
+			before = existing;
+			break;
+		}
+	}
+	select.insertBefore(option, before);
+	return true;
+}
+
+function setPageOpenAction(index, hasOpenAction, trigger = false) {
+	const doc = state.doc;
+	if (!doc || index < 0 || index >= (doc.pageCount || 0)) return;
+	let previous = false;
+	const sparse = sparsePagesMeta.get(doc.pages);
+	if (sparse) {
+		const ov = sparse.overrides.get(index);
+		previous = Boolean(ov?.hasOpenAction);
+		if (ov) ov.hasOpenAction = hasOpenAction;
+		else sparse.overrides.set(index, { ...sparse.makePage(index), hasOpenAction });
+		const cached = sparse.cache.get(index);
+		if (cached) cached.hasOpenAction = hasOpenAction;
+	} else {
+		const page = doc.pages?.[index];
+		if (!page) return;
+		previous = Boolean(page.hasOpenAction);
+		page.hasOpenAction = hasOpenAction;
+	}
+	if (trigger && hasOpenAction && index === state.pageIndex && !state.editing && state.openActionEnabled) {
+		const pageID = pageIDAt(doc, index);
+		if (!previous && state.openActionPage === pageID) state.openActionPage = null;
+		scheduleOpenActions();
+	}
 }
 
 function pageIndexByID(pages, id) {
@@ -13070,6 +13380,16 @@ function pageIndexByID(pages, id) {
 	const sparse = sparsePagesMeta.get(pages);
 	if (sparse) {
 		const key = referenceIDKey(id);
+		if (sparse.pageIds) {
+			if (!sparse.idIndexBuilt) {
+				for (let i = 0; i < sparse.count; i++) {
+					const raw = sparse.overrides.get(i)?.id ?? (i < sparse.pageIds.length ? sparse.pageIds[i] : String(i + 1));
+					if (raw !== undefined) sparse.idToIndex.set(referenceIDKey(raw), i);
+				}
+				sparse.idIndexBuilt = true;
+			}
+			return sparse.idToIndex.has(key) ? sparse.idToIndex.get(key) : -1;
+		}
 		if (sparse.idToIndex.has(key)) return sparse.idToIndex.get(key);
 		const num = Number(key);
 		if (Number.isInteger(num) && num >= 1 && num <= sparse.count) {
@@ -13119,12 +13439,14 @@ function selectedPageRange(indexes = selectedPageIndexes()) {
 
 function syncPageSelection() {
 	if (!state.editing) state.pageMultiSelect = false;
+	el.pageList.toggleAttribute("data-page-selection", Boolean(state.editing && (state.pageSelection.size || state.pageMultiSelect)));
 	el.pageSelectionTools.hidden = !state.editing || !state.pageMultiSelect || el.pageList.hidden;
 	el.pageSelectionCount.textContent = `已选${state.pageSelection.size}页`;
 	const allSelected = state.pageSelection.size === state.doc?.pageCount;
 	el.selectAllPages.textContent = allSelected ? "取消" : "全选";
 	for (const button of el.pageList.children) {
-		if (state.editing) button.setAttribute("data-pressed", String(state.pageSelection.has(state.doc.pages[Number(button.dataset.pageIndex)].id)));
+		if (!button.classList.contains("page-list-item")) continue;
+		if (state.editing) button.setAttribute("data-pressed", String(state.pageSelection.has(pageIDAt(state.doc, Number(button.dataset.pageIndex)))));
 		else button.removeAttribute("data-pressed");
 	}
 }
@@ -13156,7 +13478,7 @@ function selectThumbnailPage(event, index) {
 
 el.selectAllPages.addEventListener("click", () => {
 	if (document.body.hasAttribute("data-busy")) return;
-	state.pageSelection = new Set(state.pageSelection.size === state.doc.pageCount ? [] : state.doc.pages.map(page => page.id));
+	state.pageSelection = state.pageSelection.size === state.doc.pageCount ? new Set() : allPageIDSet(state.doc);
 	syncPageSelection();
 	updateControls();
 });
@@ -13224,7 +13546,7 @@ el.pageList.addEventListener("keydown", event => {
 	}
 	if (!state.editing || event.isComposing || document.body.hasAttribute("data-busy")) return;
 	if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "a") {
-		state.pageSelection = new Set(state.doc.pages.map(page => page.id));
+		state.pageSelection = allPageIDSet(state.doc);
 	} else if (event.key === "Escape") {
 		state.pageSelection.clear();
 		state.pageSelectionAnchor = null;
@@ -13369,11 +13691,15 @@ function renderMeta(keepDetails = false) {
 		el.documentSelect.replaceChildren(...(doc.documents || []).map(entry => {
 			const option = document.createElement("option");
 			option.value = String(entry.index);
-			option.textContent = `${entry.index + 1} · ${entry.title || "未命名"}`;
+			const title = String(entry.title || "").replace(/\s+/g, " ").trim() || "未命名";
+			const label = `${entry.index + 1} · ${title}`;
+			option.textContent = label;
+			option.title = label;
 			return option;
 		}));
 	});
 	el.documentSelect.value = String(doc.documentIndex || 0);
+	el.documentSelect.title = el.documentSelect.selectedOptions[0]?.title || "切换文档";
 	el.metaPanel.setAttribute("data-busy", String(!!doc.detailsPending));
 	document.title = `${nativeHost ? "OFDGo" : "OFDGo WebUI"} - ${state.doc ? state.fileName : "OFD编辑器"}`;
 	el.metaFile.textContent = state.doc ? state.fileName : "-";
@@ -13550,7 +13876,8 @@ function addStructureReference(reference = {}) {
 	page.name = "page";
 	ids.name = "ids";
 	ids.value = (reference.objectIds || []).join(",");
-	for (const [index, item] of state.doc.pages.entries()) page.add(new Option(`第${index + 1}页`, item.id));
+	const refIndex = reference.pageId ? pageIndexByID(state.doc.pages, reference.pageId) : state.pageIndex;
+	populatePageSelect(page, state.doc.pageCount || 0, refIndex, index => pageIDAt(state.doc, index));
 	if (reference.pageId) page.value = reference.pageId;
 	const remove = document.createElement("button"), add = document.createElement("button");
 	for (const [button, label, text] of [[remove, "删除引用", ""], [add, "添加图元", "+"]]) {
@@ -13579,7 +13906,7 @@ function addStructureReference(reference = {}) {
 		object.replaceChildren(new Option("读取中", ""));
 		add.disabled = true;
 		try {
-			const index = state.doc.pages.findIndex(item => item.id === value);
+			const index = pageIndexByID(state.doc.pages, value);
 			const targets = await callWASM("ofdgoStructureObjects", index);
 			if (!row.isConnected || sequence !== state.openSeq || value !== page.value) return;
 			object.replaceChildren(new Option("选择", ""));
@@ -14070,7 +14397,7 @@ async function processAllFonts(mode) {
 					}
 				}
 			} catch (err) {
-				tab.status = err?.name === "NotAllowedError" ? "系统字体未授权" : String(err.message || err);
+				tab.status = err?.name === "NotAllowedError" ? "系统字体未授权" : err?.name === "SecurityError" ? "点击系统字体可自动匹配" : String(err.message || err);
 				if (isForegroundDocument(tab)) setStatus(tab.status);
 			} finally {
 				tab.fontTask = false;
@@ -14175,7 +14502,14 @@ async function openFontBinding(font) {
 	fontBindingElements.Name.textContent = font.fontName || font.familyName || font.id;
 	fontBindingElements.SourceRow.hidden = font.embedded;
 	fontBindingElements.Source.disabled = font.embedded;
-	fontBindingElements.Source.replaceChildren(new Option("选择", ""), ...fontBinding.choices.map((choice, i) => new Option(choice.fullName || choice.name, String(i))), new Option("添加", "file"));
+	const sourceFragment = document.createDocumentFragment();
+	sourceFragment.append(new Option("选择", ""));
+	for (let i = 0; i < fontBinding.choices.length; i++) {
+		const choice = fontBinding.choices[i];
+		sourceFragment.append(new Option(choice.fullName || choice.name, String(i)));
+	}
+	sourceFragment.append(new Option("添加", "file"));
+	fontBindingElements.Source.replaceChildren(sourceFragment);
 	fontBindingElements.Hint.hidden = !font.embedded;
 	fontBindingElements.Status.textContent = "";
 	fontBindingElements.Submit.textContent = font.embedded ? "外置" : "嵌入";
@@ -14667,7 +15001,10 @@ async function callTabWASM(tab, name, ...args) {
 }
 
 async function mergeEditorSummary(tab, value, document, editor) {
-	if (value && typeof value === "object" && value.defaultPageSize && value.pageCount) normalizeDocument(value);
+	if (value && typeof value === "object") {
+		if (value.defaultPageSize && value.pageCount) normalizeDocument(value);
+		if (value.doc && typeof value.doc === "object" && value.doc.defaultPageSize && value.doc.pageCount) normalizeDocument(value.doc);
+	}
 	if (!value?.incremental) return value;
 	if ((value.baseRevision || 0) !== editor?.revision) return {...value, ...await callTabWASM(tab, "ofdgoEditorInfo"), incremental:false, detailsUnchanged:false, resynchronized:true, changes:{all:true}};
 	const pages = document.pages.slice(), capabilities = editor.pageCapabilities.slice();
@@ -14762,6 +15099,7 @@ function setBusy(busy, text = "", percent = 0, status = "", tab = documentTab())
 			window.setTimeout(syncUserFonts, 0);
 		}
 		if (state.fontRenderPending) window.setTimeout(refreshPendingFonts, 0);
+		if (tab.pendingAutoFonts) window.setTimeout(() => runPendingAutoFonts(tab), 0);
 		return;
 	}
 	el.exportPanel.close();
@@ -14817,7 +15155,7 @@ function downloadBytes(bytes, mime, name) {
 	document.body.append(link);
 	link.click();
 	link.remove();
-	window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+	window.setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 
 function baseFileName() {

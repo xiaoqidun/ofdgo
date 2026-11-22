@@ -36,109 +36,6 @@ var (
 	ofdDateTimeLayouts      = []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.999999999", "2006-01-02T15:04:05", "2006-01-02"}
 )
 
-// VPreferences 获取文档视图首选项的独立副本，未声明时返回nil，不加载注解或签名
-// 返回: *VPreferences 视图首选项, error 错误信息
-func (r *Reader) VPreferences() (*VPreferences, error) {
-	doc, err := r.docStructure()
-	if err != nil {
-		return nil, err
-	}
-	return cloneVPreferences(doc.VPreferences), nil
-}
-
-// Permissions 获取当前文档显式声明的权限副本，未声明时返回nil
-// 返回: *Permissions 权限声明副本, error 读取错误
-func (e *Editor) Permissions() (*Permissions, error) {
-	if e.source == nil || e.source.document == nil || !e.source.document.hasPermissions {
-		return nil, nil
-	}
-	return clonePermissions(&e.source.document.Permissions), nil
-}
-
-// SetPermissions 设置或清除当前文档的Permissions声明并计入撤销历史，nil表示清除
-// 入参: p 权限声明，nil时删除Permissions节点
-// 返回: error 校验、编码或提交错误
-func (e *Editor) SetPermissions(p *Permissions) error {
-	if err := validatePermissions(p); err != nil {
-		return err
-	}
-	current, err := e.Permissions()
-	if err != nil {
-		return err
-	}
-	var next *Permissions
-	if p != nil {
-		normalized := normalizePermissions(*p)
-		next = &normalized
-	}
-	if reflect.DeepEqual(current, next) {
-		return nil
-	}
-	return e.patchDocumentSection(func(data []byte) ([]byte, error) {
-		return patchDocumentPermissionsXML(data, next)
-	})
-}
-
-// VPreferences 获取当前文档显式声明的视图首选项副本，未声明时返回nil
-// 返回: *VPreferences 视图首选项副本, error 读取错误
-func (e *Editor) VPreferences() (*VPreferences, error) {
-	if e.source == nil || e.source.document == nil || e.source.document.VPreferences == nil {
-		return nil, nil
-	}
-	return cloneVPreferences(e.source.document.VPreferences), nil
-}
-
-// SetVPreferences 设置或清除当前文档的VPreferences声明并计入撤销历史，nil表示清除
-// 入参: v 视图首选项，nil时删除VPreferences节点
-// 返回: error 校验、编码或提交错误
-func (e *Editor) SetVPreferences(v *VPreferences) error {
-	if err := validateVPreferences(v); err != nil {
-		return err
-	}
-	current, err := e.VPreferences()
-	if err != nil {
-		return err
-	}
-	var next *VPreferences
-	if v != nil {
-		normalized := normalizeVPreferences(*v)
-		next = &normalized
-	}
-	if reflect.DeepEqual(current, next) {
-		return nil
-	}
-	return e.patchDocumentSection(func(data []byte) ([]byte, error) {
-		return patchDocumentVPreferencesXML(data, next)
-	})
-}
-
-// patchDocumentSection 对当前文档根XML应用保真补丁并提交可撤销快照
-// 入参: apply 文档XML补丁函数
-// 返回: error 准备、解析或提交错误
-func (e *Editor) patchDocumentSection(apply func([]byte) ([]byte, error)) error {
-	base := e.source
-	var err error
-	if base == nil {
-		base, err = e.importBase()
-		if err != nil {
-			return err
-		}
-	}
-	name := base.reader.documentRoot
-	data, err := base.reader.readFile(name)
-	if err != nil {
-		return err
-	}
-	updated, err := apply(data)
-	if err != nil {
-		return err
-	}
-	if bytes.Equal(data, updated) {
-		return nil
-	}
-	return e.commitAnnotationParts(base, map[string][]byte{name: updated})
-}
-
 // clonePermissions 复制文档权限结构体及其有效期指针
 // 入参: p 原始权限指针
 // 返回: *Permissions 独立副本
@@ -464,4 +361,107 @@ func editorPatchDocumentNode(data []byte, root *editorXML, local string, after [
 		}
 	}
 	return editorPatchXML(data, []editorXMLPatch{{position, position, encoded}})
+}
+
+// VPreferences 获取文档视图首选项的独立副本，未声明时返回nil，不加载注解或签名
+// 返回: *VPreferences 视图首选项, error 错误信息
+func (r *Reader) VPreferences() (*VPreferences, error) {
+	doc, err := r.docStructure()
+	if err != nil {
+		return nil, err
+	}
+	return cloneVPreferences(doc.VPreferences), nil
+}
+
+// Permissions 获取当前文档显式声明的权限副本，未声明时返回nil
+// 返回: *Permissions 权限声明副本, error 读取错误
+func (e *Editor) Permissions() (*Permissions, error) {
+	if e.source == nil || e.source.document == nil || !e.source.document.hasPermissions {
+		return nil, nil
+	}
+	return clonePermissions(&e.source.document.Permissions), nil
+}
+
+// SetPermissions 设置或清除当前文档的Permissions声明并计入撤销历史，nil表示清除
+// 入参: p 权限声明，nil时删除Permissions节点
+// 返回: error 校验、编码或提交错误
+func (e *Editor) SetPermissions(p *Permissions) error {
+	if err := validatePermissions(p); err != nil {
+		return err
+	}
+	current, err := e.Permissions()
+	if err != nil {
+		return err
+	}
+	var next *Permissions
+	if p != nil {
+		normalized := normalizePermissions(*p)
+		next = &normalized
+	}
+	if reflect.DeepEqual(current, next) {
+		return nil
+	}
+	return e.patchDocumentSection(func(data []byte) ([]byte, error) {
+		return patchDocumentPermissionsXML(data, next)
+	})
+}
+
+// VPreferences 获取当前文档显式声明的视图首选项副本，未声明时返回nil
+// 返回: *VPreferences 视图首选项副本, error 读取错误
+func (e *Editor) VPreferences() (*VPreferences, error) {
+	if e.source == nil || e.source.document == nil || e.source.document.VPreferences == nil {
+		return nil, nil
+	}
+	return cloneVPreferences(e.source.document.VPreferences), nil
+}
+
+// SetVPreferences 设置或清除当前文档的VPreferences声明并计入撤销历史，nil表示清除
+// 入参: v 视图首选项，nil时删除VPreferences节点
+// 返回: error 校验、编码或提交错误
+func (e *Editor) SetVPreferences(v *VPreferences) error {
+	if err := validateVPreferences(v); err != nil {
+		return err
+	}
+	current, err := e.VPreferences()
+	if err != nil {
+		return err
+	}
+	var next *VPreferences
+	if v != nil {
+		normalized := normalizeVPreferences(*v)
+		next = &normalized
+	}
+	if reflect.DeepEqual(current, next) {
+		return nil
+	}
+	return e.patchDocumentSection(func(data []byte) ([]byte, error) {
+		return patchDocumentVPreferencesXML(data, next)
+	})
+}
+
+// patchDocumentSection 对当前文档根XML应用保真补丁并提交可撤销快照
+// 入参: apply 文档XML补丁函数
+// 返回: error 准备、解析或提交错误
+func (e *Editor) patchDocumentSection(apply func([]byte) ([]byte, error)) error {
+	base := e.source
+	var err error
+	if base == nil {
+		base, err = e.importBase()
+		if err != nil {
+			return err
+		}
+	}
+	name := base.reader.documentRoot
+	data, err := base.reader.readFile(name)
+	if err != nil {
+		return err
+	}
+	updated, err := apply(data)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(data, updated) {
+		return nil
+	}
+	return e.commitAnnotationParts(base, map[string][]byte{name: updated})
 }

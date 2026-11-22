@@ -22,6 +22,38 @@ import (
 // u3dVector 保存计算过程中的三维双精度坐标
 type u3dVector [3]float64
 
+// u3dMatrix 保存按列排列的仿射矩阵
+type u3dMatrix [16]float64
+
+// u3dInstance 保存一个父路径产生的世界实例，parent为负值时连接默认根
+type u3dInstance struct {
+	node, parent int
+	world        u3dMatrix
+	opacity      float64
+	visibility   int8
+}
+
+// u3dIdentity 创建单位矩阵
+// 返回: u3dMatrix 单位矩阵
+func u3dIdentity() u3dMatrix { return u3dMatrix{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1} }
+
+// u3dTriangleNormal 选取夹角更稳定的顶点计算法线，避免长瘦三角面的相消
+// 入参: points 按绕序排列的顶点
+// 返回: u3dVector 单位法线，退化三角面返回零向量
+func u3dTriangleNormal(points [3]u3dVector) u3dVector {
+	var normal u3dVector
+	score := 0.0
+	for i := range 3 {
+		a := points[(i+1)%3].sub(points[i]).unit()
+		b := points[(i+2)%3].sub(points[i]).unit()
+		candidate := a.cross(b)
+		if length := max(math.Abs(candidate[0]), math.Abs(candidate[1]), math.Abs(candidate[2])); length > score {
+			normal, score = candidate, length
+		}
+	}
+	return normal.unit()
+}
+
 // unit 归一化向量，零向量保持为零
 // 返回: u3dVector 单位向量
 func (v u3dVector) unit() u3dVector {
@@ -33,6 +65,9 @@ func (v u3dVector) unit() u3dVector {
 		v[i] /= scale
 	}
 	length := math.Sqrt(v.dot(v))
+	if length == 0 || !finite(length) {
+		return u3dVector{}
+	}
 	return u3dVector{v[0] / length, v[1] / length, v[2] / length}
 }
 
@@ -54,9 +89,6 @@ func (v u3dVector) dot(other u3dVector) float64 { return v[0]*other[0] + v[1]*ot
 func (v u3dVector) cross(other u3dVector) u3dVector {
 	return u3dVector{v[1]*other[2] - v[2]*other[1], v[2]*other[0] - v[0]*other[2], v[0]*other[1] - v[1]*other[0]}
 }
-
-// u3dMatrix 保存按列排列的仿射矩阵
-type u3dMatrix [16]float64
 
 // multiply 连接子节点到父节点的变换
 // 入参: other 子变换
@@ -111,7 +143,7 @@ func (m u3dMatrix) inverse() (u3dMatrix, bool) {
 				pivot = row
 			}
 		}
-		if rows[pivot][column] == 0 {
+		if rows[pivot][column] == 0 || !finite(rows[pivot][column]) {
 			return u3dMatrix{}, false
 		}
 		rows[pivot], rows[column] = rows[column], rows[pivot]
@@ -143,35 +175,6 @@ func (m u3dMatrix) inverse() (u3dMatrix, bool) {
 // 返回: u3dVector 目标法线
 func (m u3dMatrix) normal(n u3dVector) u3dVector {
 	return (u3dVector{m[0]*n[0] + m[1]*n[1] + m[2]*n[2], m[4]*n[0] + m[5]*n[1] + m[6]*n[2], m[8]*n[0] + m[9]*n[1] + m[10]*n[2]}).unit()
-}
-
-// u3dInstance 保存一个父路径产生的世界实例，parent为负值时连接默认根
-type u3dInstance struct {
-	node, parent int
-	world        u3dMatrix
-	opacity      float64
-	visibility   int8
-}
-
-// u3dIdentity 创建单位矩阵
-// 返回: u3dMatrix 单位矩阵
-func u3dIdentity() u3dMatrix { return u3dMatrix{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1} }
-
-// u3dTriangleNormal 选取夹角更稳定的顶点计算法线，避免长瘦三角面的相消
-// 入参: points 按绕序排列的顶点
-// 返回: u3dVector 单位法线，退化三角面返回零向量
-func u3dTriangleNormal(points [3]u3dVector) u3dVector {
-	var normal u3dVector
-	score := 0.0
-	for i := range 3 {
-		a := points[(i+1)%3].sub(points[i]).unit()
-		b := points[(i+2)%3].sub(points[i]).unit()
-		candidate := a.cross(b)
-		if length := max(math.Abs(candidate[0]), math.Abs(candidate[1]), math.Abs(candidate[2])); length > score {
-			normal, score = candidate, length
-		}
-	}
-	return normal.unit()
 }
 
 // sceneGraph 校验父子关系并确定拓扑顺序，只有默认根的后代接入场景

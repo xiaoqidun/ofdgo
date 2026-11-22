@@ -37,18 +37,21 @@ import (
 // ErrIncompleteDocument 表示渐进阅读快照尚未包含请求的页面或完整文档
 var ErrIncompleteDocument = errors.New("document content is incomplete")
 
+// ErrEntryTooLarge 表示包内单条目解压后体积超出大小限制
+var ErrEntryTooLarge = errors.New("package entry exceeds size limit")
+
 // nextReaderArchiveID 为只读ZIP阅读器分配唯一缓存标识
 var nextReaderArchiveID atomic.Uint64
 
 // Reader OFD文件阅读器
 // Reader及共享它的Renderer需串行调用
 type Reader struct {
-	Path                      string
-	Zip                       *zip.Reader
-	Closer                    io.Closer
-	OFD                       *OFD
-	RootDir                   string
-	ResMap                    map[string]string
+	path                      string
+	zip                       *zip.Reader
+	closer                    io.Closer
+	ofd                       *OFD
+	rootDir                   string
+	resMap                    map[string]string
 	sourceFile                os.FileInfo
 	archiveID                 uint64
 	resources                 *Resources
@@ -86,9 +89,9 @@ type Reader struct {
 	documentRoot              string
 	selectedVersion           *string
 	versionInfo               *DocumentVersionInfo
-	Stamps                    map[string][]Stamp
+	stamps                    map[string][]Stamp
 	pendingStamps             map[string][]Stamp
-	Annots                    map[string][]Annotation
+	annots                    map[string][]Annotation
 	annotationFiles           map[string][]string
 	pageAnnotFiles            map[string][]string
 	pageAnnotsLoaded          map[string]bool
@@ -98,6 +101,7 @@ type Reader struct {
 	fileNames                 map[string]bool
 	encryption                *encryptionState
 	encrypted                 *encryptedPackageSource
+	encHold                   *encryptionHold
 	maxIDCache                *archiveMaxIDCache
 	docPageIDs                map[string]string
 	docPageIDsDoc             *Document
@@ -110,12 +114,445 @@ type Reader struct {
 	stampCanonLen             int
 }
 
-// Close 关闭阅读器持有的文件，重复调用不再关闭底层文件
+// pageContentKey 按页面原文或只读归档路径及解析模式区分缓存，不包含文档资源和区域继承
+type pageContentKey struct {
+	archiveID uint64
+	path      string
+	digest    [32]byte
+	textOnly  bool
+}
+
+// documentPageList 仅读取文档中的页面索引，统计页数时不构建其他结构
+type documentPageList struct {
+	Pages Pages
+}
+
+// resLoadState 在批量加载文档资源文件期间维护归一化标识到原始键的常数时间索引
+type resLoadState struct {
+	colorSpaces   map[string]string
+	medias        map[string]string
+	resPaths      map[string]string
+	fonts         map[string]string
+	drawParams    map[string]string
+	composites    map[string]string
+	filesByKind   map[string]map[string]string
+	idxColorSpace map[string][]string
+	idxMedias     map[string][]string
+	idxResPaths   map[string][]string
+	idxFonts      map[string][]string
+	idxDrawParams map[string][]string
+	idxComposites map[string][]string
+}
+
+// limitedEntryReader 限制包内单条目解压字节数，超限时返回明确错误而非静默截断
+type limitedEntryReader struct {
+	io.ReadCloser
+	name      string
+	remaining int64
+	limit     int64
+}
+
+// pageHeaderEntry 保存页面头部缓存及其对应的内存源切片标识
+type pageHeaderEntry struct {
+	content PageContent
+	source  []byte
+}
+
+// pageHeaderStore 在只读阅读器及派生视图间并发共享页面头部缓存
+type pageHeaderStore struct {
+	mu    sync.RWMutex
+	items map[string]pageHeaderEntry
+}
+
+// pageHeaderScanner 复用单工作协程的解压器与缓冲区以快速解析页面头部
+type pageHeaderScanner struct {
+	flate io.ReadCloser
+	buf   []byte
+}
+
+// archiveMaxIDCache 在不可变归档及其派生阅读器间并发共享已扫描的最大标识
+type archiveMaxIDCache struct {
+	mu        sync.RWMutex
+	archiveID uint64
+	encrypted *encryptedPackageSource
+	ready     bool
+	maxID     uint64
+}
+
+// WithDocumentIndex 设置打开OFD时默认选中的文档索引，从0开始
+// 入参: index 文档索引
+// 返回: ReaderOption 阅读选项
+func WithDocumentIndex(index int) ReaderOption {
+	return func(options *readerOptions) {
+		options.documentIndex = index
+		options.hasDocumentIndex = true
+	}
+}
+
+// WithVersion 设置打开OFD时选中的历史版本标识，空字符串表示主文档入口
+// 入参: id 版本标识
+// 返回: ReaderOption 阅读选项
+func WithVersion(id string) ReaderOption {
+	return func(options *readerOptions) {
+		value := id
+		options.versionID = &value
+	}
+}
+
+// mergeMapResourceOverride 按十进制等价标识批量覆盖字典中的旧资源条目
+// 入参: dst 目标字典, src 新资源表, normIndex 归一化键到原始键索引
+func mergeMapResourceOverride[T any](dst, src map[string]T, normIndex *map[string]string) {
+	if len(src) == 0 {
+		return
+	}
+	idx := *normIndex
+	if idx == nil {
+		idx = make(map[string]string, len(dst)+len(src))
+		for existing := range dst {
+			if key := editorResourceID(existing); key != "" {
+				idx[key] = existing
+			}
+		}
+		*normIndex = idx
+	}
+	for id, value := range src {
+		if key := editorResourceID(id); key != "" {
+			if prev, ok := idx[key]; ok && prev != id {
+				delete(dst, prev)
+			}
+			idx[key] = id
+		}
+		dst[id] = value
+	}
+}
+
+// mergeResourceIndexOverride 按高优先级资源表覆盖目标索引中的同名十进制条目
+// 入参: dst 文档级目标索引, src 当前资源文件局部索引, normIndex 归一化键到原始键列表索引
+func mergeResourceIndexOverride[T comparable](dst, src *resourceIndex[T], normIndex *map[string][]string) {
+	if len(src.exact) == 0 {
+		return
+	}
+	idx := *normIndex
+	if idx == nil {
+		idx = make(map[string][]string, len(dst.exact)+len(src.exact))
+		for existing := range dst.exact {
+			if key := editorResourceID(existing); key != "" {
+				idx[key] = append(idx[key], existing)
+			}
+		}
+		*normIndex = idx
+	}
+	if len(dst.exact) != 0 {
+		for id := range src.exact {
+			if key := editorResourceID(id); key != "" {
+				if olds := idx[key]; len(olds) != 0 {
+					for _, existing := range olds {
+						delete(dst.exact, existing)
+					}
+					delete(dst.canonical, key)
+					delete(dst.ambiguous, key)
+					delete(idx, key)
+				}
+			}
+		}
+	}
+	for id, value := range src.exact {
+		dst.put(id, value)
+		if key := editorResourceID(id); key != "" {
+			idx[key] = append(idx[key], id)
+		}
+	}
+}
+
+// mergeResourceFilesByKind 按资源类别批量记录声明文件路径并覆写等价旧标识
+// 入参: r 阅读器, kind 资源类别, src 资源精确表, fullPath 资源XML包内路径, state 批量加载状态
+func mergeResourceFilesByKind[T any](r *Reader, kind string, src map[string]T, fullPath string, state *resLoadState) {
+	if len(src) == 0 {
+		return
+	}
+	if r.resourceFilesByKind == nil {
+		r.resourceFilesByKind = make(map[string]map[string]string)
+	}
+	bucket := r.resourceFilesByKind[kind]
+	if bucket == nil {
+		bucket = make(map[string]string, len(src))
+		r.resourceFilesByKind[kind] = bucket
+	}
+	if state.filesByKind == nil {
+		state.filesByKind = make(map[string]map[string]string)
+	}
+	idx := state.filesByKind[kind]
+	if idx == nil {
+		idx = make(map[string]string, len(bucket)+len(src))
+		for existing := range bucket {
+			if key := editorResourceID(existing); key != "" {
+				idx[key] = existing
+			}
+		}
+		state.filesByKind[kind] = idx
+	}
+	for id := range src {
+		if key := editorResourceID(id); key != "" {
+			if prev, ok := idx[key]; ok && prev != id {
+				delete(bucket, prev)
+			}
+			idx[key] = id
+		}
+		bucket[id] = fullPath
+	}
+}
+
+// validPackagePath 判断规范化路径是否位于包内
+// 入参: name 规范化路径
+// 返回: bool 是否有效
+func validPackagePath(name string) bool {
+	return name != "" && name != "." && name != ".." && !strings.HasPrefix(name, "../") && !strings.HasPrefix(name, "/") && !strings.ContainsAny(name, ":\x00")
+}
+
+// cleanPackagePath 清理包内文件路径
+// 入参: name 文件路径
+// 返回: string 清理后的文件路径
+func cleanPackagePath(name string) string {
+	name = strings.ReplaceAll(name, "\\", "/")
+	name = strings.TrimLeft(name, "/")
+	return path.Clean(name)
+}
+
+// resolveResourcePath 解析资源文件路径
+// 入参: resPath 资源文件路径, baseLoc 资源基准路径, filePath 文件路径
+// 返回: string 资源文件路径
+func resolveResourcePath(resPath, baseLoc, filePath string) string {
+	p := strings.TrimSpace(filePath)
+	if p == "" {
+		return ""
+	}
+	p = strings.ReplaceAll(p, "\\", "/")
+	if strings.HasPrefix(p, "/") {
+		return cleanPackagePath(p)
+	}
+	res := strings.TrimLeft(strings.ReplaceAll(strings.TrimSpace(resPath), "\\", "/"), "/")
+	dir := path.Dir(res)
+	baseLoc = strings.ReplaceAll(strings.TrimSpace(baseLoc), "\\", "/")
+	if strings.HasPrefix(baseLoc, "/") {
+		dir = cleanPackagePath(baseLoc)
+	} else if baseLoc != "" {
+		dir = path.Join(dir, baseLoc)
+	}
+	return strings.TrimLeft(path.Join(dir, p), "/")
+}
+
+// decodePageContent 解析未应用页面资源和区域继承的原始内容
+// 入参: ctx 取消上下文, data 页面XML, textOnly 是否仅读取文字
+// 返回: PageContent 页面内容, error 解析错误
+func decodePageContent(ctx context.Context, data []byte, textOnly bool) (PageContent, error) {
+	var content PageContent
+	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
+	var err error
+	if textOnly {
+		err = xml.NewTokenDecoder(&textPageTokens{Decoder: decoder}).Decode(&content)
+	} else {
+		err = decoder.Decode(&content)
+	}
+	return content, err
+}
+
+// parsePageHeaderReaderContext 从字节流解析页面头部直到Content节点
+// 入参: ctx 取消上下文, input 页面字节流
+// 返回: PageContent 页面头部, error 解析或取消错误
+func parsePageHeaderReaderContext(ctx context.Context, input io.Reader) (PageContent, error) {
+	var content PageContent
+	d := xml.NewDecoder(input)
+	var root xml.Name
+scan:
+	for {
+		if err := ctx.Err(); err != nil {
+			return PageContent{}, err
+		}
+		token, err := d.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return PageContent{}, err
+		}
+		if start, ok := token.(xml.StartElement); ok {
+			if root.Local == "" {
+				if start.Name.Local != "Page" {
+					return PageContent{}, fmt.Errorf("expected Page root, got %s", start.Name.Local)
+				}
+				root = start.Name
+				continue
+			}
+			if !ofdXMLChild(root, start.Name) {
+				if err := d.Skip(); err != nil {
+					return PageContent{}, err
+				}
+				continue
+			}
+			start = ofdXMLStart(start)
+			switch start.Name.Local {
+			case "Template":
+				var template Template
+				if err := d.DecodeElement(&template, &start); err != nil {
+					return PageContent{}, err
+				}
+				content.Template = append(content.Template, template)
+			case "Area":
+				if err := d.DecodeElement(&content.Area, &start); err != nil {
+					return PageContent{}, err
+				}
+			case "PageRes":
+				var res string
+				if err := d.DecodeElement(&res, &start); err != nil {
+					return PageContent{}, err
+				}
+				content.PageRes = append(content.PageRes, res)
+			case "Content":
+				break scan
+			default:
+				if err := d.Skip(); err != nil {
+					return PageContent{}, err
+				}
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return PageContent{}, err
+	}
+	return content, nil
+}
+
+// readHeaderPrefix 读取最多len(buf)字节的页面前导数据
+// 入参: reader 输入流, buf 复用缓冲
+// 返回: int 已读字节数, error 读取错误
+func readHeaderPrefix(reader io.Reader, buf []byte) (int, error) {
+	total := 0
+	for total < len(buf) {
+		n, err := reader.Read(buf[total:])
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+// scanFastPageHeader 快速判断前导字节是否已包含完整页面头部以及是否为空头部
+// 入参: head 页面前导XML字节
+// 返回: bool 是否已涵盖完整头部, bool 是否不含Area/Template/PageRes
+func scanFastPageHeader(head []byte) (bool, bool) {
+	if len(head) == 0 || bytes.Contains(head, []byte("<!")) {
+		return false, false
+	}
+	cut := -1
+	for _, marker := range [][]byte{[]byte("<ofd:Content"), []byte("<Content"), []byte("</ofd:Page"), []byte("</Page")} {
+		if idx := bytes.Index(head, marker); idx >= 0 && (cut < 0 || idx < cut) {
+			next := idx + len(marker)
+			if next < len(head) && (head[next] == '>' || head[next] == ' ' || head[next] == '\t' || head[next] == '\r' || head[next] == '\n' || head[next] == '/') {
+				cut = idx
+			}
+		}
+	}
+	if cut < 0 {
+		return false, false
+	}
+	prefix := head[:cut]
+	if !bytes.Contains(prefix, []byte("<ofd:Page")) && !bytes.Contains(prefix, []byte("<Page")) {
+		return false, false
+	}
+	if !bytes.Contains(prefix, []byte("Area")) && !bytes.Contains(prefix, []byte("Template")) && !bytes.Contains(prefix, []byte("PageRes")) {
+		return true, true
+	}
+	return true, false
+}
+
+// sameByteSlice 判断两个字节切片是否引用同一段内存和长度，用于识别内存文件覆盖
+// 入参: a 原切片, b 当前切片
+// 返回: bool 是否同源同长
+func sameByteSlice(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return (a == nil) == (b == nil)
+	}
+	return &a[0] == &b[0]
+}
+
+// resPathFast 对常见规范相对路径快速拼接，特殊路径回退至完整ResPath
+// 入参: r 阅读器, rootDir 已清理文档根目录, baseLoc 页面相对路径
+// 返回: string 规范化包内路径
+func resPathFast(r *Reader, rootDir, baseLoc string) string {
+	if rootDir != "" && baseLoc != "" && baseLoc[0] != '/' && baseLoc[0] != '.' && baseLoc[0] > ' ' && baseLoc[len(baseLoc)-1] > ' ' && !strings.Contains(baseLoc, "\\") && !strings.Contains(baseLoc, "..") && !strings.Contains(baseLoc, "//") {
+		if rootDir == "." {
+			return baseLoc
+		}
+		return rootDir + "/" + baseLoc
+	}
+	return r.ResPath(baseLoc)
+}
+
+// mergePageArea 用回退区域补齐页面区域的缺失字段
+// 入参: area 页面区域, fallback 默认区域
+// 返回: PageArea 合并后的页面区域
+func mergePageArea(area, fallback PageArea) PageArea {
+	if area.PhysicalBox == "" {
+		area.PhysicalBox = fallback.PhysicalBox
+	}
+	if area.ApplicationBox == "" {
+		area.ApplicationBox = fallback.ApplicationBox
+	}
+	if area.ContentBox == "" {
+		area.ContentBox = fallback.ContentBox
+	}
+	if area.BleedBox == "" {
+		area.BleedBox = fallback.BleedBox
+	}
+	return area
+}
+
+// OFD 返回包入口OFD.xml的只读副本，切片已克隆避免篡改内部状态
+// 返回: OFD 入口结构副本
+func (r *Reader) OFD() OFD {
+	if r == nil || r.ofd == nil {
+		return OFD{}
+	}
+	doc := *r.ofd
+	doc.DocBody = slices.Clone(doc.DocBody)
+	return doc
+}
+
+// Path 返回打开阅读器时记录的源文件路径
+// 返回: string 文件路径
+func (r *Reader) Path() string {
+	if r == nil {
+		return ""
+	}
+	return r.path
+}
+
+// RootDir 返回当前文档根目录路径
+// 返回: string 文档根目录
+func (r *Reader) RootDir() string {
+	if r == nil {
+		return ""
+	}
+	return r.rootDir
+}
+
+// Close 关闭阅读器持有的文件并释放当前实例占用的敏感凭据租约，重复调用安全
 // 返回: error 错误信息
 func (r *Reader) Close() error {
-	if r.Closer != nil {
-		closer := r.Closer
-		r.Closer = nil
+	if r == nil {
+		return nil
+	}
+	r.encHold.release()
+	r.encHold = nil
+	r.encryption = nil
+	r.encrypted = nil
+	if r.closer != nil {
+		closer := r.closer
+		r.closer = nil
 		return closer.Close()
 	}
 	return nil
@@ -142,23 +579,28 @@ func (r *Reader) Fork(ctx context.Context) (*Reader, error) {
 	if r.maxIDCache == nil {
 		r.maxIDCache = &archiveMaxIDCache{}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	r.ensureDocPageIDs()
 	next := *r
 	doc := *r.doc
 	next.doc = &doc
 	next.docPageIDsDoc = next.doc
-	next.Closer = nil
+	next.closer = nil
+	next.encHold = nil
 	r.cloneMutableState(&next)
-	return &next, ctx.Err()
+	next.bindEncryptionHold()
+	return &next, nil
 }
 
 // DocumentCount 获取包内文档数量
 // 返回: int 文档数量
 func (r *Reader) DocumentCount() int {
-	if r.OFD == nil {
+	if r.ofd == nil {
 		return 0
 	}
-	return len(r.OFD.DocBody)
+	return len(r.ofd.DocBody)
 }
 
 // DocumentIndex 获取当前文档索引，从0开始
@@ -237,6 +679,7 @@ func (r *Reader) DocumentContext(ctx context.Context, index int) (*Reader, error
 	if _, err := next.DocContext(ctx); err != nil {
 		return nil, err
 	}
+	next.bindEncryptionHold()
 	return next, nil
 }
 
@@ -279,7 +722,7 @@ func (r *Reader) DocContext(ctx context.Context) (*Document, error) {
 	} else {
 		r.relatedPending = view.relatedPending
 	}
-	r.Annots, r.Stamps, r.pendingStamps = view.Annots, view.Stamps, view.pendingStamps
+	r.annots, r.stamps, r.pendingStamps = view.annots, view.stamps, view.pendingStamps
 	r.annotationFiles, r.pageAnnotFiles = view.annotationFiles, view.pageAnnotFiles
 	r.pageAnnotsLoaded, r.pageStampsLoaded = view.pageAnnotsLoaded, view.pageStampsLoaded
 	r.annotIndexLoaded, r.sigIndexLoaded = view.annotIndexLoaded, view.sigIndexLoaded
@@ -358,7 +801,7 @@ func (r *Reader) PageArea(page Page) (PageArea, error) {
 // 入参: ctx 取消上下文, page 页面对象
 // 返回: PageArea 页面区域, error 读取、解析或取消错误
 func (r *Reader) PageAreaContext(ctx context.Context, page Page) (PageArea, error) {
-	if r.doc == nil && r.OFD != nil {
+	if r.doc == nil && r.ofd != nil {
 		if _, err := r.docStructureContext(ctx); err != nil {
 			return PageArea{}, err
 		}
@@ -391,11 +834,11 @@ func (r *Reader) PageAreasContext(ctx context.Context, pages []Page) ([]PageArea
 	if len(pages) == 0 {
 		return []PageArea{}, nil
 	}
-	rootDir := strings.TrimPrefix(strings.ReplaceAll(r.RootDir, "\\", "/"), "/")
+	rootDir := strings.TrimPrefix(strings.ReplaceAll(r.rootDir, "\\", "/"), "/")
 	if rootDir == "" {
 		if docRoot, rootErr := r.DocumentRootContext(ctx); rootErr == nil {
-			r.RootDir = path.Dir(docRoot)
-			rootDir = strings.TrimPrefix(strings.ReplaceAll(r.RootDir, "\\", "/"), "/")
+			r.rootDir = path.Dir(docRoot)
+			rootDir = strings.TrimPrefix(strings.ReplaceAll(r.rootDir, "\\", "/"), "/")
 		}
 	}
 	names := make([]string, len(pages))
@@ -509,13 +952,13 @@ func (r *Reader) ResPath(resLink string) string {
 	if strings.HasPrefix(resLink, "/") {
 		return cleanPackagePath(resLink)
 	}
-	if r.RootDir == "" {
+	if r.rootDir == "" {
 		if docRoot, err := r.DocumentRoot(); err == nil {
-			r.RootDir = path.Dir(docRoot)
+			r.rootDir = path.Dir(docRoot)
 		}
 	}
 	resLink = path.Clean(resLink)
-	rootDir := strings.TrimPrefix(strings.ReplaceAll(r.RootDir, "\\", "/"), "/")
+	rootDir := strings.TrimPrefix(strings.ReplaceAll(r.rootDir, "\\", "/"), "/")
 	return cleanPackagePath(path.Join(rootDir, resLink))
 }
 
@@ -530,28 +973,28 @@ func (r *Reader) ResData(resLink string) ([]byte, error) {
 // Version 获取OFD版本号
 // 返回: string 版本号
 func (r *Reader) Version() string {
-	if r.OFD == nil {
+	if r.ofd == nil {
 		return ""
 	}
-	return r.OFD.Version
+	return r.ofd.Version
 }
 
 // DocType 获取文档类型
 // 返回: string 文档类型
 func (r *Reader) DocType() string {
-	if r.OFD == nil {
+	if r.ofd == nil {
 		return ""
 	}
-	return r.OFD.DocType
+	return r.ofd.DocType
 }
 
 // DocInfo 获取文档元数据
 // 返回: *DocInfo 元数据, error 错误信息
 func (r *Reader) DocInfo() (*DocInfo, error) {
-	if r.OFD == nil || r.documentIndex < 0 || r.documentIndex >= len(r.OFD.DocBody) {
+	if r.ofd == nil || r.documentIndex < 0 || r.documentIndex >= len(r.ofd.DocBody) {
 		return nil, fmt.Errorf("no docbody found")
 	}
-	return &r.OFD.DocBody[r.documentIndex].DocInfo, nil
+	return &r.ofd.DocBody[r.documentIndex].DocInfo, nil
 }
 
 // Permissions 获取文档权限信息，不加载注解或签名
@@ -770,39 +1213,6 @@ func (r *Reader) ExtensionsContext(ctx context.Context) ([]Extension, error) {
 	return doc.Extensions.Extension, nil
 }
 
-// WithDocumentIndex 设置打开OFD时默认选中的文档索引，从0开始
-// 入参: index 文档索引
-// 返回: ReaderOption 阅读选项
-func WithDocumentIndex(index int) ReaderOption {
-	return func(options *readerOptions) {
-		options.documentIndex = index
-		options.hasDocumentIndex = true
-	}
-}
-
-// WithVersion 设置打开OFD时选中的历史版本标识，空字符串表示主文档入口
-// 入参: id 版本标识
-// 返回: ReaderOption 阅读选项
-func WithVersion(id string) ReaderOption {
-	return func(options *readerOptions) {
-		value := id
-		options.versionID = &value
-	}
-}
-
-// pageContentKey 按页面原文或只读归档路径及解析模式区分缓存，不包含文档资源和区域继承
-type pageContentKey struct {
-	archiveID uint64
-	path      string
-	digest    [32]byte
-	textOnly  bool
-}
-
-// documentPageList 仅读取文档中的页面索引，统计页数时不构建其他结构
-type documentPageList struct {
-	Pages Pages
-}
-
 // UnmarshalXML 按文档命名空间读取页面列表，跳过其他文档结构和扩展
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解析错误
@@ -819,31 +1229,6 @@ func (list *documentPageList) UnmarshalXML(d *xml.Decoder, start xml.StartElemen
 	})
 }
 
-// resLoadState 在批量加载文档资源文件期间维护归一化标识到原始键的常数时间索引
-type resLoadState struct {
-	colorSpaces   map[string]string
-	medias        map[string]string
-	resPaths      map[string]string
-	fonts         map[string]string
-	drawParams    map[string]string
-	composites    map[string]string
-	filesByKind   map[string]map[string]string
-	idxColorSpace map[string][]string
-	idxMedias     map[string][]string
-	idxResPaths   map[string][]string
-	idxFonts      map[string][]string
-	idxDrawParams map[string][]string
-	idxComposites map[string][]string
-}
-
-// limitedEntryReader 限制包内单条目解压字节数，超限时返回明确错误而非静默截断
-type limitedEntryReader struct {
-	io.ReadCloser
-	name      string
-	remaining int64
-	limit     int64
-}
-
 // Read 读取数据并累计单条目解压字节数
 // 入参: data 目标缓冲
 // 返回: int 读取字节数, error 读取或超限错误
@@ -854,21 +1239,9 @@ func (l *limitedEntryReader) Read(data []byte) (int, error) {
 	n, err := l.ReadCloser.Read(data)
 	l.remaining -= int64(n)
 	if l.remaining < 0 {
-		return n, fmt.Errorf("package entry %s exceeds size limit (%d bytes)", l.name, l.limit)
+		return n, fmt.Errorf("package entry %s (%d bytes): %w", l.name, l.limit, ErrEntryTooLarge)
 	}
 	return n, err
-}
-
-// pageHeaderEntry 保存页面头部缓存及其对应的内存源切片标识
-type pageHeaderEntry struct {
-	content PageContent
-	source  []byte
-}
-
-// pageHeaderStore 在只读阅读器及派生视图间并发共享页面头部缓存
-type pageHeaderStore struct {
-	mu    sync.RWMutex
-	items map[string]pageHeaderEntry
 }
 
 // get 按路径与内存覆盖状态查询页面头部缓存
@@ -926,12 +1299,6 @@ func (s *pageHeaderStore) putBatch(names []string, contents []PageContent, valid
 	s.mu.Unlock()
 }
 
-// pageHeaderScanner 复用单工作协程的解压器与缓冲区以快速解析页面头部
-type pageHeaderScanner struct {
-	flate io.ReadCloser
-	buf   []byte
-}
-
 // parse 解析单个页面头部，优先复用解压器进行前导扫描，复杂结构回退流式XML解析
 // 入参: ctx 取消上下文, r 阅读器, name 规范化包内路径
 // 返回: PageContent 页面头部, error 读取、解析或取消错误
@@ -978,15 +1345,6 @@ func (s *pageHeaderScanner) close() {
 	}
 }
 
-// archiveMaxIDCache 在不可变归档及其派生阅读器间并发共享已扫描的最大标识
-type archiveMaxIDCache struct {
-	mu        sync.RWMutex
-	archiveID uint64
-	encrypted *encryptedPackageSource
-	ready     bool
-	maxID     uint64
-}
-
 // get 查询与当前不可变归档匹配的最大标识缓存
 // 入参: archiveID 压缩归档标识, encrypted 加密源指针
 // 返回: uint64 最大标识, bool 是否命中
@@ -1024,7 +1382,7 @@ func (r *Reader) encryptedSource() *encryptedPackageSource {
 	if r.encrypted != nil {
 		return r.encrypted
 	}
-	if r.Zip == nil && r.encryption != nil && r.encryption.source != nil {
+	if r.zip == nil && r.encryption != nil && r.encryption.source != nil {
 		return r.encryption.source
 	}
 	return nil
@@ -1053,8 +1411,8 @@ func (r *Reader) deriveView(files map[string][]byte, docIndex int, selectedVersi
 		memPages = nil
 	}
 	return &Reader{
-		Path:            r.Path,
-		Zip:             r.Zip,
+		path:            r.path,
+		zip:             r.zip,
 		encrypted:       r.encryptedSource(),
 		sourceFile:      r.sourceFile,
 		archiveID:       r.archiveID,
@@ -1101,7 +1459,7 @@ func (r *Reader) cloneMutableState(next *Reader) {
 	next.docDrawParams = cloneResourceIndexPtr(r.docDrawParams, drawParams, cloneDrawParamPtr)
 	next.compositeGraphicUnitCache = cloneResourceMapPtr(r.compositeGraphicUnitCache, composites, cloneCompositeUnitPtr)
 	next.docComposites = cloneResourceIndexPtr(r.docComposites, composites, cloneCompositeUnitPtr)
-	next.ResMap = maps.Clone(r.ResMap)
+	next.resMap = maps.Clone(r.resMap)
 	next.docResPaths = r.docResPaths.clone()
 	next.mediaCache = maps.Clone(r.mediaCache)
 	next.docMedias = r.docMedias.clone()
@@ -1121,8 +1479,8 @@ func (r *Reader) cloneMutableState(next *Reader) {
 	next.pageHeaders = r.pageHeaders
 	next.stampSealCache = r.stampSealCache
 	next.maxIDCache = r.maxIDCache
-	next.Annots = cloneEditorMap(r.Annots)
-	next.Stamps = cloneEditorMap(r.Stamps)
+	next.annots = cloneEditorMap(r.annots)
+	next.stamps = cloneEditorMap(r.stamps)
 	next.pendingStamps = cloneEditorMap(r.pendingStamps)
 	next.annotationFiles = cloneEditorMap(r.annotationFiles)
 	next.pageAnnotFiles = cloneEditorMap(r.pageAnnotFiles)
@@ -1155,16 +1513,16 @@ func (r *Reader) docStructureContext(ctx context.Context) (*Document, error) {
 	if r.doc != nil {
 		return r.doc, nil
 	}
-	if r.OFD == nil || r.documentIndex < 0 || r.documentIndex >= len(r.OFD.DocBody) {
+	if r.ofd == nil || r.documentIndex < 0 || r.documentIndex >= len(r.ofd.DocBody) {
 		return nil, fmt.Errorf("no docbody found")
 	}
-	docAttr := r.OFD.DocBody[r.documentIndex]
+	docAttr := r.ofd.DocBody[r.documentIndex]
 	view := *r
 	docRootPath, err := view.DocumentRootContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	view.RootDir = path.Dir(docRootPath)
+	view.rootDir = path.Dir(docRootPath)
 	data, err := view.readFileViewContext(ctx, docRootPath)
 	if err != nil {
 		return nil, err
@@ -1216,10 +1574,10 @@ func (r *Reader) commitDocumentStructure(view *Reader) {
 		}
 		maps.Copy(r.resourceFilesByKind[k], v)
 	}
-	if r.ResMap == nil {
-		r.ResMap = make(map[string]string)
+	if r.resMap == nil {
+		r.resMap = make(map[string]string)
 	}
-	maps.Copy(r.ResMap, view.ResMap)
+	maps.Copy(r.resMap, view.resMap)
 	if r.mediaCache == nil {
 		r.mediaCache = make(map[string]MultiMedia)
 	}
@@ -1250,7 +1608,7 @@ func (r *Reader) commitDocumentStructure(view *Reader) {
 	r.docFonts = view.docFonts
 	r.docDrawParams = view.docDrawParams
 	r.docComposites = view.docComposites
-	r.documentRoot, r.versionInfo, r.RootDir = view.documentRoot, view.versionInfo, view.RootDir
+	r.documentRoot, r.versionInfo, r.rootDir = view.documentRoot, view.versionInfo, view.rootDir
 	r.doc, r.relatedPending = view.doc, view.relatedPending
 	r.docPageIDs, r.docPageIDsDoc, r.docPageIDsLen = nil, nil, 0
 }
@@ -1296,7 +1654,7 @@ func (r *Reader) parseDocumentOnlyContext(ctx context.Context) (*Document, error
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if r.OFD == nil || r.documentIndex < 0 || r.documentIndex >= len(r.OFD.DocBody) {
+	if r.ofd == nil || r.documentIndex < 0 || r.documentIndex >= len(r.ofd.DocBody) {
 		return nil, fmt.Errorf("no docbody found")
 	}
 	docRootPath := r.documentRoot
@@ -1319,7 +1677,7 @@ func (r *Reader) parseDocumentOnlyContext(ctx context.Context) (*Document, error
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	doc.Signatures = r.versionSignaturesContext(ctx, r.OFD.DocBody[r.documentIndex].Signatures)
+	doc.Signatures = r.versionSignaturesContext(ctx, r.ofd.DocBody[r.documentIndex].Signatures)
 	return &doc, nil
 }
 
@@ -1332,7 +1690,7 @@ func (r *Reader) reloadDocumentResourcesContext(ctx context.Context, doc *Docume
 	}
 	r.resourcesRead = make(map[string]bool)
 	r.resourceFilesByKind = make(map[string]map[string]string)
-	r.ResMap = make(map[string]string)
+	r.resMap = make(map[string]string)
 	r.mediaCache = make(map[string]MultiMedia)
 	r.fontCache = make(map[string]*Font)
 	r.fontFaces = make(map[string][]*FontFace)
@@ -1448,23 +1806,23 @@ func (r *Reader) initRootContext(ctx context.Context) error {
 		return err
 	}
 	r.fileIndex, r.fileNames = view.fileIndex, view.fileNames
-	if r.Zip != nil && r.archiveID == 0 {
+	if r.zip != nil && r.archiveID == 0 {
 		r.archiveID = nextReaderArchiveID.Add(1)
 	}
 	if r.pageContents == nil {
 		r.pageContents = resourceCache[pageContentKey, PageContent](r.resources, 16<<20)
 	}
-	r.OFD = &ofd
+	r.ofd = &ofd
 	r.doc, r.versionInfo = nil, nil
-	r.documentRoot, r.RootDir = "", ""
+	r.documentRoot, r.rootDir = "", ""
 	r.relatedPending, r.fontResourcesRead = false, false
 	r.annotIndexLoaded, r.sigIndexLoaded = false, false
 	r.imageCatalog = nil
 	r.resourceInfoCache = nil
-	r.Stamps, r.pendingStamps, r.Annots, r.annotationFiles = nil, nil, nil, nil
+	r.stamps, r.pendingStamps, r.annots, r.annotationFiles = nil, nil, nil, nil
 	r.pageAnnotFiles, r.pageAnnotsLoaded, r.pageStampsLoaded = nil, nil, nil
 	r.resFileCache = make(map[string]*parsedRes)
-	r.ResMap = make(map[string]string)
+	r.resMap = make(map[string]string)
 	r.resourcesRead = make(map[string]bool)
 	r.mediaCache = make(map[string]MultiMedia)
 	r.resourceFilesByKind = make(map[string]map[string]string)
@@ -1506,13 +1864,13 @@ func (r *Reader) indexPackageContext(ctx context.Context) error {
 		return err
 	}
 	count := 0
-	if r.Zip != nil {
-		count = len(r.Zip.File)
+	if r.zip != nil {
+		count = len(r.zip.File)
 	}
 	index := make(map[string]*zip.File, count)
 	names := make(map[string]bool, count+len(r.files))
-	if r.Zip != nil {
-		for _, f := range r.Zip.File {
+	if r.zip != nil {
+		for _, f := range r.zip.File {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -1641,7 +1999,7 @@ func (r *Reader) readFileData(name string) ([]byte, bool, error) {
 		data, err := io.ReadAll(input)
 		return data, false, err
 	}
-	return nil, false, fmt.Errorf("file not found: %s", name)
+	return nil, false, fmt.Errorf("file not found: %s: %w", name, os.ErrNotExist)
 }
 
 // openFile 打开文档内的文件流
@@ -1679,7 +2037,7 @@ func (r *Reader) openFile(name string) (io.ReadCloser, error) {
 		}
 		return rc, nil
 	}
-	return nil, fmt.Errorf("file not found: %s", name)
+	return nil, fmt.Errorf("file not found: %s: %w", name, os.ErrNotExist)
 }
 
 // packageFile 获取包内文件
@@ -1711,109 +2069,6 @@ func (r *Reader) hasPackageFile(name string) bool {
 		return src.has(clean)
 	}
 	return false
-}
-
-// mergeMapResourceOverride 按十进制等价标识批量覆盖字典中的旧资源条目
-// 入参: dst 目标字典, src 新资源表, normIndex 归一化键到原始键索引
-func mergeMapResourceOverride[T any](dst, src map[string]T, normIndex *map[string]string) {
-	if len(src) == 0 {
-		return
-	}
-	idx := *normIndex
-	if idx == nil {
-		idx = make(map[string]string, len(dst)+len(src))
-		for existing := range dst {
-			if key := editorResourceID(existing); key != "" {
-				idx[key] = existing
-			}
-		}
-		*normIndex = idx
-	}
-	for id, value := range src {
-		if key := editorResourceID(id); key != "" {
-			if prev, ok := idx[key]; ok && prev != id {
-				delete(dst, prev)
-			}
-			idx[key] = id
-		}
-		dst[id] = value
-	}
-}
-
-// mergeResourceIndexOverride 按高优先级资源表覆盖目标索引中的同名十进制条目
-// 入参: dst 文档级目标索引, src 当前资源文件局部索引, normIndex 归一化键到原始键列表索引
-func mergeResourceIndexOverride[T comparable](dst, src *resourceIndex[T], normIndex *map[string][]string) {
-	if len(src.exact) == 0 {
-		return
-	}
-	idx := *normIndex
-	if idx == nil {
-		idx = make(map[string][]string, len(dst.exact)+len(src.exact))
-		for existing := range dst.exact {
-			if key := editorResourceID(existing); key != "" {
-				idx[key] = append(idx[key], existing)
-			}
-		}
-		*normIndex = idx
-	}
-	if len(dst.exact) != 0 {
-		for id := range src.exact {
-			if key := editorResourceID(id); key != "" {
-				if olds := idx[key]; len(olds) != 0 {
-					for _, existing := range olds {
-						delete(dst.exact, existing)
-					}
-					delete(dst.canonical, key)
-					delete(dst.ambiguous, key)
-					delete(idx, key)
-				}
-			}
-		}
-	}
-	for id, value := range src.exact {
-		dst.put(id, value)
-		if key := editorResourceID(id); key != "" {
-			idx[key] = append(idx[key], id)
-		}
-	}
-}
-
-// mergeResourceFilesByKind 按资源类别批量记录声明文件路径并覆写等价旧标识
-// 入参: r 阅读器, kind 资源类别, src 资源精确表, fullPath 资源XML包内路径, state 批量加载状态
-func mergeResourceFilesByKind[T any](r *Reader, kind string, src map[string]T, fullPath string, state *resLoadState) {
-	if len(src) == 0 {
-		return
-	}
-	if r.resourceFilesByKind == nil {
-		r.resourceFilesByKind = make(map[string]map[string]string)
-	}
-	bucket := r.resourceFilesByKind[kind]
-	if bucket == nil {
-		bucket = make(map[string]string, len(src))
-		r.resourceFilesByKind[kind] = bucket
-	}
-	if state.filesByKind == nil {
-		state.filesByKind = make(map[string]map[string]string)
-	}
-	idx := state.filesByKind[kind]
-	if idx == nil {
-		idx = make(map[string]string, len(bucket)+len(src))
-		for existing := range bucket {
-			if key := editorResourceID(existing); key != "" {
-				idx[key] = existing
-			}
-		}
-		state.filesByKind[kind] = idx
-	}
-	for id := range src {
-		if key := editorResourceID(id); key != "" {
-			if prev, ok := idx[key]; ok && prev != id {
-				delete(bucket, prev)
-			}
-			idx[key] = id
-		}
-		bucket[id] = fullPath
-	}
 }
 
 // resourceFileByKind 按资源类别查找文档级声明所在的资源XML路径
@@ -1852,6 +2107,23 @@ func (r *Reader) loadResContext(ctx context.Context, resPath string, state *resL
 	if err != nil || parsed == nil {
 		return err
 	}
+	r.applyParsedRes(parsed, state)
+	return ctx.Err()
+}
+
+// applyParsedRes 将已解析的资源表原子合并到文档级全局索引与缓存
+// 入参: parsed 已解析的资源表, state 批量加载索引状态
+func (r *Reader) applyParsedRes(parsed *parsedRes, state *resLoadState) {
+	if parsed == nil {
+		return
+	}
+	if r.resFileCache == nil {
+		r.resFileCache = make(map[string]*parsedRes)
+	}
+	r.resFileCache[parsed.path] = parsed
+	if r.resourcesRead == nil {
+		r.resourcesRead = make(map[string]bool)
+	}
 	if r.docColorSpaces == nil {
 		r.docColorSpaces = &resourceIndex[*ColorSpace]{}
 	}
@@ -1870,33 +2142,47 @@ func (r *Reader) loadResContext(ctx context.Context, resPath string, state *resL
 	if r.docComposites == nil {
 		r.docComposites = &resourceIndex[*CompositeGraphicUnit]{}
 	}
+	if r.colorSpaceCache == nil && len(parsed.colorSpaces.exact) > 0 {
+		r.colorSpaceCache = make(map[string]*ColorSpace, len(parsed.colorSpaces.exact))
+	}
 	mergeResourceIndexOverride(r.docColorSpaces, &parsed.colorSpaces, &state.idxColorSpace)
 	mergeMapResourceOverride(r.colorSpaceCache, parsed.colorSpaces.exact, &state.colorSpaces)
-	mergeResourceFilesByKind(r, "ColorSpace", parsed.colorSpaces.exact, fullPath, state)
+	mergeResourceFilesByKind(r, "ColorSpace", parsed.colorSpaces.exact, parsed.path, state)
 	if r.mediaCache == nil && len(parsed.medias.exact) > 0 {
 		r.mediaCache = make(map[string]MultiMedia, len(parsed.medias.exact))
 	}
 	mergeResourceIndexOverride(r.docMedias, &parsed.medias, &state.idxMedias)
 	mergeMapResourceOverride(r.mediaCache, parsed.medias.exact, &state.medias)
-	mergeResourceFilesByKind(r, "MultiMedia", parsed.medias.exact, fullPath, state)
+	mergeResourceFilesByKind(r, "MultiMedia", parsed.medias.exact, parsed.path, state)
+	if r.resMap == nil && len(parsed.resPaths.exact) > 0 {
+		r.resMap = make(map[string]string, len(parsed.resPaths.exact))
+	}
 	mergeResourceIndexOverride(r.docResPaths, &parsed.resPaths, &state.idxResPaths)
-	mergeMapResourceOverride(r.ResMap, parsed.resPaths.exact, &state.resPaths)
+	mergeMapResourceOverride(r.resMap, parsed.resPaths.exact, &state.resPaths)
+	if r.fontCache == nil && len(parsed.fonts.exact) > 0 {
+		r.fontCache = make(map[string]*Font, len(parsed.fonts.exact))
+	}
 	mergeResourceIndexOverride(r.docFonts, &parsed.fonts, &state.idxFonts)
 	mergeMapResourceOverride(r.fontCache, parsed.fonts.exact, &state.fonts)
-	mergeResourceFilesByKind(r, "Font", parsed.fonts.exact, fullPath, state)
+	mergeResourceFilesByKind(r, "Font", parsed.fonts.exact, parsed.path, state)
+	if r.drawParamCache == nil && len(parsed.drawParams.exact) > 0 {
+		r.drawParamCache = make(map[string]*DrawParam, len(parsed.drawParams.exact))
+	}
 	mergeResourceIndexOverride(r.docDrawParams, &parsed.drawParams, &state.idxDrawParams)
 	mergeMapResourceOverride(r.drawParamCache, parsed.drawParams.exact, &state.drawParams)
-	mergeResourceFilesByKind(r, "DrawParam", parsed.drawParams.exact, fullPath, state)
+	mergeResourceFilesByKind(r, "DrawParam", parsed.drawParams.exact, parsed.path, state)
+	if r.compositeGraphicUnitCache == nil && len(parsed.composites.exact) > 0 {
+		r.compositeGraphicUnitCache = make(map[string]*CompositeGraphicUnit, len(parsed.composites.exact))
+	}
 	mergeResourceIndexOverride(r.docComposites, &parsed.composites, &state.idxComposites)
 	mergeMapResourceOverride(r.compositeGraphicUnitCache, parsed.composites.exact, &state.composites)
-	mergeResourceFilesByKind(r, "CompositeGraphicUnit", parsed.composites.exact, fullPath, state)
-	r.resourcesRead[fullPath] = true
-	return ctx.Err()
+	mergeResourceFilesByKind(r, "CompositeGraphicUnit", parsed.composites.exact, parsed.path, state)
+	r.resourcesRead[parsed.path] = true
 }
 
 // parseResFileContext 解析单个资源文件并独立缓存，不覆写文档级全局映射
 // 入参: ctx 取消上下文, fullPath 规范化资源文件包内路径
-// 返回: *parsedRes 独立资源表, error 取消错误
+// 返回: *parsedRes 独立资源表, error 读取、解析或取消错误
 func (r *Reader) parseResFileContext(ctx context.Context, fullPath string) (*parsedRes, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -1912,12 +2198,15 @@ func (r *Reader) parseResFileContext(ctx context.Context, fullPath string) (*par
 	}
 	data, err := r.readFileViewContext(ctx, fullPath)
 	if err != nil {
-		return nil, ctx.Err()
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("failed to read resource %s: %w", fullPath, err)
 	}
 	var res Res
 	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
 	if err := decoder.Decode(&res); err != nil {
-		return nil, ctx.Err()
+		return nil, fmt.Errorf("failed to unmarshal resource %s: %w", fullPath, err)
 	}
 	parsed := &parsedRes{path: fullPath}
 	baseLoc := res.BaseLoc
@@ -2028,7 +2317,7 @@ func (r *Reader) resolveResPathScoped(pageResources []*parsedRes, id string) (st
 	if p, ok := r.docResPaths.get(id); ok && p != "" {
 		return p, true
 	}
-	p, ok := resourceValue(r.ResMap, id)
+	p, ok := resourceValue(r.resMap, id)
 	return p, ok && p != ""
 }
 
@@ -2096,7 +2385,7 @@ func (r *Reader) resourceLocation(name, base, file string) string {
 	if location == "" {
 		return ""
 	}
-	root := cleanPackagePath(r.RootDir)
+	root := cleanPackagePath(r.rootDir)
 	if root != "." && strings.HasPrefix(location, root+"/") {
 		return strings.TrimPrefix(location, root+"/")
 	}
@@ -2135,7 +2424,7 @@ func (r *Reader) readPageContentInternal(ctx context.Context, page Page, textOnl
 	if !template && r.pageReady != nil && !r.pageReady[page.ID] {
 		return nil, ErrIncompleteDocument
 	}
-	if r.doc == nil && r.OFD != nil {
+	if r.doc == nil && r.ofd != nil {
 		if _, err := r.docStructureContext(ctx); err != nil {
 			return nil, err
 		}
@@ -2147,7 +2436,10 @@ func (r *Reader) readPageContentInternal(ctx context.Context, page Page, textOnl
 	if !template && r.memPages != nil && r.files[cleanPath] == nil && r.memPages[cleanPath] != nil {
 		direct := r.memPages[cleanPath]
 		if clone {
-			content = cloneEditorData(*direct)
+			content, err = clonePageContentWithTyped(ctx, *direct)
+			if err != nil {
+				return nil, err
+			}
 		} else {
 			content = *direct
 		}
@@ -2156,10 +2448,10 @@ func (r *Reader) readPageContentInternal(ctx context.Context, page Page, textOnl
 			r.pageContents = resourceCache[pageContentKey, PageContent](r.resources, 16<<20)
 		}
 		maxCacheData := (r.pageContents.limit/4 - 4096) / 16
-		if r.Zip != nil && r.archiveID != 0 && r.files[cleanPath] == nil {
+		if r.zip != nil && r.archiveID != 0 && r.files[cleanPath] == nil {
 			zf, ok := r.packageFile(cleanPath)
 			if !ok {
-				return nil, fmt.Errorf("file not found: %s", cleanPath)
+				return nil, fmt.Errorf("file not found: %s: %w", cleanPath, os.ErrNotExist)
 			}
 			if zf.UncompressedSize64 > uint64(max(0, maxCacheData)) {
 				data, readErr := r.readFileViewContext(ctx, fullPath)
@@ -2179,7 +2471,10 @@ func (r *Reader) readPageContentInternal(ctx context.Context, page Page, textOnl
 				})
 				if err == nil {
 					if clone {
-						content = cloneEditorData(parsed)
+						content, err = clonePageContentWithTyped(ctx, parsed)
+						if err != nil {
+							return nil, err
+						}
 					} else {
 						content = parsed
 					}
@@ -2202,7 +2497,10 @@ func (r *Reader) readPageContentInternal(ctx context.Context, page Page, textOnl
 				})
 				if err == nil {
 					if clone {
-						content = cloneEditorData(parsed)
+						content, err = clonePageContentWithTyped(ctx, parsed)
+						if err != nil {
+							return nil, err
+						}
 					} else {
 						content = parsed
 					}
@@ -2283,7 +2581,7 @@ func (r *Reader) preloadPageHeadersContext(ctx context.Context, pages []Page) er
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	rootDir := strings.TrimPrefix(strings.ReplaceAll(r.RootDir, "\\", "/"), "/")
+	rootDir := strings.TrimPrefix(strings.ReplaceAll(r.rootDir, "\\", "/"), "/")
 	names := make([]string, len(pages))
 	for i, page := range pages {
 		names[i] = resPathFast(r, rootDir, page.BaseLoc)
@@ -2483,213 +2781,4 @@ func (r *Reader) readDocumentPartContext(ctx context.Context, loc string, value 
 		return "", err
 	}
 	return fullPath, nil
-}
-
-// validPackagePath 判断规范化路径是否位于包内
-// 入参: name 规范化路径
-// 返回: bool 是否有效
-func validPackagePath(name string) bool {
-	return name != "" && name != "." && name != ".." && !strings.HasPrefix(name, "../") && !strings.HasPrefix(name, "/") && !strings.ContainsAny(name, ":\x00")
-}
-
-// cleanPackagePath 清理包内文件路径
-// 入参: name 文件路径
-// 返回: string 清理后的文件路径
-func cleanPackagePath(name string) string {
-	name = strings.ReplaceAll(name, "\\", "/")
-	name = strings.TrimLeft(name, "/")
-	return path.Clean(name)
-}
-
-// resolveResourcePath 解析资源文件路径
-// 入参: resPath 资源文件路径, baseLoc 资源基准路径, filePath 文件路径
-// 返回: string 资源文件路径
-func resolveResourcePath(resPath, baseLoc, filePath string) string {
-	p := strings.TrimSpace(filePath)
-	if p == "" {
-		return ""
-	}
-	p = strings.ReplaceAll(p, "\\", "/")
-	if strings.HasPrefix(p, "/") {
-		return cleanPackagePath(p)
-	}
-	res := strings.TrimLeft(strings.ReplaceAll(strings.TrimSpace(resPath), "\\", "/"), "/")
-	dir := path.Dir(res)
-	baseLoc = strings.ReplaceAll(strings.TrimSpace(baseLoc), "\\", "/")
-	if strings.HasPrefix(baseLoc, "/") {
-		dir = cleanPackagePath(baseLoc)
-	} else if baseLoc != "" {
-		dir = path.Join(dir, baseLoc)
-	}
-	return strings.TrimLeft(path.Join(dir, p), "/")
-}
-
-// decodePageContent 解析未应用页面资源和区域继承的原始内容
-// 入参: ctx 取消上下文, data 页面XML, textOnly 是否仅读取文字
-// 返回: PageContent 页面内容, error 解析错误
-func decodePageContent(ctx context.Context, data []byte, textOnly bool) (PageContent, error) {
-	var content PageContent
-	decoder := xml.NewDecoder(imageInput{ReadCloser: io.NopCloser(bytes.NewReader(data)), ctx: ctx})
-	var err error
-	if textOnly {
-		err = xml.NewTokenDecoder(&textPageTokens{Decoder: decoder}).Decode(&content)
-	} else {
-		err = decoder.Decode(&content)
-	}
-	return content, err
-}
-
-// parsePageHeaderReaderContext 从字节流解析页面头部直到Content节点
-// 入参: ctx 取消上下文, input 页面字节流
-// 返回: PageContent 页面头部, error 解析或取消错误
-func parsePageHeaderReaderContext(ctx context.Context, input io.Reader) (PageContent, error) {
-	var content PageContent
-	d := xml.NewDecoder(input)
-	var root xml.Name
-scan:
-	for {
-		if err := ctx.Err(); err != nil {
-			return PageContent{}, err
-		}
-		token, err := d.Token()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return PageContent{}, err
-		}
-		if start, ok := token.(xml.StartElement); ok {
-			if root.Local == "" {
-				if start.Name.Local != "Page" {
-					return PageContent{}, fmt.Errorf("expected Page root, got %s", start.Name.Local)
-				}
-				root = start.Name
-				continue
-			}
-			if !ofdXMLChild(root, start.Name) {
-				if err := d.Skip(); err != nil {
-					return PageContent{}, err
-				}
-				continue
-			}
-			start = ofdXMLStart(start)
-			switch start.Name.Local {
-			case "Template":
-				var template Template
-				if err := d.DecodeElement(&template, &start); err != nil {
-					return PageContent{}, err
-				}
-				content.Template = append(content.Template, template)
-			case "Area":
-				if err := d.DecodeElement(&content.Area, &start); err != nil {
-					return PageContent{}, err
-				}
-			case "PageRes":
-				var res string
-				if err := d.DecodeElement(&res, &start); err != nil {
-					return PageContent{}, err
-				}
-				content.PageRes = append(content.PageRes, res)
-			case "Content":
-				break scan
-			default:
-				if err := d.Skip(); err != nil {
-					return PageContent{}, err
-				}
-			}
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return PageContent{}, err
-	}
-	return content, nil
-}
-
-// readHeaderPrefix 读取最多len(buf)字节的页面前导数据
-// 入参: reader 输入流, buf 复用缓冲
-// 返回: int 已读字节数, error 读取错误
-func readHeaderPrefix(reader io.Reader, buf []byte) (int, error) {
-	total := 0
-	for total < len(buf) {
-		n, err := reader.Read(buf[total:])
-		total += n
-		if err != nil {
-			return total, err
-		}
-	}
-	return total, nil
-}
-
-// scanFastPageHeader 快速判断前导字节是否已包含完整页面头部以及是否为空头部
-// 入参: head 页面前导XML字节
-// 返回: bool 是否已涵盖完整头部, bool 是否不含Area/Template/PageRes
-func scanFastPageHeader(head []byte) (bool, bool) {
-	if len(head) == 0 || bytes.Contains(head, []byte("<!")) {
-		return false, false
-	}
-	cut := -1
-	for _, marker := range [][]byte{[]byte("<ofd:Content"), []byte("<Content"), []byte("</ofd:Page"), []byte("</Page")} {
-		if idx := bytes.Index(head, marker); idx >= 0 && (cut < 0 || idx < cut) {
-			next := idx + len(marker)
-			if next < len(head) && (head[next] == '>' || head[next] == ' ' || head[next] == '\t' || head[next] == '\r' || head[next] == '\n' || head[next] == '/') {
-				cut = idx
-			}
-		}
-	}
-	if cut < 0 {
-		return false, false
-	}
-	prefix := head[:cut]
-	if !bytes.Contains(prefix, []byte("<ofd:Page")) && !bytes.Contains(prefix, []byte("<Page")) {
-		return false, false
-	}
-	if !bytes.Contains(prefix, []byte("Area")) && !bytes.Contains(prefix, []byte("Template")) && !bytes.Contains(prefix, []byte("PageRes")) {
-		return true, true
-	}
-	return true, false
-}
-
-// sameByteSlice 判断两个字节切片是否引用同一段内存和长度，用于识别内存文件覆盖
-// 入参: a 原切片, b 当前切片
-// 返回: bool 是否同源同长
-func sameByteSlice(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	if len(a) == 0 {
-		return (a == nil) == (b == nil)
-	}
-	return &a[0] == &b[0]
-}
-
-// resPathFast 对常见规范相对路径快速拼接，特殊路径回退至完整ResPath
-// 入参: r 阅读器, rootDir 已清理文档根目录, baseLoc 页面相对路径
-// 返回: string 规范化包内路径
-func resPathFast(r *Reader, rootDir, baseLoc string) string {
-	if rootDir != "" && baseLoc != "" && baseLoc[0] != '/' && baseLoc[0] != '.' && baseLoc[0] > ' ' && baseLoc[len(baseLoc)-1] > ' ' && !strings.Contains(baseLoc, "\\") && !strings.Contains(baseLoc, "..") && !strings.Contains(baseLoc, "//") {
-		if rootDir == "." {
-			return baseLoc
-		}
-		return rootDir + "/" + baseLoc
-	}
-	return r.ResPath(baseLoc)
-}
-
-// mergePageArea 用回退区域补齐页面区域的缺失字段
-// 入参: area 页面区域, fallback 默认区域
-// 返回: PageArea 合并后的页面区域
-func mergePageArea(area, fallback PageArea) PageArea {
-	if area.PhysicalBox == "" {
-		area.PhysicalBox = fallback.PhysicalBox
-	}
-	if area.ApplicationBox == "" {
-		area.ApplicationBox = fallback.ApplicationBox
-	}
-	if area.ContentBox == "" {
-		area.ContentBox = fallback.ContentBox
-	}
-	if area.BleedBox == "" {
-		area.BleedBox = fallback.BleedBox
-	}
-	return area
 }

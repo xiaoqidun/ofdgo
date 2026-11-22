@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"syscall/js"
 
@@ -49,7 +50,7 @@ func RunWASM() {
 	resources, _ := ofdgo.NewResources(ofdgo.ResourceOptions{Parallelism: 1, MemoryLimit: 64 << 20, CacheBytes: 48 << 20, SnapshotBytes: 32 << 20})
 	engines := &wasmEngines{resources: resources, engines: make(map[string]*businessEngine)}
 	registerCallback("ofdgoEngineOpen", engines.open)
-	registerAsyncCallback("ofdgoEngineCall", engines.call)
+	registerAsyncCallback("ofdgoEngineCall", engines.prepareCall)
 	registerCallback("ofdgoEngineClose", engines.close)
 	select {}
 }
@@ -83,14 +84,19 @@ func registerCallback(name string, fn func([]js.Value) (any, error)) {
 	js.Global().Set(name, cb)
 }
 
-// registerAsyncCallback 注册异步回调，为浏览器处理数据和取消请求让出事件循环
-// 入参: name 回调名称, fn 回调函数
-func registerAsyncCallback(name string, fn func([]js.Value) (any, error)) {
+// registerAsyncCallback 注册异步回调，先同步完成原子状态交接再让出事件循环执行业务
+// 入参: name 回调名称, prepare 同步准备回调，返回异步执行函数或立即错误
+func registerAsyncCallback(name string, prepare func([]js.Value) (func() (any, error), error)) {
 	cb := js.FuncOf(func(this js.Value, args []js.Value) any {
+		run, err := prepare(args)
 		executor := js.FuncOf(func(this js.Value, callbacks []js.Value) any {
 			resolve := callbacks[0]
+			if err != nil {
+				resolve.Invoke((&businessEngine{}).encodeResult(failureResult(err)))
+				return nil
+			}
 			go func() {
-				resolve.Invoke(callbackResult(fn, args))
+				resolve.Invoke(callbackResult(func([]js.Value) (any, error) { return run() }, nil))
 			}()
 			return nil
 		})
@@ -181,10 +187,10 @@ func (w *wasmEngines) open(args []js.Value) (any, error) {
 	return nil, nil
 }
 
-// call 按会话标识分派业务命令，统一绑定本次调用的取消上下文并兼容ofdgoRenderPage可选优先级参数
+// prepareCall 在浏览器主线程同步校验会话并原子取出保存快照，再返回异步执行函数
 // 入参: args 会话标识、命令、取消检查点及业务参数
-// 返回: any 业务结果, error 调用错误
-func (w *wasmEngines) call(args []js.Value) (any, error) {
+// 返回: func() (any, error) 异步业务执行函数, error 同步校验错误
+func (w *wasmEngines) prepareCall(args []js.Value) (func() (any, error), error) {
 	if len(args) < 3 || args[0].Type() != js.TypeString || args[1].Type() != js.TypeString {
 		return nil, fmt.Errorf("missing engine ID or operation")
 	}
@@ -193,25 +199,38 @@ func (w *wasmEngines) call(args []js.Value) (any, error) {
 		return nil, fmt.Errorf("unknown engine: %s", args[0].String())
 	}
 	name := args[1].String()
-	callArgs := args[3:]
+	checkpoint := args[2]
+	callArgs := append([]js.Value(nil), args[3:]...)
 	if name == "ofdgoRenderPage" && len(callArgs) > 8 {
 		callArgs = callArgs[:8]
 	}
 	if name == "ofdgoSaveSnapshot" {
-		snapshot := e.saveSnapshot
-		e.saveSnapshot = nil
+		snapshot := e.takeSaveSnapshot()
 		if snapshot == nil {
 			return nil, fmt.Errorf("save snapshot is not prepared")
 		}
-		output := &businessEngine{resources: e.resources, ctx: context.Background()}
-		if args[2].Type() == js.TypeFunction {
-			output.ctx = output.newOutputContext(args[2])
-		}
-		if err := output.ctx.Err(); err != nil {
-			return nil, err
-		}
-		return output.saveEditor(snapshot, callArgs)
+		resources := e.resources
+		return func() (any, error) {
+			defer func() { _ = snapshot.Close() }()
+			output := &businessEngine{resources: resources, ctx: context.Background()}
+			if checkpoint.Type() == js.TypeFunction {
+				output.ctx = output.newOutputContext(checkpoint)
+			}
+			if err := output.ctx.Err(); err != nil {
+				return nil, err
+			}
+			return output.saveEditor(snapshot, callArgs)
+		}, nil
 	}
+	return func() (any, error) {
+		return w.executeCall(e, name, checkpoint, callArgs)
+	}, nil
+}
+
+// executeCall 按会话分派业务命令并统一绑定本次调用的取消上下文
+// 入参: e 业务引擎, name 命令名称, checkpoint 取消检查回调, callArgs 业务参数
+// 返回: any 业务结果, error 调用错误
+func (w *wasmEngines) executeCall(e *businessEngine, name string, checkpoint js.Value, callArgs []js.Value) (any, error) {
 	fn := e.businessCommands()[name]
 	if fn == nil {
 		return nil, fmt.Errorf("unknown operation: %s", name)
@@ -220,31 +239,35 @@ func (w *wasmEngines) call(args []js.Value) (any, error) {
 		return nil, err
 	}
 	e.ctx = context.Background()
-	if args[2].Type() == js.TypeFunction {
-		e.ctx = e.newOutputContext(args[2])
+	if checkpoint.Type() == js.TypeFunction {
+		e.ctx = e.newOutputContext(checkpoint)
 	}
 	ctx := e.ctx
 	if e.currentSession != nil {
-		e.currentSession.Renderer.OutputContext = ctx
+		e.currentSession.ctx = ctx
 	}
 	defer func() {
 		if e.ctx == ctx {
 			e.ctx = nil
 		}
 		if e.currentSession != nil {
-			e.currentSession.Renderer.OutputContext = context.Background()
+			e.currentSession.ctx = nil
 		}
 	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := e.preparePDF(name, callArgs); err != nil {
+	cancelPDF, err := e.preparePDF(name, callArgs)
+	if err != nil {
 		return nil, err
+	}
+	if cancelPDF != nil {
+		defer cancelPDF()
 	}
 	return fn(callArgs)
 }
 
-// close 释放会话的文档、编辑器、导入及剪贴板，不关闭共享资源
+// close 释放会话的文档、编辑器、导入、批量字体及剪贴板，不关闭共享资源
 // 入参: args 会话标识
 // 返回: any 空结果, error 参数或关闭错误
 func (w *wasmEngines) close(args []js.Value) (any, error) {
@@ -257,10 +280,13 @@ func (w *wasmEngines) close(args []js.Value) (any, error) {
 		return nil, nil
 	}
 	delete(w.engines, id)
+	e.releaseBatchFonts()
 	_, _ = e.discardPrint(nil)
+	e.closeSaveSnapshot()
+	e.clearPortableObjects()
 	e.clearPDF()
 	e.clearImport()
-	err := e.currentSession.Close()
+	err := errors.Join(e.closeCurrentEditor(), e.currentSession.close())
 	*e = businessEngine{}
 	return nil, err
 }

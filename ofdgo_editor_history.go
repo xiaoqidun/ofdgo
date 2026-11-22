@@ -29,6 +29,220 @@ type EditorChanges struct {
 	Pages []int `json:"pages,omitempty"`
 }
 
+// editorChange 页面或对象操作及其修订标识
+type editorChange struct {
+	undo    func(*Editor)
+	redo    func(*Editor)
+	before  uint64
+	after   uint64
+	changes EditorChanges
+}
+
+// editorOriginChange 记录单次按页增量事务中发生变动的单个对象原文映射
+type editorOriginChange struct {
+	id      string
+	existed bool
+	value   *editorObjectOrigin
+}
+
+// copyEditorPage 复制页面容器，共享经校验且按替换方式更新的对象数据
+// 入参: page 页面
+// 返回: PageContent 独立页面容器
+func copyEditorPage(page PageContent) PageContent {
+	page.Content.Layer = slices.Clone(page.Content.Layer)
+	for i := range page.Content.Layer {
+		page.Content.Layer[i].Objects = slices.Clone(page.Content.Layer[i].Objects)
+	}
+	return page
+}
+
+// moveEditorItem 按目标索引移动页面或对象
+// 入参: items 页面或对象序列, from 原索引, to 目标索引
+func moveEditorItem[T any](items []T, from, to int) {
+	item := items[from]
+	if from < to {
+		copy(items[from:to], items[from+1:to+1])
+	} else {
+		copy(items[to+1:from+1], items[to:from])
+	}
+	items[to] = item
+}
+
+// isUnloadedSourcePage 判断页面是否为尚未惰性解析的原文档空壳占位
+// 入参: page 页面内容
+// 返回: bool 是否为未加载原始页面
+func isUnloadedSourcePage(page PageContent) bool {
+	return page.ID != "" && page.XMLName.Local == "" && page.Area == (PageArea{}) && len(page.Content.Layer) == 0 && len(page.Actions) == 0 && len(page.Template) == 0 && len(page.PageRes) == 0 && len(page.pageResources) == 0
+}
+
+// editorSourceInitialPage 根据已加载的原始页面记录构建未修改态页面内容
+// 入参: source 已加载的原始页面记录
+// 返回: PageContent 保留初始切片头的页面内容
+func editorSourceInitialPage(source *editorSourcePage) PageContent {
+	page := *source.original
+	page.Content.Layer = source.initialLayers
+	page.Actions = source.initialActions
+	page.Template = source.initialTemplates
+	page.PageRes = source.initialPageRes
+	return page
+}
+
+// diffEditorOrigins 计算事务前后对象原文映射的最小差异集合
+// 入参: before 修改前映射, after 修改后映射
+// 返回: []editorOriginChange 撤销变更列表, []editorOriginChange 重做变更列表
+func diffEditorOrigins(before, after map[string]*editorObjectOrigin) ([]editorOriginChange, []editorOriginChange) {
+	var undo, redo []editorOriginChange
+	for id, value := range after {
+		if old, ok := before[id]; !ok || old != value {
+			undo = append(undo, editorOriginChange{id: id, existed: ok, value: old})
+			redo = append(redo, editorOriginChange{id: id, existed: true, value: value})
+		}
+	}
+	for id, old := range before {
+		if _, ok := after[id]; !ok {
+			undo = append(undo, editorOriginChange{id: id, existed: true, value: old})
+			redo = append(redo, editorOriginChange{id: id, existed: false})
+		}
+	}
+	return undo, redo
+}
+
+// sameEditorSourceMeta 判断两个文档来源快照在包结构与元数据层面是否一致
+// 入参: a 事务前来源, b 事务后来源
+// 返回: bool 是否未发生包结构或文档级元数据变更
+func sameEditorSourceMeta(a, b *editorSource) bool {
+	if a == b {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	if a.reader != b.reader || a.document != b.document || a.directory != b.directory || a.fromNew != b.fromNew || a.fallbackDocID != b.fallbackDocID {
+		return false
+	}
+	if (a.pages == nil) != (b.pages == nil) || len(a.pages) != len(b.pages) {
+		return false
+	}
+	if !reflect.DeepEqual(a.info, b.info) || !maps.Equal(a.annotationPages, b.annotationPages) || !maps.Equal(a.retiredAttachments, b.retiredAttachments) || !maps.Equal(a.removedAttachments, b.removedAttachments) {
+		return false
+	}
+	if len(a.annotationStates) != len(b.annotationStates) || len(a.structureObjects) != len(b.structureObjects) || len(a.structureStarts) != len(b.structureStarts) {
+		return false
+	}
+	for k, av := range a.annotationStates {
+		if bv, ok := b.annotationStates[k]; !ok || !maps.Equal(av, bv) {
+			return false
+		}
+	}
+	for k, av := range a.structureObjects {
+		if bv, ok := b.structureObjects[k]; !ok || !maps.Equal(av, bv) {
+			return false
+		}
+	}
+	for k, av := range a.structureStarts {
+		if bv, ok := b.structureStarts[k]; !ok || !maps.Equal(av, bv) {
+			return false
+		}
+	}
+	return true
+}
+
+// sameStructureRemaps 比较两个标引重映射表是否一致
+// 入参: a 事务前重映射表, b 事务后重映射表
+// 返回: bool 是否一致
+func sameStructureRemaps(a, b map[string][]map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if !maps.Equal(av[i], bv[i]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// cloneNestedMap 深复制两层键值映射，避免事务快照与历史记录共享内层容器
+// 入参: src 源双层映射
+// 返回: map[K1]map[K2]V 独立双层映射
+func cloneNestedMap[K1 comparable, K2 comparable, V any](src map[K1]map[K2]V) map[K1]map[K2]V {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[K1]map[K2]V, len(src))
+	for k, v := range src {
+		dst[k] = maps.Clone(v)
+	}
+	return dst
+}
+
+// cloneStructureRemaps 深复制标引重映射表，隔离切片及内层映射
+// 入参: src 源标引重映射表
+// 返回: map[string][]map[string]string 独立副本
+func cloneStructureRemaps(src map[string][]map[string]string) map[string][]map[string]string {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string][]map[string]string, len(src))
+	for k, list := range src {
+		if list == nil {
+			dst[k] = nil
+			continue
+		}
+		cloned := make([]map[string]string, len(list))
+		for i, m := range list {
+			cloned[i] = maps.Clone(m)
+		}
+		dst[k] = cloned
+	}
+	return dst
+}
+
+// cloneEditorSourceFields 复制文档来源的共享可变字段，按需隔离原始页面与对象缓存
+// 入参: src 文档来源, clonePages 是否克隆原始页面与对象映射
+// 返回: *editorSource 隔离后的来源副本
+func cloneEditorSourceFields(src *editorSource, clonePages bool) *editorSource {
+	if src == nil {
+		return nil
+	}
+	source := *src
+	source.info = cloneEditorData(src.info)
+	source.pageResList = slices.Clone(src.pageResList)
+	source.annotationStates = cloneNestedMap(src.annotationStates)
+	source.annotationPages = maps.Clone(src.annotationPages)
+	source.retiredAttachments = maps.Clone(src.retiredAttachments)
+	source.removedAttachments = maps.Clone(src.removedAttachments)
+	source.structureObjects = cloneNestedMap(src.structureObjects)
+	source.structureStarts = cloneNestedMap(src.structureStarts)
+	source.attachmentIDs = maps.Clone(src.attachmentIDs)
+	source.initialFiles = maps.Clone(src.initialFiles)
+	source.appendOnlyFiles = maps.Clone(src.appendOnlyFiles)
+	if clonePages {
+		source.pages = maps.Clone(src.pages)
+		source.origins = maps.Clone(src.origins)
+	}
+	return &source
+}
+
+// samePDFDestinations 比较两份PDF跳转目标映射内容是否一致
+// 入参: a 事务前目标映射, b 事务后目标映射
+// 返回: bool 是否一致
+func samePDFDestinations(a, b *pdfDestinations) bool {
+	if a == b {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return maps.Equal(a.targets, b.targets)
+}
+
 // Changes 获取最近一次有效修改的独立刷新范围
 // 返回: EditorChanges 变化范围；未发生修改时为空
 func (e *Editor) Changes() EditorChanges {
@@ -155,22 +369,6 @@ func (e *Editor) Revision() uint64 {
 	return e.revision
 }
 
-// editorChange 页面或对象操作及其修订标识
-type editorChange struct {
-	undo    func(*Editor)
-	redo    func(*Editor)
-	before  uint64
-	after   uint64
-	changes EditorChanges
-}
-
-// editorOriginChange 记录单次按页增量事务中发生变动的单个对象原文映射
-type editorOriginChange struct {
-	id      string
-	existed bool
-	value   *editorObjectOrigin
-}
-
 // merge 合并同一事务中的变化范围
 // 入参: change 待合并的变化
 func (c *EditorChanges) merge(change EditorChanges) {
@@ -204,16 +402,19 @@ func (e *Editor) transactionState() Editor {
 	next.Info = cloneEditorData(e.Info)
 	next.resources = slices.Clone(e.resources)
 	next.fonts, next.images, next.resourceID, next.promoted = maps.Clone(e.fonts), maps.Clone(e.images), maps.Clone(e.resourceID), maps.Clone(e.promoted)
+	next.optimizedImages = maps.Clone(e.optimizedImages)
 	next.origins = maps.Clone(e.origins)
 	next.removedPages = maps.Clone(e.removedPages)
-	next.structureRemaps = maps.Clone(e.structureRemaps)
+	next.structureRemaps = cloneStructureRemaps(e.structureRemaps)
+	next.outlines = slices.Clone(e.outlines)
+	next.pdfDestinations = e.pdfDestinations.clone()
+	next.previewPages = maps.Clone(e.previewPages)
+	next.pageScope = slices.Clone(e.pageScope)
 	next.fontMetrics = maps.Clone(e.fontMetrics)
 	next.objectIndices = nil
-	if e.source != nil {
-		source := *e.source
-		source.pages, source.origins = maps.Clone(source.pages), maps.Clone(source.origins)
-		next.source = &source
-	}
+	next.nameCache = nil
+	next.richIndex = nil
+	next.source = cloneEditorSourceFields(e.source, true)
 	return next
 }
 
@@ -232,15 +433,19 @@ func (e *Editor) transactionStateSharedSource() Editor {
 	next.Info = cloneEditorData(e.Info)
 	next.resources = slices.Clone(e.resources)
 	next.fonts, next.images, next.resourceID, next.promoted = maps.Clone(e.fonts), maps.Clone(e.images), maps.Clone(e.resourceID), maps.Clone(e.promoted)
+	next.optimizedImages = maps.Clone(e.optimizedImages)
 	next.origins = maps.Clone(e.origins)
 	next.removedPages = maps.Clone(e.removedPages)
-	next.structureRemaps = maps.Clone(e.structureRemaps)
+	next.structureRemaps = cloneStructureRemaps(e.structureRemaps)
+	next.outlines = slices.Clone(e.outlines)
+	next.pdfDestinations = e.pdfDestinations.clone()
+	next.previewPages = maps.Clone(e.previewPages)
+	next.pageScope = slices.Clone(e.pageScope)
 	next.fontMetrics = maps.Clone(e.fontMetrics)
 	next.objectIndices = nil
-	if e.source != nil {
-		source := *e.source
-		next.source = &source
-	}
+	next.nameCache = nil
+	next.richIndex = nil
+	next.source = cloneEditorSourceFields(e.source, false)
 	return next
 }
 
@@ -267,7 +472,7 @@ func (e *Editor) restoreTransactionState(state Editor) {
 	state.SetResources(e.runtimeResources)
 	state.fontSourcesCache = e.fontSourcesCache
 	state.validatedPaths = e.validatedPaths
-	state.encryption, state.output, state.OnWriteProgress = e.encryption, e.output, e.OnWriteProgress
+	state.encryption, state.encHold, state.output, state.OnWriteProgress = e.encryption, e.encHold, e.output, e.OnWriteProgress
 	state.saveTarget, state.sourceFile = e.saveTarget, e.sourceFile
 	*e = state
 	e.syncLoadedSourcePages()
@@ -404,7 +609,7 @@ func (e *Editor) canRecordPageDelta(before *Editor, scope EditorChanges) bool {
 	if !maps.Equal(before.removedPages, e.removedPages) || !sameStructureRemaps(before.structureRemaps, e.structureRemaps) {
 		return false
 	}
-	if !bytes.Equal(before.outlines, e.outlines) || before.pdfDestinations != e.pdfDestinations || len(before.optimizedImages) != len(e.optimizedImages) {
+	if !bytes.Equal(before.outlines, e.outlines) || !samePDFDestinations(before.pdfDestinations, e.pdfDestinations) || len(before.optimizedImages) != len(e.optimizedImages) {
 		return false
 	}
 	return len(before.resources) <= len(e.resources)
@@ -517,127 +722,4 @@ func (e *Editor) recordPageAddition(index int) {
 		change.undo = func(e *Editor) { e.pages = slices.Delete(e.pages, index, index+1) }
 		change.redo = func(e *Editor) { e.pages = slices.Insert(e.pages, index, copyEditorPage(page)) }
 	}
-}
-
-// copyEditorPage 复制页面容器，共享经校验且按替换方式更新的对象数据
-// 入参: page 页面
-// 返回: PageContent 独立页面容器
-func copyEditorPage(page PageContent) PageContent {
-	page.Content.Layer = slices.Clone(page.Content.Layer)
-	for i := range page.Content.Layer {
-		page.Content.Layer[i].Objects = slices.Clone(page.Content.Layer[i].Objects)
-	}
-	return page
-}
-
-// moveEditorItem 按目标索引移动页面或对象
-// 入参: items 页面或对象序列, from 原索引, to 目标索引
-func moveEditorItem[T any](items []T, from, to int) {
-	item := items[from]
-	if from < to {
-		copy(items[from:to], items[from+1:to+1])
-	} else {
-		copy(items[to+1:from+1], items[to:from])
-	}
-	items[to] = item
-}
-
-// isUnloadedSourcePage 判断页面是否为尚未惰性解析的原文档空壳占位
-// 入参: page 页面内容
-// 返回: bool 是否为未加载原始页面
-func isUnloadedSourcePage(page PageContent) bool {
-	return page.ID != "" && page.XMLName.Local == "" && page.Area == (PageArea{}) && len(page.Content.Layer) == 0 && len(page.Actions) == 0 && len(page.Template) == 0 && len(page.PageRes) == 0 && len(page.pageResources) == 0
-}
-
-// editorSourceInitialPage 根据已加载的原始页面记录构建未修改态页面内容
-// 入参: source 已加载的原始页面记录
-// 返回: PageContent 保留初始切片头的页面内容
-func editorSourceInitialPage(source *editorSourcePage) PageContent {
-	page := *source.original
-	page.Content.Layer = source.initialLayers
-	page.Actions = source.initialActions
-	page.Template = source.initialTemplates
-	page.PageRes = source.initialPageRes
-	return page
-}
-
-// diffEditorOrigins 计算事务前后对象原文映射的最小差异集合
-// 入参: before 修改前映射, after 修改后映射
-// 返回: []editorOriginChange 撤销变更列表, []editorOriginChange 重做变更列表
-func diffEditorOrigins(before, after map[string]*editorObjectOrigin) ([]editorOriginChange, []editorOriginChange) {
-	var undo, redo []editorOriginChange
-	for id, value := range after {
-		if old, ok := before[id]; !ok || old != value {
-			undo = append(undo, editorOriginChange{id: id, existed: ok, value: old})
-			redo = append(redo, editorOriginChange{id: id, existed: true, value: value})
-		}
-	}
-	for id, old := range before {
-		if _, ok := after[id]; !ok {
-			undo = append(undo, editorOriginChange{id: id, existed: true, value: old})
-			redo = append(redo, editorOriginChange{id: id, existed: false})
-		}
-	}
-	return undo, redo
-}
-
-// sameEditorSourceMeta 判断两个文档来源快照在包结构与元数据层面是否一致
-// 入参: a 事务前来源, b 事务后来源
-// 返回: bool 是否未发生包结构或文档级元数据变更
-func sameEditorSourceMeta(a, b *editorSource) bool {
-	if a == b {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	if a.reader != b.reader || a.document != b.document || a.directory != b.directory || a.fromNew != b.fromNew || a.fallbackDocID != b.fallbackDocID {
-		return false
-	}
-	if (a.pages == nil) != (b.pages == nil) || len(a.pages) != len(b.pages) {
-		return false
-	}
-	if !reflect.DeepEqual(a.info, b.info) || !maps.Equal(a.annotationPages, b.annotationPages) || !maps.Equal(a.retiredAttachments, b.retiredAttachments) || !maps.Equal(a.removedAttachments, b.removedAttachments) {
-		return false
-	}
-	if len(a.annotationStates) != len(b.annotationStates) || len(a.structureObjects) != len(b.structureObjects) || len(a.structureStarts) != len(b.structureStarts) {
-		return false
-	}
-	for k, av := range a.annotationStates {
-		if bv, ok := b.annotationStates[k]; !ok || !maps.Equal(av, bv) {
-			return false
-		}
-	}
-	for k, av := range a.structureObjects {
-		if bv, ok := b.structureObjects[k]; !ok || !maps.Equal(av, bv) {
-			return false
-		}
-	}
-	for k, av := range a.structureStarts {
-		if bv, ok := b.structureStarts[k]; !ok || !maps.Equal(av, bv) {
-			return false
-		}
-	}
-	return true
-}
-
-// sameStructureRemaps 比较两个标引重映射表是否一致
-// 入参: a 事务前重映射表, b 事务后重映射表
-// 返回: bool 是否一致
-func sameStructureRemaps(a, b map[string][]map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, av := range a {
-		bv, ok := b[k]
-		if !ok || len(av) != len(bv) {
-			return false
-		}
-		for i := range av {
-			if !maps.Equal(av[i], bv[i]) {
-				return false
-			}
-		}
-	}
-	return true
 }

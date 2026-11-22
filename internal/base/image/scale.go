@@ -27,6 +27,27 @@ import (
 // rasterScaleBufferLimit 限制整像素缩放器的浮点中间缓冲，超出时使用逐行采样
 const rasterScaleBufferLimit = 8 << 20
 
+// rasterAxisSample 保存目标像素及其归一化源采样权重
+type rasterAxisSample struct {
+	pixel   int
+	first   int
+	weights []float64
+}
+
+// rasterImagePixel 保存未取整或裁切的预乘颜色累积值
+type rasterImagePixel struct {
+	r, g, b, a float64
+}
+
+// rasterImageRow 保存正在累积的目标行
+type rasterImageRow struct {
+	sample rasterAxisSample
+	values []rasterImagePixel
+}
+
+// rasterImageSource 为通用图片提供预乘十六位采样
+type rasterImageSource struct{ image.Image }
+
 // DrawPixels 对轴向缩放使用可分离采样，其余变换保留通用路径
 // 入参: dst 目标图像, src 源图像, m 按a、b、c、d、e、f排列的像素变换, op 合成操作
 func DrawPixels(dst draw.Image, src image.Image, m [6]float64, op draw.Op) {
@@ -49,48 +70,30 @@ func DrawPixels(dst draw.Image, src image.Image, m [6]float64, op draw.Op) {
 // 入参: source 原始像素边界, m 像素变换, target 目标边界
 // 返回: image.Rectangle 受影响的目标像素区域
 func TransformBounds(source image.Rectangle, m [6]float64, target image.Rectangle) image.Rectangle {
+	if source.Empty() || target.Empty() {
+		return image.Rectangle{}
+	}
+	for _, v := range m {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return image.Rectangle{}
+		}
+	}
 	minX, minY, maxX, maxY := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
 	for _, p := range [4]image.Point{source.Min, {X: source.Max.X, Y: source.Min.Y}, {X: source.Min.X, Y: source.Max.Y}, source.Max} {
 		x := math.Floor(float64(m[0]*float64(p.X)) + float64(m[2]*float64(p.Y)) + m[4])
 		y := math.Floor(float64(m[1]*float64(p.X)) + float64(m[3]*float64(p.Y)) + m[5])
+		if math.IsNaN(x) || math.IsInf(x, 0) || math.IsNaN(y) || math.IsInf(y, 0) {
+			return image.Rectangle{}
+		}
 		minX, minY = math.Min(minX, x), math.Min(minY, y)
 		maxX, maxY = math.Max(maxX, x+1), math.Max(maxY, y+1)
 	}
 	minX, minY = math.Max(minX, float64(target.Min.X)), math.Max(minY, float64(target.Min.Y))
 	maxX, maxY = math.Min(maxX, float64(target.Max.X)), math.Min(maxY, float64(target.Max.Y))
-	if minX >= maxX || minY >= maxY {
+	if math.IsNaN(minX) || math.IsNaN(minY) || math.IsNaN(maxX) || math.IsNaN(maxY) || minX >= maxX || minY >= maxY {
 		return image.Rectangle{}
 	}
 	return image.Rect(int(minX), int(minY), int(maxX), int(maxY))
-}
-
-// rasterAxisSample 保存目标像素及其归一化源采样权重
-type rasterAxisSample struct {
-	pixel   int
-	first   int
-	weights []float64
-}
-
-// rasterImagePixel 保存未取整或裁切的预乘颜色累积值
-type rasterImagePixel struct {
-	r, g, b, a float64
-}
-
-// rasterImageRow 保存正在累积的目标行
-type rasterImageRow struct {
-	sample rasterAxisSample
-	values []rasterImagePixel
-}
-
-// rasterImageSource 为通用图片提供预乘十六位采样
-type rasterImageSource struct{ image.Image }
-
-// RGBA64At 读取通用颜色的原始预乘分量
-// 入参: x 横向坐标, y 纵向坐标
-// 返回: color.RGBA64 预乘颜色
-func (s rasterImageSource) RGBA64At(x, y int) color.RGBA64 {
-	r, g, b, a := s.At(x, y).RGBA()
-	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
 }
 
 // drawRasterAxisImage 轴向缩放复用逐行采样，细轴按面积覆盖并保留镜像与小数坐标
@@ -186,21 +189,30 @@ func drawRasterAxisImage(dst draw.Image, src image.Image, m [6]float64, op draw.
 // 入参: first 目标起点, end 目标终点, source 源起点, limit 源终点, scale 缩放比例, offset 平移距离
 // 返回: []rasterAxisSample 轴向采样表
 func rasterImageAxis(first, end, source, limit int, scale, offset float64) []rasterAxisSample {
+	if first >= end || source >= limit || scale == 0 || math.IsNaN(scale) || math.IsInf(scale, 0) || math.IsNaN(offset) || math.IsInf(offset, 0) {
+		return nil
+	}
 	if math.Abs(scale)*float64(limit-source) < 1 {
 		return rasterImageFootprintAxis(first, end, source, limit, scale, offset)
 	}
 	result := make([]rasterAxisSample, 0, end-first)
 	argument := math.Min(1, math.Abs(scale))
 	support := draw.CatmullRom.Support / argument
+	if math.IsNaN(support) || math.IsInf(support, 0) {
+		return nil
+	}
 	count := 0
 	for pixel := first; pixel < end; pixel++ {
 		center := (float64(pixel) + .5 - offset) / scale
-		if center < float64(source) || center >= float64(limit) {
+		if math.IsNaN(center) || math.IsInf(center, 0) || center < float64(source) || center >= float64(limit) {
 			continue
 		}
 		center -= .5
 		start := int(max(float64(source), math.Floor(center-support)))
 		stop := int(min(float64(limit), math.Ceil(center+support)))
+		if stop <= start {
+			continue
+		}
 		count += stop - start
 		result = append(result, rasterAxisSample{pixel: pixel, first: start})
 	}
@@ -221,8 +233,12 @@ func rasterImageAxis(first, end, source, limit int, scale, offset float64) []ras
 				total += weights[i]
 			}
 		}
-		for i := range weights {
-			weights[i] /= total
+		if total != 0 && !math.IsNaN(total) && !math.IsInf(total, 0) {
+			for i := range weights {
+				weights[i] /= total
+			}
+		} else {
+			clear(weights)
 		}
 		sample.weights = weights
 	}
@@ -253,8 +269,14 @@ func rasterFootprintWeightsFit(source, target image.Rectangle, m [6]float64) boo
 // 入参: pixel 目标像素, source 源起点, limit 源终点, scale 缩放比例, offset 平移距离
 // 返回: int 源起点, int 源终点, func(int)float64 源权重
 func rasterImageWeightSpan(pixel, source, limit int, scale, offset float64) (int, int, func(int) float64) {
+	if source >= limit || scale == 0 || math.IsNaN(scale) || math.IsInf(scale, 0) || math.IsNaN(offset) || math.IsInf(offset, 0) {
+		return 0, 0, nil
+	}
 	if math.Abs(scale)*float64(limit-source) < 1 {
 		left, right := (float64(pixel)-offset)/scale, (float64(pixel+1)-offset)/scale
+		if math.IsNaN(left) || math.IsInf(left, 0) || math.IsNaN(right) || math.IsInf(right, 0) {
+			return 0, 0, nil
+		}
 		if right < left {
 			left, right = right, left
 		}
@@ -266,14 +288,20 @@ func rasterImageWeightSpan(pixel, source, limit int, scale, offset float64) (int
 		}
 	}
 	center := (float64(pixel) + .5 - offset) / scale
-	if center < float64(source) || center >= float64(limit) {
+	if math.IsNaN(center) || math.IsInf(center, 0) || center < float64(source) || center >= float64(limit) {
 		return 0, 0, nil
 	}
 	center -= .5
 	argument := math.Min(1, math.Abs(scale))
 	support := draw.CatmullRom.Support / argument
+	if math.IsNaN(support) || math.IsInf(support, 0) {
+		return 0, 0, nil
+	}
 	start := int(max(float64(source), math.Floor(center-support)))
 	stop := int(min(float64(limit), math.Ceil(center+support)))
+	if stop <= start {
+		return 0, 0, nil
+	}
 	weight := func(x int) float64 {
 		distance := math.Abs((float64(x) - center) * argument)
 		if distance < draw.CatmullRom.Support {
@@ -284,6 +312,9 @@ func rasterImageWeightSpan(pixel, source, limit int, scale, offset float64) (int
 	var total float64
 	for x := start; x < stop; x++ {
 		total += weight(x)
+	}
+	if total == 0 || math.IsNaN(total) || math.IsInf(total, 0) {
+		return 0, 0, nil
 	}
 	return start, stop, func(x int) float64 { return weight(x) / total }
 }
@@ -338,7 +369,13 @@ func drawRasterFootprintImage(dst draw.Image, src image.Image, m [6]float64, op 
 // 入参: first 目标起点, end 目标终点, source 源起点, limit 源终点, scale 缩放比例, offset 平移距离
 // 返回: []rasterAxisSample 轴向覆盖权重
 func rasterImageFootprintAxis(first, end, source, limit int, scale, offset float64) []rasterAxisSample {
+	if first >= end || source >= limit || scale == 0 || math.IsNaN(scale) || math.IsInf(scale, 0) || math.IsNaN(offset) || math.IsInf(offset, 0) {
+		return nil
+	}
 	lo, hi := float64(source)*scale+offset, float64(limit)*scale+offset
+	if math.IsNaN(lo) || math.IsInf(lo, 0) || math.IsNaN(hi) || math.IsInf(hi, 0) {
+		return nil
+	}
 	if hi < lo {
 		lo, hi = hi, lo
 	}
@@ -352,6 +389,9 @@ func rasterImageFootprintAxis(first, end, source, limit int, scale, offset float
 	for index := range result {
 		sample := &result[index]
 		left, right := (float64(sample.pixel)-offset)/scale, (float64(sample.pixel+1)-offset)/scale
+		if math.IsNaN(left) || math.IsInf(left, 0) || math.IsNaN(right) || math.IsInf(right, 0) {
+			return nil
+		}
 		if right < left {
 			left, right = right, left
 		}
@@ -436,7 +476,10 @@ func rasterImageWriteRow(dst draw.Image, output *image.RGBA64, values []rasterIm
 // 入参: value 采样分量, alpha 采样透明度
 // 返回: uint16 输出分量
 func rasterImageComponent(value, alpha float64) uint16 {
-	if value > alpha || math.IsNaN(alpha) {
+	if math.IsNaN(value) || math.IsNaN(alpha) {
+		return 0
+	}
+	if value > alpha {
 		value = alpha
 	}
 	value += .5
@@ -484,4 +527,12 @@ func rasterScaleBounds(b image.Rectangle, m [6]float64) (image.Rectangle, bool) 
 		return image.Rectangle{}, false
 	}
 	return image.Rect(int(x0), int(y0), int(x1), int(y1)), true
+}
+
+// RGBA64At 读取通用颜色的原始预乘分量
+// 入参: x 横向坐标, y 纵向坐标
+// 返回: color.RGBA64 预乘颜色
+func (s rasterImageSource) RGBA64At(x, y int) color.RGBA64 {
+	r, g, b, a := s.At(x, y).RGBA()
+	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
 }

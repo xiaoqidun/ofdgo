@@ -58,8 +58,8 @@ const (
 	engineCacheMaxBytes    = 192 << 20
 )
 
-// Host 连接桌面系统能力和共用文档业务
-type Host struct {
+// host 连接桌面系统能力和共用文档业务
+type host struct {
 	themeMu        sync.Mutex
 	theme          applicationTheme
 	themePath      string
@@ -80,7 +80,6 @@ type Host struct {
 	fonts          []map[string]any
 	fontFiles      map[string]string
 	fontCache      fontDataCache
-	fontError      error
 	pendingPaths   []string
 	launchMu       sync.Mutex
 	launchActivate bool
@@ -88,6 +87,108 @@ type Host struct {
 	launchPending  int
 	frontendReady  bool
 	closeAllowed   bool
+}
+
+// parsedVersion 保存已解析的构建版本信息，支持语义版本号与时间戳构建号
+type parsedVersion struct {
+	semver     bool
+	major      int64
+	minor      int64
+	patch      int64
+	prerelease []string
+	timestamp  int64
+}
+
+// associationState 保存单个范围的登记状态和查询错误
+type associationState struct {
+	guigo.AssociationStatus
+	Error string `json:"error,omitempty"`
+}
+
+// engineClose 保存并发关闭共享的完成通知及结果
+type engineClose struct {
+	done chan struct{}
+	err  error
+}
+
+// batchOutput 保存已提交的批量转换目标信息
+type batchOutput struct {
+	destination string
+	name        string
+}
+
+// fontCacheEntry 保存单个系统字体的缓存条目
+type fontCacheEntry struct {
+	key  string
+	data []byte
+}
+
+// fontDataCache 按条目数和字节上限缓存系统字体数据
+type fontDataCache struct {
+	mu      sync.Mutex
+	entries map[string]*fontCacheEntry
+	order   []*fontCacheEntry
+	bytes   int64
+}
+
+// docResourceItem 保存只读文档资源缓存中的单条数据及媒体类型
+type docResourceItem struct {
+	mime string
+	data []byte
+}
+
+// docResourceEntry 保存全局LRU链表中的单个文档资源节点
+type docResourceEntry struct {
+	token string
+	name  string
+	item  docResourceItem
+	prev  *docResourceEntry
+	next  *docResourceEntry
+}
+
+// docResourceBucket 保存单个文档令牌隔离的只读资源集合
+type docResourceBucket struct {
+	engineID string
+	items    map[string]*docResourceEntry
+	bytes    int64
+}
+
+// docResourceStore 维护按文档令牌隔离的只读LRU内存资源池
+type docResourceStore struct {
+	mu           sync.Mutex
+	maxBytes     int64
+	totalBytes   int64
+	engineTokens map[string]string
+	buckets      map[string]*docResourceBucket
+	lruHead      *docResourceEntry
+	lruTail      *docResourceEntry
+}
+
+// svgStreamItem 保存一次性大SVG自动释放流的内存数据
+type svgStreamItem struct {
+	engineID      string
+	data          []byte
+	createdAt     time.Time
+	readers       int
+	removePending bool
+}
+
+// svgStreamStore 管理大SVG一次性内存流并在读完、超时或会话切换时自动回收
+type svgStreamStore struct {
+	mu         sync.Mutex
+	maxBytes   int64
+	totalBytes int64
+	items      map[string]*svgStreamItem
+	order      []string
+	timer      *time.Timer
+	timerGen   uint64
+	closed     bool
+}
+
+// resourceReader 保存资源读取位置及关闭操作
+type resourceReader struct {
+	*io.SectionReader
+	close func() error
 }
 
 // Run 启动共用WebUI的原生入口
@@ -105,7 +206,7 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 			return err
 		}
 	}
-	h := &Host{pendingPaths: paths, themePath: filepath.Join(options.UserDataDir, "appearance.json")}
+	h := &host{pendingPaths: paths, themePath: filepath.Join(options.UserDataDir, "appearance.json")}
 	if err := h.loadTheme(); err != nil {
 		return err
 	}
@@ -219,36 +320,599 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 	return guigo.Run(ctx, options)
 }
 
-// associationState 保存单个范围的登记状态和查询错误
-type associationState struct {
-	guigo.AssociationStatus
-	Error string `json:"error,omitempty"`
+// newDocResourceStore 创建带总字节上限的文档只读资源内存池
+// 入参: maxBytes 内存池最大字节数
+// 返回: *docResourceStore 文档只读资源池
+func newDocResourceStore(maxBytes int64) *docResourceStore {
+	return &docResourceStore{
+		maxBytes:     maxBytes,
+		engineTokens: make(map[string]string),
+		buckets:      make(map[string]*docResourceBucket),
+	}
 }
 
-// engineClose 保存并发关闭共享的完成通知及结果
-type engineClose struct {
-	done chan struct{}
-	err  error
+// newSVGStreamStore 创建带容量保护的大SVG一次性自动释放流存储
+// 入参: maxBytes 最大保留字节数
+// 返回: *svgStreamStore 大SVG内存流存储
+func newSVGStreamStore(maxBytes int64) *svgStreamStore {
+	return &svgStreamStore{maxBytes: maxBytes, items: make(map[string]*svgStreamItem)}
 }
 
-// batchOutput 保存已提交的批量转换目标信息
-type batchOutput struct {
-	destination string
-	name        string
+// rotatesDocResources 判断操作成功时是否切换或重建当前文档或版本会话
+// 入参: name 操作名称
+// 返回: bool 是否需要轮换文档资源令牌并清空旧内存池
+func rotatesDocResources(name string) bool {
+	switch name {
+	case "ofdgoOpen", "ofdgoOpenPDF", "ofdgoCreateDocument", "ofdgoImportImages", "ofdgoSelectDocument", "ofdgoSelectVersion", "ofdgoChangeDocument", "ofdgoChangeVersion":
+		return true
+	}
+	return false
 }
 
-// fontCacheEntry 保存单个系统字体的缓存条目
-type fontCacheEntry struct {
-	key  string
-	data []byte
+// loadPDFCompleted 判断渐进PDF后台加载命令是否已全部完成并切换为完整会话
+// 入参: name 操作名称, result 原生调用响应
+// 返回: bool 是否完成全量PDF转换
+func loadPDFCompleted(name string, result map[string]any) bool {
+	if name != "ofdgoLoadPDF" {
+		return false
+	}
+	data, ok := result["data"].(map[string]any)
+	if !ok {
+		return false
+	}
+	done, _ := data["done"].(bool)
+	return done
 }
 
-// fontDataCache 按条目数和字节上限缓存系统字体数据
-type fontDataCache struct {
-	mu      sync.Mutex
-	entries map[string]*fontCacheEntry
-	order   []*fontCacheEntry
-	bytes   int64
+// filterKnownResources 过滤已不在当前文档资源令牌桶中的已知资源名称，确保被淘汰资源自动重下发
+// 入参: store 只读文档资源池, engineID 会话标识, docToken 文档资源令牌, value 前端声明的已知资源名列表
+// 返回: any 过滤后的已知资源名列表
+func filterKnownResources(store *docResourceStore, engineID, docToken string, value any) any {
+	list, ok := value.([]any)
+	if !ok || len(list) == 0 {
+		return value
+	}
+	kept := make([]any, 0, len(list))
+	for _, item := range list {
+		if name, ok := item.(string); ok && name != "" && store.has(engineID, docToken, name) {
+			kept = append(kept, name)
+		}
+	}
+	return kept
+}
+
+// parseByteRange 解析单段HTTP字节范围请求头并返回起始偏移与长度
+// 入参: header Range请求头文本, size 资源总字节数
+// 返回: int64 起始偏移, int64 读取长度, bool 是否合法
+func parseByteRange(header string, size int64) (int64, int64, bool) {
+	if !strings.HasPrefix(header, "bytes=") || strings.Contains(header, ",") {
+		return 0, 0, false
+	}
+	first, last, ok := strings.Cut(strings.TrimPrefix(header, "bytes="), "-")
+	if !ok {
+		return 0, 0, false
+	}
+	var start, length int64
+	if first == "" {
+		count, err := strconv.ParseInt(last, 10, 64)
+		if err != nil || count <= 0 {
+			return 0, 0, false
+		}
+		length = min(count, size)
+		start = size - length
+	} else {
+		var err error
+		start, err = strconv.ParseInt(first, 10, 64)
+		if err != nil || start < 0 || start >= size {
+			return 0, 0, false
+		}
+		end := size - 1
+		if last != "" {
+			end, err = strconv.ParseInt(last, 10, 64)
+			if err != nil || end < start {
+				return 0, 0, false
+			}
+		}
+		length = min(end, size-1) - start + 1
+	}
+	if length == 0 {
+		return 0, 0, false
+	}
+	return start, length, true
+}
+
+// shouldDeleteSVGStream 判断一次性大SVG流在本次HTTP请求结束后是否已读取至末尾可删除
+// 入参: r HTTP请求, size 资源总字节数
+// 返回: bool 是否应删除条目
+func shouldDeleteSVGStream(r *http.Request, size int64) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	header := r.Header.Get("Range")
+	if header == "" {
+		return true
+	}
+	start, length, ok := parseByteRange(header, size)
+	return ok && start+length >= size
+}
+
+// fontMIME 根据字体文件魔数推断响应媒体类型
+// 入参: data 字体字节数据
+// 返回: string 媒体类型
+func fontMIME(data []byte) string {
+	if len(data) >= 4 {
+		switch string(data[:4]) {
+		case "wOF2":
+			return "font/woff2"
+		case "wOFF":
+			return "font/woff"
+		case "OTTO":
+			return "font/otf"
+		}
+	}
+	return "font/ttf"
+}
+
+// rawJSONValue 将已编码的JSON字符串直接转为原始JSON片段，避免发往WebView时二次转义
+// 入参: value 原始字段值, fallback 空值或非法JSON时的回退片段
+// 返回: any 原始JSON片段或原对象
+func rawJSONValue(value any, fallback string) any {
+	text, ok := value.(string)
+	if !ok {
+		if value == nil {
+			return json.RawMessage(fallback)
+		}
+		return value
+	}
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || trimmed == "null" || !json.Valid([]byte(trimmed)) {
+		return json.RawMessage(fallback)
+	}
+	return json.RawMessage(trimmed)
+}
+
+// associationOptions 提供Windows文件关联的固定应用配置
+// 返回: guigo.AssociationOptions 应用配置, error 路径错误
+func associationOptions() (guigo.AssociationOptions, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return guigo.AssociationOptions{}, err
+	}
+	return guigo.AssociationOptions{
+		AppID: "OFDGo", Name: "OFDGo", Description: "OFD、PDF阅读与编辑工具",
+		Executable: executable, Arguments: []string{"--"},
+		Types: []guigo.FileAssociation{
+			{ID: "OFD", Name: "OFD文档", Extensions: []string{".ofd"}},
+			{ID: "PDF", Name: "PDF文档", Extensions: []string{".pdf"}},
+		},
+	}, nil
+}
+
+// queryAssociations 分别查询两个范围，不因其中一个失败而隐藏另一个
+// 返回: any 两个范围的状态, error 配置错误
+func queryAssociations() (any, error) {
+	options, err := associationOptions()
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]associationState)
+	for _, scope := range []guigo.AssociationScope{guigo.AssociationUser, guigo.AssociationMachine} {
+		state, err := guigo.QueryFileAssociations(options, scope)
+		row := associationState{AssociationStatus: state}
+		if err != nil {
+			row.Error = associationError(err).Error()
+		}
+		result[string(scope)] = row
+	}
+	return result, nil
+}
+
+// changeAssociations 执行固定应用配置的单范围注册或撤销
+// 入参: scope 作用范围, remove 是否撤销
+// 返回: error 操作错误
+func changeAssociations(scope string, remove bool) error {
+	options, err := associationOptions()
+	if err != nil {
+		return err
+	}
+	if remove {
+		err = guigo.UnregisterFileAssociations(options, guigo.AssociationScope(scope))
+	} else {
+		err = guigo.RegisterFileAssociations(options, guigo.AssociationScope(scope))
+	}
+	return associationError(err)
+}
+
+// associationError 区分未提升权限和实际访问失败，提供简短提示
+// 入参: err 操作错误
+// 返回: error 用户提示或原始错误
+func associationError(err error) error {
+	if errors.Is(err, guigo.ErrAssociationElevationRequired) {
+		return errors.New("需管理员权限")
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return errors.New("无权访问")
+	}
+	return err
+}
+
+// applicationUpdate 比较官网与当前构建版本，兼容语义版本号与时间戳格式，仅远程更新时返回true
+// 入参: ctx 请求上下文, version 当前版本, endpoint 官网地址
+// 返回: bool 是否有更新, error 检查错误
+func applicationUpdate(ctx context.Context, version, endpoint string) (bool, error) {
+	current, ok := parseBuildVersion(version)
+	if !ok {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodHead, endpoint, nil)
+	if err != nil {
+		return false, err
+	}
+	request.Header.Set("Cache-Control", "no-store")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("检查更新失败: %s", response.Status)
+	}
+	latest := strings.TrimSpace(response.Header.Get("X-OFDGo-Build-Version"))
+	if latest == "" {
+		return false, errors.New("缺少构建版本")
+	}
+	if strings.EqualFold(latest, "develop") {
+		return false, nil
+	}
+	remote, ok := parseBuildVersion(latest)
+	if !ok {
+		return false, errors.New("构建版本格式无效")
+	}
+	return isRemoteVersionNewer(current, remote), nil
+}
+
+// parseBuildVersion 解析语义版本号或时间戳构建版本，空值与develop视为非正式版本
+// 入参: version 构建版本字符串
+// 返回: parsedVersion 已解析版本, bool 是否解析成功
+func parseBuildVersion(version string) (parsedVersion, bool) {
+	version = strings.TrimSpace(version)
+	if version == "" || strings.EqualFold(version, "develop") {
+		return parsedVersion{}, false
+	}
+	if parsed, ok := parseSemver(version); ok {
+		return parsed, true
+	}
+	if timestamp, ok := versionTimestamp(version); ok {
+		return parsedVersion{timestamp: timestamp}, true
+	}
+	return parsedVersion{}, false
+}
+
+// parseSemver 解析可选v前缀的语义化版本号
+// 入参: version 版本字符串
+// 返回: parsedVersion 语义版本, bool 是否解析成功
+func parseSemver(version string) (parsedVersion, bool) {
+	trimmed := version
+	if len(trimmed) > 0 && (trimmed[0] == 'v' || trimmed[0] == 'V') {
+		trimmed = trimmed[1:]
+	}
+	core, buildPart, hasBuild := strings.Cut(trimmed, "+")
+	if hasBuild {
+		if buildPart == "" {
+			return parsedVersion{}, false
+		}
+		for _, id := range strings.Split(buildPart, ".") {
+			if !validBuildIdentifier(id) {
+				return parsedVersion{}, false
+			}
+		}
+	}
+	mainPart, prePart, hasPre := strings.Cut(core, "-")
+	if hasPre && prePart == "" {
+		return parsedVersion{}, false
+	}
+	segments := strings.Split(mainPart, ".")
+	if len(segments) < 2 || len(segments) > 3 {
+		return parsedVersion{}, false
+	}
+	var nums [3]int64
+	for i, seg := range segments {
+		n, ok := parseSemverInt(seg)
+		if !ok {
+			return parsedVersion{}, false
+		}
+		nums[i] = n
+	}
+	var prerelease []string
+	if hasPre {
+		prerelease = strings.Split(prePart, ".")
+		for _, id := range prerelease {
+			if !validPrereleaseIdentifier(id) {
+				return parsedVersion{}, false
+			}
+		}
+	}
+	return parsedVersion{semver: true, major: nums[0], minor: nums[1], patch: nums[2], prerelease: prerelease}, true
+}
+
+// parseSemverInt 解析无非法前导零的非负语义版本数值段
+// 入参: text 数值段文本
+// 返回: int64 非负整数, bool 是否有效
+func parseSemverInt(text string) (int64, bool) {
+	if text == "" || (len(text) > 1 && text[0] == '0') {
+		return 0, false
+	}
+	for i := 0; i < len(text); i++ {
+		if text[i] < '0' || text[i] > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.ParseInt(text, 10, 64)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// validPrereleaseIdentifier 校验语义版本预发布标识符格式
+// 入参: text 标识符文本
+// 返回: bool 是否合法
+func validPrereleaseIdentifier(text string) bool {
+	if text == "" {
+		return false
+	}
+	allDigits := true
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if c >= '0' && c <= '9' {
+			continue
+		}
+		allDigits = false
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' {
+			continue
+		}
+		return false
+	}
+	if allDigits && len(text) > 1 && text[0] == '0' {
+		return false
+	}
+	return true
+}
+
+// validBuildIdentifier 校验语义版本构建元数据标识符格式
+// 入参: text 标识符文本
+// 返回: bool 是否合法
+func validBuildIdentifier(text string) bool {
+	if text == "" {
+		return false
+	}
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// isRemoteVersionNewer 比较远程与本地已解析版本，远程更高时返回true
+// 入参: current 当前本地版本, remote 远程版本
+// 返回: bool 远程是否更新
+func isRemoteVersionNewer(current, remote parsedVersion) bool {
+	if current.semver && remote.semver {
+		return compareSemver(remote, current) > 0
+	}
+	if !current.semver && !remote.semver {
+		return remote.timestamp > current.timestamp
+	}
+	return remote.semver
+}
+
+// compareSemver 按SemVer 2.0.0优先级比较两个语义版本号
+// 入参: a 左侧版本, b 右侧版本
+// 返回: int 1表示a大于b，-1表示a小于b，0表示相等
+func compareSemver(a, b parsedVersion) int {
+	for _, pair := range [][2]int64{{a.major, b.major}, {a.minor, b.minor}, {a.patch, b.patch}} {
+		if pair[0] != pair[1] {
+			if pair[0] > pair[1] {
+				return 1
+			}
+			return -1
+		}
+	}
+	if len(a.prerelease) == 0 && len(b.prerelease) == 0 {
+		return 0
+	}
+	if len(a.prerelease) == 0 {
+		return 1
+	}
+	if len(b.prerelease) == 0 {
+		return -1
+	}
+	limit := min(len(a.prerelease), len(b.prerelease))
+	for i := 0; i < limit; i++ {
+		if a.prerelease[i] == b.prerelease[i] {
+			continue
+		}
+		an, aNum := parseSemverInt(a.prerelease[i])
+		bn, bNum := parseSemverInt(b.prerelease[i])
+		if aNum && bNum {
+			if an > bn {
+				return 1
+			}
+			return -1
+		}
+		if aNum != bNum {
+			if aNum {
+				return -1
+			}
+			return 1
+		}
+		if a.prerelease[i] > b.prerelease[i] {
+			return 1
+		}
+		return -1
+	}
+	if len(a.prerelease) > len(b.prerelease) {
+		return 1
+	}
+	if len(a.prerelease) < len(b.prerelease) {
+		return -1
+	}
+	return 0
+}
+
+// versionTimestamp 提取构建版本中的Unix时间戳前缀
+// 入参: version 构建版本字符串
+// 返回: int64 时间戳, bool 是否解析成功
+func versionTimestamp(version string) (int64, bool) {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return 0, false
+	}
+	prefix, _, _ := strings.Cut(version, "-")
+	timestamp, err := strconv.ParseInt(prefix, 10, 64)
+	if err != nil || timestamp <= 0 {
+		return 0, false
+	}
+	return timestamp, true
+}
+
+// handleID 从宿主句柄映射中提取文件或目录授权标识
+// 入参: value 句柄参数
+// 返回: string 授权标识
+func handleID(value any) string {
+	handle, _ := value.(map[string]any)
+	id, _ := handle["nativeHandle"].(string)
+	return id
+}
+
+// dialogFilters 将共用界面的文件类型映射到系统对话框
+// 入参: args 对话框参数
+// 返回: []guigo.FileFilter 文件类型列表
+func dialogFilters(args map[string]any) []guigo.FileFilter {
+	patterns := func(values []string) string {
+		var result []string
+		seen := make(map[string]bool)
+		for _, value := range values {
+			value = strings.ToLower(strings.TrimSpace(value))
+			if !strings.HasPrefix(value, ".") || strings.ContainsAny(value, "/\\;*?\x00") || seen[value] {
+				continue
+			}
+			seen[value] = true
+			result = append(result, "*"+value)
+		}
+		return strings.Join(result, ";")
+	}
+	var filters []guigo.FileFilter
+	if accept, ok := args["accept"].(string); ok {
+		var extensions []string
+		for _, value := range strings.Split(accept, ",") {
+			value = strings.ToLower(strings.TrimSpace(value))
+			if strings.HasPrefix(value, ".") {
+				extensions = append(extensions, value)
+				continue
+			}
+			switch value {
+			case "image/*":
+				extensions = append(extensions, ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".gif", ".webp", ".jb2", ".jbig2")
+			case "font/*":
+				extensions = append(extensions, ".ttf", ".otf", ".ttc", ".otc")
+			default:
+				values, err := mime.ExtensionsByType(value)
+				if err == nil {
+					sort.Strings(values)
+					extensions = append(extensions, values...)
+				}
+			}
+		}
+		if pattern := patterns(extensions); pattern != "" {
+			filters = append(filters, guigo.FileFilter{Name: "支持的文件", Pattern: pattern})
+		}
+	}
+	types, _ := args["types"].([]any)
+	for _, item := range types {
+		value, _ := item.(map[string]any)
+		accept, _ := value["accept"].(map[string]any)
+		var extensions []string
+		var names []string
+		for name := range accept {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			values := accept[name]
+			list, _ := values.([]any)
+			for _, extension := range list {
+				if text, ok := extension.(string); ok {
+					extensions = append(extensions, text)
+				}
+			}
+		}
+		if pattern := patterns(extensions); pattern != "" {
+			name, _ := value["description"].(string)
+			if name == "" {
+				name = pattern
+			}
+			filters = append(filters, guigo.FileFilter{Name: name, Pattern: pattern})
+		}
+	}
+	return append(filters, guigo.FileFilter{Name: "所有文件", Pattern: "*.*"})
+}
+
+// dialogError 将用户取消与业务错误区分
+// 入参: err 对话框错误
+// 返回: error 页面可识别的错误
+func dialogError(err error) error {
+	if errors.Is(err, guigo.ErrCanceled) {
+		return &guigo.BridgeError{Name: "AbortError", Message: "已取消"}
+	}
+	return err
+}
+
+// windowOptions 创建原生窗口配置
+// 入参: dataDir 自定义浏览器数据目录
+// 返回: guigo.Options 窗口配置, error 配置错误
+func windowOptions(dataDir string) (guigo.Options, error) {
+	appID := "ofdgo"
+	cacheName := appID
+	if runtime.GOOS == "windows" {
+		appID = ""
+		cacheName = "OFDGo"
+	}
+	if dataDir == "" {
+		cache, err := os.UserCacheDir()
+		if err != nil {
+			return guigo.Options{}, err
+		}
+		dataDir = filepath.Join(cache, cacheName)
+	}
+	dataDir, err := filepath.Abs(dataDir)
+	if err != nil {
+		return guigo.Options{}, err
+	}
+	icon, err := webuiassets.NativeFS.ReadFile("ofdgo.png")
+	if err != nil {
+		return guigo.Options{}, err
+	}
+	return guigo.Options{
+		AppID:          appID,
+		Title:          "OFDGo - OFD编辑器",
+		TitleBar:       guigo.TitleBarContent,
+		TitleBarColors: themeColors(guigo.SystemDark()),
+		WindowMaterial: guigo.WindowSolid,
+		Icon:           icon,
+		Width:          1440,
+		Height:         900,
+		MinWidth:       360,
+		MinHeight:      240,
+		Center:         true,
+		Maximized:      true,
+		UserDataDir:    dataDir,
+	}, nil
 }
 
 // get 查询缓存并在命中时刷新最近使用顺序
@@ -326,58 +990,18 @@ func (c *fontDataCache) clear() {
 	c.mu.Unlock()
 }
 
-// docResourceItem 保存只读文档资源缓存中的单条数据及媒体类型
-type docResourceItem struct {
-	mime string
-	data []byte
-}
-
-// docResourceBucket 保存单个文档令牌隔离的只读资源集合
-type docResourceBucket struct {
-	engineID string
-	items    map[string]docResourceItem
-	order    []string
-	bytes    int64
-}
-
-// docResourceStore 维护按文档令牌隔离的只读内存资源池
-type docResourceStore struct {
-	mu           sync.RWMutex
-	maxBytes     int64
-	totalBytes   int64
-	engineTokens map[string]string
-	buckets      map[string]*docResourceBucket
-}
-
-// newDocResourceStore 创建带总字节上限的文档只读资源内存池
-// 入参: maxBytes 内存池最大字节数
-// 返回: *docResourceStore 文档只读资源池
-func newDocResourceStore(maxBytes int64) *docResourceStore {
-	return &docResourceStore{
-		maxBytes:     maxBytes,
-		engineTokens: make(map[string]string),
-		buckets:      make(map[string]*docResourceBucket),
-	}
-}
-
 // tokenFor 获取或初始化指定会话当前的文档资源隔离令牌
 // 入参: engineID 会话标识
 // 返回: string 文档资源令牌
 func (s *docResourceStore) tokenFor(engineID string) string {
-	s.mu.RLock()
-	token := s.engineTokens[engineID]
-	s.mu.RUnlock()
-	if token != "" {
-		return token
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if token = s.engineTokens[engineID]; token != "" {
+	if token := s.engineTokens[engineID]; token != "" {
 		return token
 	}
-	token = rand.Text()
+	token := rand.Text()
 	s.engineTokens[engineID] = token
-	s.buckets[token] = &docResourceBucket{engineID: engineID, items: make(map[string]docResourceItem)}
+	s.buckets[token] = &docResourceBucket{engineID: engineID, items: make(map[string]*docResourceEntry)}
 	return token
 }
 
@@ -388,14 +1012,11 @@ func (s *docResourceStore) rotate(engineID string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if oldToken := s.engineTokens[engineID]; oldToken != "" {
-		if old := s.buckets[oldToken]; old != nil {
-			s.totalBytes -= old.bytes
-			delete(s.buckets, oldToken)
-		}
+		s.removeBucketLocked(oldToken)
 	}
 	token := rand.Text()
 	s.engineTokens[engineID] = token
-	s.buckets[token] = &docResourceBucket{engineID: engineID, items: make(map[string]docResourceItem)}
+	s.buckets[token] = &docResourceBucket{engineID: engineID, items: make(map[string]*docResourceEntry)}
 	return token
 }
 
@@ -420,34 +1041,58 @@ func (s *docResourceStore) put(engineID, token, name, mimeType string, data []by
 	if bucket == nil {
 		return ""
 	}
-	if existing, ok := bucket.items[name]; ok && len(existing.data) > 0 {
-		if existing.mime == "" && mimeType != "" {
-			existing.mime = mimeType
-			bucket.items[name] = existing
+	if existing := bucket.items[name]; existing != nil && len(existing.item.data) > 0 {
+		if existing.item.mime == "" && mimeType != "" {
+			existing.item.mime = mimeType
 		}
+		s.touchLocked(existing)
 		return resURL
 	}
 	for s.maxBytes > 0 && s.totalBytes+size > s.maxBytes {
-		if !s.evictOneLocked(token) {
+		if !s.evictOneLocked() {
 			return ""
 		}
 	}
-	bucket.items[name] = docResourceItem{mime: mimeType, data: data}
-	bucket.order = append(bucket.order, name)
+	entry := &docResourceEntry{token: token, name: name, item: docResourceItem{mime: mimeType, data: data}}
+	bucket.items[name] = entry
+	s.linkTailLocked(entry)
 	bucket.bytes += size
 	s.totalBytes += size
 	return resURL
 }
 
-// lookup 查询指定会话与令牌中已登记的资源路径及大小
+// has 检查指定会话与令牌桶中是否仍持有指定名称的只读资源
+// 入参: engineID 会话标识, token 文档令牌, name 资源名称
+// 返回: bool 是否命中
+func (s *docResourceStore) has(engineID, token, name string) bool {
+	if name == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if token == "" {
+		token = s.engineTokens[engineID]
+	}
+	if token == "" || s.engineTokens[engineID] != token {
+		return false
+	}
+	bucket := s.buckets[token]
+	if bucket == nil {
+		return false
+	}
+	entry := bucket.items[name]
+	return entry != nil && len(entry.item.data) > 0
+}
+
+// lookup 查询指定会话与令牌中已登记的资源路径及大小并刷新最近访问顺序
 // 入参: engineID 会话标识, token 文档令牌, name 资源名称
 // 返回: string 资源路径, int 资源字节数, bool 是否命中
 func (s *docResourceStore) lookup(engineID, token, name string) (string, int, bool) {
 	if name == "" {
 		return "", 0, false
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if token == "" {
 		token = s.engineTokens[engineID]
 	}
@@ -458,25 +1103,30 @@ func (s *docResourceStore) lookup(engineID, token, name string) (string, int, bo
 	if bucket == nil {
 		return "", 0, false
 	}
-	item, ok := bucket.items[name]
-	if !ok || len(item.data) == 0 {
+	entry := bucket.items[name]
+	if entry == nil || len(entry.item.data) == 0 {
 		return "", 0, false
 	}
-	return "/__native/resource/" + token + "/" + url.PathEscape(name), len(item.data), true
+	s.touchLocked(entry)
+	return "/__native/resource/" + token + "/" + url.PathEscape(name), len(entry.item.data), true
 }
 
-// get 按令牌和资源名只读获取内存资源内容
+// get 按令牌和资源名只读获取内存资源内容并刷新最近访问顺序
 // 入参: token 文档令牌, name 资源名称
 // 返回: docResourceItem 资源条目, bool 是否命中
 func (s *docResourceStore) get(token, name string) (docResourceItem, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	bucket := s.buckets[token]
 	if bucket == nil {
 		return docResourceItem{}, false
 	}
-	item, ok := bucket.items[name]
-	return item, ok
+	entry := bucket.items[name]
+	if entry == nil || len(entry.item.data) == 0 {
+		return docResourceItem{}, false
+	}
+	s.touchLocked(entry)
+	return entry.item, true
 }
 
 // clearEngine 释放指定会话持有的全部文档只读资源
@@ -485,10 +1135,7 @@ func (s *docResourceStore) clearEngine(engineID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if token := s.engineTokens[engineID]; token != "" {
-		if bucket := s.buckets[token]; bucket != nil {
-			s.totalBytes -= bucket.bytes
-			delete(s.buckets, token)
-		}
+		s.removeBucketLocked(token)
 		delete(s.engineTokens, engineID)
 	}
 }
@@ -496,71 +1143,94 @@ func (s *docResourceStore) clearEngine(engineID string) {
 // clearAll 清空整个窗口持有的全部文档只读资源
 func (s *docResourceStore) clearAll() {
 	s.mu.Lock()
+	for _, bucket := range s.buckets {
+		for _, entry := range bucket.items {
+			entry.prev = nil
+			entry.next = nil
+			entry.item.data = nil
+		}
+	}
 	s.engineTokens = make(map[string]string)
 	s.buckets = make(map[string]*docResourceBucket)
+	s.lruHead = nil
+	s.lruTail = nil
 	s.totalBytes = 0
 	s.mu.Unlock()
 }
 
-// evictOneLocked 在持锁状态下按先进先出淘汰一条只读资源
-// 入参: currentToken 当前写入令牌
-// 返回: bool 是否成功淘汰一条资源
-func (s *docResourceStore) evictOneLocked(currentToken string) bool {
-	for token, bucket := range s.buckets {
-		if token == currentToken || len(bucket.order) == 0 {
-			continue
-		}
-		return s.evictBucketHeadLocked(bucket)
+// removeBucketLocked 在持锁状态下销毁指定令牌桶并从全局LRU链表摘除其全部条目
+// 入参: token 文档资源令牌
+func (s *docResourceStore) removeBucketLocked(token string) {
+	bucket := s.buckets[token]
+	if bucket == nil {
+		return
 	}
-	if bucket := s.buckets[currentToken]; bucket != nil && len(bucket.order) > 0 {
-		return s.evictBucketHeadLocked(bucket)
+	for _, entry := range bucket.items {
+		s.unlinkLocked(entry)
+		entry.item.data = nil
 	}
-	return false
+	s.totalBytes -= bucket.bytes
+	delete(s.buckets, token)
 }
 
-// evictBucketHeadLocked 在持锁状态下淘汰指定令牌桶队头资源
-// 入参: bucket 目标令牌桶
-// 返回: bool 是否成功淘汰
-func (s *docResourceStore) evictBucketHeadLocked(bucket *docResourceBucket) bool {
-	if len(bucket.order) == 0 {
+// linkTailLocked 在持锁状态下将节点挂入全局LRU链表尾部
+// 入参: entry 文档资源节点
+func (s *docResourceStore) linkTailLocked(entry *docResourceEntry) {
+	entry.prev = s.lruTail
+	entry.next = nil
+	if s.lruTail != nil {
+		s.lruTail.next = entry
+	} else {
+		s.lruHead = entry
+	}
+	s.lruTail = entry
+}
+
+// unlinkLocked 在持锁状态下将节点从全局LRU链表摘除
+// 入参: entry 文档资源节点
+func (s *docResourceStore) unlinkLocked(entry *docResourceEntry) {
+	if entry.prev != nil {
+		entry.prev.next = entry.next
+	} else if s.lruHead == entry {
+		s.lruHead = entry.next
+	}
+	if entry.next != nil {
+		entry.next.prev = entry.prev
+	} else if s.lruTail == entry {
+		s.lruTail = entry.prev
+	}
+	entry.prev = nil
+	entry.next = nil
+}
+
+// touchLocked 在持锁状态下将命中节点移至全局LRU链表最近访问尾部
+// 入参: entry 文档资源节点
+func (s *docResourceStore) touchLocked(entry *docResourceEntry) {
+	if entry == s.lruTail {
+		return
+	}
+	s.unlinkLocked(entry)
+	s.linkTailLocked(entry)
+}
+
+// evictOneLocked 在持锁状态下淘汰全局最久未访问的一条只读资源
+// 返回: bool 是否成功淘汰一条资源
+func (s *docResourceStore) evictOneLocked() bool {
+	evicted := s.lruHead
+	if evicted == nil {
 		return false
 	}
-	name := bucket.order[0]
-	copy(bucket.order, bucket.order[1:])
-	bucket.order[len(bucket.order)-1] = ""
-	bucket.order = bucket.order[:len(bucket.order)-1]
-	if item, ok := bucket.items[name]; ok {
-		size := int64(len(item.data))
-		delete(bucket.items, name)
-		bucket.bytes -= size
-		s.totalBytes -= size
-		return true
+	s.unlinkLocked(evicted)
+	if bucket := s.buckets[evicted.token]; bucket != nil {
+		if current := bucket.items[evicted.name]; current == evicted {
+			delete(bucket.items, evicted.name)
+			size := int64(len(evicted.item.data))
+			bucket.bytes -= size
+			s.totalBytes -= size
+		}
 	}
-	return false
-}
-
-// svgStreamItem 保存一次性大SVG自动释放流的内存数据
-type svgStreamItem struct {
-	engineID  string
-	data      []byte
-	createdAt time.Time
-	reading   bool
-}
-
-// svgStreamStore 管理大SVG一次性内存流并在读完、超时或会话切换时自动回收
-type svgStreamStore struct {
-	mu         sync.Mutex
-	maxBytes   int64
-	totalBytes int64
-	items      map[string]*svgStreamItem
-	order      []string
-}
-
-// newSVGStreamStore 创建带容量保护的大SVG一次性自动释放流存储
-// 入参: maxBytes 最大保留字节数
-// 返回: *svgStreamStore 大SVG内存流存储
-func newSVGStreamStore(maxBytes int64) *svgStreamStore {
-	return &svgStreamStore{maxBytes: maxBytes, items: make(map[string]*svgStreamItem)}
+	evicted.item.data = nil
+	return true
 }
 
 // put 登记一次性大SVG字节流并返回直读路径
@@ -569,6 +1239,9 @@ func newSVGStreamStore(maxBytes int64) *svgStreamStore {
 func (s *svgStreamStore) put(engineID string, data []byte) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return ""
+	}
 	now := time.Now()
 	s.pruneExpiredLocked(now)
 	size := int64(len(data))
@@ -581,23 +1254,47 @@ func (s *svgStreamStore) put(engineID string, data []byte) string {
 	s.items[id] = &svgStreamItem{engineID: engineID, data: data, createdAt: now}
 	s.order = append(s.order, id)
 	s.totalBytes += size
+	s.ensureTimerLocked(now)
 	return "/__native/svg/" + id
 }
 
-// acquire 获取大SVG只读字节数据，调用方读取完毕后可按需释放条目
-// 入参: id 流标识, consume 是否标记正在消费
-// 返回: []byte SVG字节, bool 是否命中
-func (s *svgStreamStore) acquire(id string, consume bool) ([]byte, bool) {
+// acquire 获取大SVG只读字节数据，需跟踪读取时返回对称释放闭包
+// 入参: id 流标识, track 是否计入活跃读取者引用计数
+// 返回: []byte SVG字节, func(bool) 结束读取回调，参数控制是否删除条目, bool 是否命中
+func (s *svgStreamStore) acquire(id string, track bool) ([]byte, func(bool), bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item := s.items[id]
 	if item == nil {
-		return nil, false
+		return nil, nil, false
 	}
-	if consume {
-		item.reading = true
+	data := item.data
+	if !track {
+		return data, nil, true
 	}
-	return item.data, true
+	item.readers++
+	var once sync.Once
+	return data, func(remove bool) {
+		once.Do(func() { s.releaseItem(id, item, remove) })
+	}, true
+}
+
+// releaseItem 对称减少大SVG流读取计数并在读完或超时后回收条目
+// 入参: id 流标识, item 目标条目, remove 是否删除该条目
+func (s *svgStreamStore) releaseItem(id string, item *svgStreamItem, remove bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if item.readers > 0 {
+		item.readers--
+	}
+	if remove {
+		item.removePending = true
+	}
+	now := time.Now()
+	if s.items[id] == item && item.readers == 0 && (item.removePending || now.Sub(item.createdAt) > svgStreamTTL) {
+		s.deleteLocked(id)
+	}
+	s.ensureTimerLocked(now)
 }
 
 // delete 立即从内存释放指定大SVG流条目
@@ -606,6 +1303,17 @@ func (s *svgStreamStore) delete(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deleteLocked(id)
+	s.ensureTimerLocked(time.Now())
+}
+
+// deleteByURL 按大SVG流路径立即释放指定内存流条目
+// 入参: rawURL 大SVG流路径
+func (s *svgStreamStore) deleteByURL(rawURL string) {
+	id, ok := strings.CutPrefix(rawURL, "/__native/svg/")
+	if !ok || id == "" || strings.Contains(id, "/") {
+		return
+	}
+	s.delete(id)
 }
 
 // clearEngine 清理指定会话尚未读取完毕的全部大SVG流
@@ -631,11 +1339,14 @@ func (s *svgStreamStore) clearEngine(engineID string) {
 		s.order[i] = ""
 	}
 	s.order = kept
+	s.ensureTimerLocked(time.Now())
 }
 
-// clearAll 清空全部大SVG内存流
-func (s *svgStreamStore) clearAll() {
+// close 停止后台定时清理器并清空全部大SVG内存流
+func (s *svgStreamStore) close() {
 	s.mu.Lock()
+	s.closed = true
+	s.stopTimerLocked()
 	for id, item := range s.items {
 		item.data = nil
 		delete(s.items, id)
@@ -645,7 +1356,60 @@ func (s *svgStreamStore) clearAll() {
 	s.mu.Unlock()
 }
 
-// pruneExpiredLocked 清理超过生存时间且未在读取中的残留SVG流
+// pruneExpired 在后台定时器触发时清理过期且无活跃读取者的SVG流并重调度下次清理
+// 入参: gen 定时器代数，用于忽略过期回调
+func (s *svgStreamStore) pruneExpired(gen uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.timerGen != gen {
+		return
+	}
+	s.timer = nil
+	now := time.Now()
+	s.pruneExpiredLocked(now)
+	s.ensureTimerLocked(now)
+}
+
+// ensureTimerLocked 在持锁状态下按最早未读条目的过期时刻按需启停后台清理定时器
+// 入参: now 当前时间
+func (s *svgStreamStore) ensureTimerLocked(now time.Time) {
+	if s.closed {
+		s.stopTimerLocked()
+		return
+	}
+	var earliest *svgStreamItem
+	for _, id := range s.order {
+		item := s.items[id]
+		if item == nil || item.readers > 0 {
+			continue
+		}
+		if earliest == nil || item.createdAt.Before(earliest.createdAt) {
+			earliest = item
+		}
+	}
+	if earliest == nil {
+		s.stopTimerLocked()
+		return
+	}
+	if s.timer != nil {
+		return
+	}
+	delay := max(time.Duration(0), earliest.createdAt.Add(svgStreamTTL).Sub(now))
+	s.timerGen++
+	gen := s.timerGen
+	s.timer = time.AfterFunc(delay, func() { s.pruneExpired(gen) })
+}
+
+// stopTimerLocked 在持锁状态下停止并失效当前后台清理定时器
+func (s *svgStreamStore) stopTimerLocked() {
+	s.timerGen++
+	if s.timer != nil {
+		s.timer.Stop()
+		s.timer = nil
+	}
+}
+
+// pruneExpiredLocked 清理超过生存时间且无活跃读取者的残留SVG流
 // 入参: now 当前时间
 func (s *svgStreamStore) pruneExpiredLocked(now time.Time) {
 	kept := s.order[:0]
@@ -654,7 +1418,7 @@ func (s *svgStreamStore) pruneExpiredLocked(now time.Time) {
 		if item == nil {
 			continue
 		}
-		if !item.reading && now.Sub(item.createdAt) > svgStreamTTL {
+		if item.readers == 0 && now.Sub(item.createdAt) > svgStreamTTL {
 			s.totalBytes -= int64(len(item.data))
 			item.data = nil
 			delete(s.items, id)
@@ -668,7 +1432,7 @@ func (s *svgStreamStore) pruneExpiredLocked(now time.Time) {
 	s.order = kept
 }
 
-// evictOldestLocked 淘汰最早登记且未在读取中的SVG流
+// evictOldestLocked 淘汰最早登记且无活跃读取者的SVG流
 // 返回: bool 是否成功淘汰
 func (s *svgStreamStore) evictOldestLocked() bool {
 	for i, id := range s.order {
@@ -679,7 +1443,7 @@ func (s *svgStreamStore) evictOldestLocked() bool {
 			s.order = s.order[:len(s.order)-1]
 			return true
 		}
-		if item.reading {
+		if item.readers > 0 {
 			continue
 		}
 		s.totalBytes -= int64(len(item.data))
@@ -713,12 +1477,6 @@ func (s *svgStreamStore) deleteLocked(id string) {
 	}
 }
 
-// resourceReader 保存资源读取位置及关闭操作
-type resourceReader struct {
-	*io.SectionReader
-	close func() error
-}
-
 // Close 结束本次资源读取
 // 返回: error 关闭错误
 func (r *resourceReader) Close() error {
@@ -731,7 +1489,7 @@ func (r *resourceReader) Close() error {
 // resource 将静态资源、只读内存文档资源、大SVG自动释放流及文件直接交给宿主资源流
 // 入参: r 资源请求
 // 返回: *guigo.Resource 资源响应, error 读取错误
-func (h *Host) resource(r *http.Request) (*guigo.Resource, error) {
+func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return nil, nil
 	}
@@ -744,12 +1502,17 @@ func (h *Host) resource(r *http.Request) (*guigo.Resource, error) {
 	var size int64
 	var close func() error
 	var contentType string
+	var svgRelease func(bool)
 	cacheControl := "no-store"
-	svgStreamID := ""
 	transferred := false
 	defer func() {
-		if !transferred && close != nil {
-			close()
+		if !transferred {
+			if close != nil {
+				close()
+			}
+			if svgRelease != nil {
+				svgRelease(false)
+			}
 		}
 	}()
 	if strings.HasPrefix(r.URL.Path, "/__native/resource/") {
@@ -774,13 +1537,13 @@ func (h *Host) resource(r *http.Request) (*guigo.Resource, error) {
 		if id == "" || strings.Contains(id, "/") || h.svgStreams == nil {
 			return nil, nil
 		}
-		data, ok := h.svgStreams.acquire(id, r.Method == http.MethodGet)
+		data, releaseSVG, ok := h.svgStreams.acquire(id, r.Method == http.MethodGet)
 		if !ok {
 			return nil, nil
 		}
 		reader, size = bytes.NewReader(data), int64(len(data))
 		contentType = "image/svg+xml; charset=utf-8"
-		svgStreamID = id
+		svgRelease = releaseSVG
 	} else if strings.HasPrefix(r.URL.Path, "/__native/data/") {
 		var err error
 		reader, size, close, err = h.files.resource(strings.TrimPrefix(r.URL.Path, "/__native/data/"))
@@ -819,49 +1582,23 @@ func (h *Host) resource(r *http.Request) (*guigo.Resource, error) {
 	headers.Set("X-OFDGo-Build-Version", build.Version)
 	start, length, status := int64(0), size, http.StatusOK
 	if value := r.Header.Get("Range"); value != "" && r.Method == http.MethodGet {
-		if !strings.HasPrefix(value, "bytes=") || strings.Contains(value, ",") {
-			return nil, nil
-		}
-		first, last, ok := strings.Cut(strings.TrimPrefix(value, "bytes="), "-")
+		rangeStart, rangeLength, ok := parseByteRange(value, size)
 		if !ok {
 			return nil, nil
 		}
-		if first == "" {
-			count, err := strconv.ParseInt(last, 10, 64)
-			if err != nil || count <= 0 {
-				return nil, nil
-			}
-			length = min(count, size)
-			start = size - length
-		} else {
-			var err error
-			start, err = strconv.ParseInt(first, 10, 64)
-			if err != nil || start < 0 || start >= size {
-				return nil, nil
-			}
-			end := size - 1
-			if last != "" {
-				end, err = strconv.ParseInt(last, 10, 64)
-				if err != nil || end < start {
-					return nil, nil
-				}
-			}
-			length = min(end, size-1) - start + 1
-		}
-		if length == 0 {
-			return nil, nil
-		}
+		start, length = rangeStart, rangeLength
 		status = http.StatusPartialContent
 		headers.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, size))
 		headers.Set("Content-Length", strconv.FormatInt(length, 10))
 	}
-	if svgStreamID != "" && r.Method == http.MethodGet && start+length >= size {
-		var once sync.Once
-		id := svgStreamID
+	if svgRelease != nil {
+		remove := r.Method == http.MethodGet && start+length >= size
+		releaseSVG := svgRelease
 		close = func() error {
-			once.Do(func() { h.svgStreams.delete(id) })
+			releaseSVG(remove)
 			return nil
 		}
+		svgRelease = nil
 	}
 	if r.Method == http.MethodHead {
 		length = 0
@@ -873,7 +1610,7 @@ func (h *Host) resource(r *http.Request) (*guigo.Resource, error) {
 // serveMemoryResource 通过HTTP回退通道直读文档只读内存资源或一次性大SVG流
 // 入参: w 响应写入器, r HTTP请求
 // 返回: bool 是否已由内存资源通道处理
-func (h *Host) serveMemoryResource(w http.ResponseWriter, r *http.Request) bool {
+func (h *host) serveMemoryResource(w http.ResponseWriter, r *http.Request) bool {
 	if strings.HasPrefix(r.URL.Path, "/__native/resource/") {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -915,13 +1652,14 @@ func (h *Host) serveMemoryResource(w http.ResponseWriter, r *http.Request) bool 
 			http.NotFound(w, r)
 			return true
 		}
-		data, ok := h.svgStreams.acquire(id, r.Method == http.MethodGet)
+		data, releaseSVG, ok := h.svgStreams.acquire(id, r.Method == http.MethodGet)
 		if !ok {
 			http.NotFound(w, r)
 			return true
 		}
-		if r.Method == http.MethodGet {
-			defer h.svgStreams.delete(id)
+		if releaseSVG != nil {
+			remove := shouldDeleteSVGStream(r, int64(len(data)))
+			defer releaseSVG(remove)
 		}
 		w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -934,14 +1672,14 @@ func (h *Host) serveMemoryResource(w http.ResponseWriter, r *http.Request) bool 
 
 // emit 发送当前窗口事件
 // 入参: name 事件名称, value 事件数据
-func (h *Host) emit(name string, value any) {
+func (h *host) emit(name string, value any) {
 	_ = h.emitError(name, value)
 }
 
 // emitError 发送当前窗口事件并返回投递错误
 // 入参: name 事件名称, value 事件数据
 // 返回: error 投递错误
-func (h *Host) emitError(name string, value any) error {
+func (h *host) emitError(name string, value any) error {
 	h.mu.Lock()
 	w := h.window
 	h.mu.Unlock()
@@ -953,14 +1691,14 @@ func (h *Host) emitError(name string, value any) error {
 
 // openPaths 将操作系统提供的文件登记后交给界面
 // 入参: names 文件路径列表
-func (h *Host) openPaths(names []string) {
+func (h *host) openPaths(names []string) {
 	_, _ = h.sendPaths(names, "ofdgo.files")
 }
 
 // sendPaths 将文件登记后发送到指定界面入口
 // 入参: names 文件路径列表, event 界面事件名称
 // 返回: bool 是否实际发射事件, error 投递错误
-func (h *Host) sendPaths(names []string, event string) (bool, error) {
+func (h *host) sendPaths(names []string, event string) (bool, error) {
 	files := make([]any, 0, len(names))
 	for _, name := range names {
 		file, err := h.files.addDrop(name)
@@ -986,7 +1724,7 @@ func (h *Host) sendPaths(names []string, event string) (bool, error) {
 // receiveLaunch 接收已有进程转交的文件及激活请求
 // 入参: ctx 请求上下文, data 文件路径消息
 // 返回: error 接收错误
-func (h *Host) receiveLaunch(ctx context.Context, data []byte) error {
+func (h *host) receiveLaunch(ctx context.Context, data []byte) error {
 	var paths []string
 	if err := json.Unmarshal(data, &paths); err != nil {
 		return err
@@ -1011,7 +1749,7 @@ func (h *Host) receiveLaunch(ctx context.Context, data []byte) error {
 
 // flushLaunch 在界面就绪后按接收顺序投递外部打开请求，调用方持有launchMu
 // 返回: error 投递错误
-func (h *Host) flushLaunch() error {
+func (h *host) flushLaunch() error {
 	h.mu.Lock()
 	ready, window := h.frontendReady, h.window
 	h.mu.Unlock()
@@ -1041,7 +1779,7 @@ func (h *Host) flushLaunch() error {
 // call 执行宿主协议并保留业务结果结构
 // 入参: ctx 调用上下文, name 方法名称, value 已解码参数
 // 返回: any 调用结果, error 执行错误
-func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
+func (h *host) call(ctx context.Context, name string, value any) (any, error) {
 	args, ok := value.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("参数无效")
@@ -1258,6 +1996,13 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 					}
 				}
 			}
+			if callName == "ofdgoRenderPage" && len(values) > 4 {
+				values = append([]any(nil), values...)
+				values[4] = filterKnownResources(h.docResources, id, docToken, values[4])
+				if len(values) > 5 {
+					values[5] = filterKnownResources(h.docResources, id, docToken, values[5])
+				}
+			}
 		}
 		finishCall := h.files.beginHolderCall(id, callName, values)
 		defer finishCall(false)
@@ -1276,6 +2021,8 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 			if h.svgStreams != nil {
 				h.svgStreams.clearEngine(id)
 			}
+		} else if succeeded && loadPDFCompleted(callName, result) && h.svgStreams != nil {
+			h.svgStreams.clearEngine(id)
 		}
 		pageCtx := guigo.PageContext(ctx)
 		var encoded any
@@ -1377,42 +2124,80 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 				}
 				result = append(result, value)
 			}
-			return result, nil
+			return guigo.Result{Value: result, Discard: func() { h.files.discardEntries(registered) }}, nil
 		}
 		if name == "save" {
 			file, err := window.SaveFile(options)
 			if err != nil {
 				return nil, dialogError(err)
 			}
-			return h.files.save(file)
+			handle, err := h.files.save(file)
+			if err != nil {
+				return nil, err
+			}
+			id := handleID(handle)
+			return guigo.Result{Value: handle, Discard: func() { h.files.release(id) }}, nil
 		}
 		file, err := window.OpenDirectory(options)
 		if err != nil {
 			return nil, dialogError(err)
 		}
-		return h.files.add(file, true, false)
+		handle, err := h.files.add(file, true, false)
+		if err != nil {
+			return nil, err
+		}
+		id := handleID(handle)
+		return guigo.Result{Value: handle, Discard: func() { h.files.release(id) }}, nil
 	case "temp.directory":
-		return h.files.tempDirectory()
+		dir, err := h.files.tempDirectory()
+		if err != nil {
+			return nil, err
+		}
+		id := handleID(dir)
+		return guigo.Result{Value: dir, Discard: func() { _ = h.files.removeTempDirectory(id) }}, nil
 	case "temp.remove":
 		return nil, h.files.removeTempDirectory(text("id"))
 	case "file":
-		return h.files.file(text("handle"))
+		handle := text("handle")
+		value, err := h.files.file(handle)
+		if err != nil {
+			return nil, err
+		}
+		if fileID, ok := value["nativeFile"].(string); ok && fileID != "" && fileID != handle {
+			return guigo.Result{Value: value, Discard: func() { h.files.release(fileID) }}, nil
+		}
+		return value, nil
 	case "release":
+		if svgURL := text("svgUrl"); svgURL != "" && h.svgStreams != nil {
+			h.svgStreams.deleteByURL(svgURL)
+		}
 		id := text("file")
 		if id == "" {
 			id = text("handle")
 		}
-		h.files.release(id)
+		if id != "" {
+			h.files.release(id)
+		}
 		return nil, nil
 	case "drop.release":
 		h.files.discardDrop(text("file"))
 		return nil, nil
 	case "child":
-		value, err := h.files.child(text("handle"), text("name"), flag("directory"), flag("create"))
+		parentID, childName, isDir, allowCreate := text("handle"), text("name"), flag("directory"), flag("create")
+		value, registered, created, err := h.files.child(parentID, childName, isDir, allowCreate)
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, &guigo.BridgeError{Name: "NotFoundError", Message: err.Error()}
 		}
-		return value, err
+		if err != nil {
+			return nil, err
+		}
+		if !registered {
+			return value, nil
+		}
+		childID := handleID(value)
+		return guigo.Result{Value: value, Discard: func() {
+			h.files.discardChild(childID, created)
+		}}, nil
 	case "remove":
 		return nil, h.files.remove(text("handle"), text("name"), flag("recursive"))
 	case "write.begin":
@@ -1420,7 +2205,7 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"writer": writer.id}, nil
+		return guigo.Result{Value: map[string]any{"writer": writer.id}, Discard: func() { _ = writer.Abort() }}, nil
 	case "write.data", "write.commit", "write.abort":
 		id := text("writer")
 		h.files.mu.Lock()
@@ -1450,7 +2235,7 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 		return nil, err
 	case "fonts":
 		h.fontOnce.Do(h.readFonts)
-		return h.fonts, h.fontError
+		return h.fonts, nil
 	case "title":
 		h.mu.Lock()
 		window := h.window
@@ -1479,7 +2264,16 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 			h.mu.Lock()
 			h.closeAllowed = true
 			h.mu.Unlock()
-			return true, window.Close()
+			if err := window.Close(); err != nil {
+				if !errors.Is(err, guigo.ErrClosed) {
+					h.launchClosed = false
+					h.mu.Lock()
+					h.closeAllowed = false
+					h.mu.Unlock()
+				}
+				return false, err
+			}
+			return true, nil
 		}
 		values, ok := args["regions"].([]any)
 		if !ok {
@@ -1522,7 +2316,7 @@ func (h *Host) call(ctx context.Context, name string, value any) (any, error) {
 // encodeRenderPage 对页面渲染结果执行零拷贝编码，图片与字体直连只读内存池，大SVG转为一次性自动释放流
 // 入参: ctx 页面上下文, engineID 会话标识, docToken 文档资源令牌, result 原生渲染结果
 // 返回: any 零拷贝编码后的渲染响应
-func (h *Host) encodeRenderPage(ctx context.Context, engineID, docToken string, result map[string]any) any {
+func (h *host) encodeRenderPage(ctx context.Context, engineID, docToken string, result map[string]any) any {
 	data, ok := result["data"].(map[string]any)
 	if !ok {
 		return h.encode(ctx, result)
@@ -1533,15 +2327,19 @@ func (h *Host) encodeRenderPage(ctx context.Context, engineID, docToken string, 
 		case "images":
 			out[key] = h.encodeRenderImages(ctx, engineID, docToken, item)
 		case "fonts":
-			out[key] = h.encodeRenderFonts(engineID, docToken, item)
+			out[key] = h.encodeRenderFonts(ctx, engineID, docToken, item)
 		case "text":
 			out[key] = rawJSONValue(item, "{}")
 		case "annotations":
 			out[key] = rawJSONValue(item, "[]")
 		case "svg":
 			if svgStr, isStr := item.(string); isStr && len(svgStr) > inlineSVGMaxBytes && h.svgStreams != nil {
-				out["svgUrl"] = h.svgStreams.put(engineID, []byte(svgStr))
-				out["svgBytes"] = len(svgStr)
+				if svgURL := h.svgStreams.put(engineID, []byte(svgStr)); svgURL != "" {
+					out["svgUrl"] = svgURL
+					out["svgBytes"] = len(svgStr)
+				} else {
+					out[key] = item
+				}
 			} else {
 				out[key] = item
 			}
@@ -1563,7 +2361,7 @@ func (h *Host) encodeRenderPage(ctx context.Context, engineID, docToken string, 
 // encodeRenderImages 将渲染结果中的图片字节登记到只读文档内存池并返回直读地址
 // 入参: ctx 页面上下文, engineID 会话标识, docToken 文档资源令牌, value 图片列表
 // 返回: any 零拷贝图片描述列表
-func (h *Host) encodeRenderImages(ctx context.Context, engineID, docToken string, value any) any {
+func (h *host) encodeRenderImages(ctx context.Context, engineID, docToken string, value any) any {
 	items, ok := value.([]any)
 	if !ok {
 		return value
@@ -1600,9 +2398,9 @@ func (h *Host) encodeRenderImages(ctx context.Context, engineID, docToken string
 }
 
 // encodeRenderFonts 将渲染结果中的字体字节登记到只读文档内存池并返回直读地址
-// 入参: engineID 会话标识, docToken 文档资源令牌, value 字体列表
+// 入参: ctx 页面上下文, engineID 会话标识, docToken 文档资源令牌, value 字体列表
 // 返回: any 零拷贝字体描述列表
-func (h *Host) encodeRenderFonts(engineID, docToken string, value any) any {
+func (h *host) encodeRenderFonts(ctx context.Context, engineID, docToken string, value any) any {
 	items, ok := value.([]any)
 	if !ok {
 		return value
@@ -1626,11 +2424,16 @@ func (h *Host) encodeRenderFonts(engineID, docToken string, value any) any {
 		if len(raw) == 0 {
 			raw, _ = fontMap["bytes"].([]byte)
 		}
-		if len(raw) > 0 && h.docResources != nil {
-			if resURL := h.docResources.put(engineID, docToken, name, fontMIME(raw), raw); resURL != "" {
-				entry["url"] = resURL
-				entry["size"] = len(raw)
+		if len(raw) > 0 {
+			if h.docResources != nil {
+				if resURL := h.docResources.put(engineID, docToken, name, fontMIME(raw), raw); resURL != "" {
+					entry["url"] = resURL
+					entry["size"] = len(raw)
+					out[i] = entry
+					continue
+				}
 			}
+			entry["data"] = h.encode(ctx, raw)
 		} else if h.docResources != nil {
 			if resURL, size, hit := h.docResources.lookup(engineID, docToken, name); hit {
 				entry["url"] = resURL
@@ -1645,7 +2448,7 @@ func (h *Host) encodeRenderFonts(engineID, docToken string, value any) any {
 // encodeSVGFontData 将按需请求的字体字节登记到只读文档内存池并返回直读地址
 // 入参: ctx 页面上下文, engineID 会话标识, docToken 文档资源令牌, args 请求参数, result 原生响应
 // 返回: any 编码后的字体响应
-func (h *Host) encodeSVGFontData(ctx context.Context, engineID, docToken string, args []any, result map[string]any) any {
+func (h *host) encodeSVGFontData(ctx context.Context, engineID, docToken string, args []any, result map[string]any) any {
 	data, ok := result["data"].(map[string]any)
 	if !ok || h.docResources == nil || len(args) == 0 {
 		return h.encode(ctx, result)
@@ -1657,7 +2460,7 @@ func (h *Host) encodeSVGFontData(ctx context.Context, engineID, docToken string,
 	}
 	resURL := h.docResources.put(engineID, docToken, fontName, fontMIME(raw), raw)
 	if resURL == "" {
-		return h.encode(ctx, result)
+		return map[string]any{"ok": true, "data": map[string]any{"bytes": h.encode(ctx, raw)}}
 	}
 	return map[string]any{"ok": true, "data": map[string]any{"url": resURL, "size": len(raw)}}
 }
@@ -1665,7 +2468,7 @@ func (h *Host) encodeSVGFontData(ctx context.Context, engineID, docToken string,
 // encode 将二进制输出登记为页面资源
 // 入参: ctx 页面上下文, value 原生调用结果
 // 返回: any 包含资源描述的调用结果
-func (h *Host) encode(ctx context.Context, value any) any {
+func (h *host) encode(ctx context.Context, value any) any {
 	switch v := value.(type) {
 	case []byte:
 		return h.files.bytes(ctx, v)
@@ -1688,11 +2491,11 @@ func (h *Host) encode(ctx context.Context, value any) any {
 
 // discard 释放页面未接收的临时结果及大SVG自动释放流
 // 入参: value 包含资源描述的调用结果
-func (h *Host) discard(value any) {
+func (h *host) discard(value any) {
 	switch v := value.(type) {
 	case map[string]any:
-		if svgURL, ok := v["svgUrl"].(string); ok && strings.HasPrefix(svgURL, "/__native/svg/") && h.svgStreams != nil {
-			h.svgStreams.delete(strings.TrimPrefix(svgURL, "/__native/svg/"))
+		if svgURL, ok := v["svgUrl"].(string); ok && h.svgStreams != nil {
+			h.svgStreams.deleteByURL(svgURL)
 		}
 		if id, ok := v["nativeFile"].(string); ok && v["temporary"] == true {
 			h.files.release(id)
@@ -1711,7 +2514,7 @@ func (h *Host) discard(value any) {
 // openWriter 将授权目标转换为原生事务写入器
 // 入参: ctx 调用上下文, value 目标句柄, name 输出文件名
 // 返回: io.WriteCloser 事务写入器, error 创建错误
-func (h *Host) openWriter(ctx context.Context, value any, name string) (io.WriteCloser, error) {
+func (h *host) openWriter(ctx context.Context, value any, name string) (io.WriteCloser, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1723,7 +2526,7 @@ func (h *Host) openWriter(ctx context.Context, value any, name string) (io.Write
 	if directory {
 		parts := strings.Split(strings.ReplaceAll(name, "\\", "/"), "/")
 		for i, part := range parts {
-			child, err := h.files.child(id, part, i < len(parts)-1, true)
+			child, _, _, err := h.files.child(id, part, i < len(parts)-1, true)
 			if err != nil {
 				return nil, err
 			}
@@ -1742,7 +2545,7 @@ func (h *Host) openWriter(ctx context.Context, value any, name string) (io.Write
 // reserveOutput 为一次转换预留独立输出文件或目录
 // 入参: ctx 调用上下文, request 输出请求
 // 返回: webui.NativeOutputTarget 预留目标, error 创建错误
-func (h *Host) reserveOutput(ctx context.Context, request webui.NativeOutputRequest) (webui.NativeOutputTarget, error) {
+func (h *host) reserveOutput(ctx context.Context, request webui.NativeOutputRequest) (webui.NativeOutputTarget, error) {
 	if err := ctx.Err(); err != nil {
 		return webui.NativeOutputTarget{}, err
 	}
@@ -1754,15 +2557,15 @@ func (h *Host) reserveOutput(ctx context.Context, request webui.NativeOutputRequ
 // cleanupOutput 回滚本次转换创建的输出入口
 // 入参: ctx 调用上下文, target 预留目标
 // 返回: error 清理错误
-func (h *Host) cleanupOutput(ctx context.Context, target webui.NativeOutputTarget) error {
+func (h *host) cleanupOutput(ctx context.Context, target webui.NativeOutputTarget) error {
 	return h.files.remove(handleID(target.Destination), target.Name, true)
 }
 
 // readFonts 建立系统字体目录并登记按需读取资源
-func (h *Host) readFonts() {
+func (h *host) readFonts() {
 	platform, language := fontNameLanguage()
 	priorities := make(map[string]int)
-	for _, name := range ofdgo.FontSystemFiles() {
+	for _, name := range basefont.SystemFiles() {
 		f, err := os.Open(name)
 		if err != nil {
 			continue
@@ -1806,7 +2609,7 @@ func (h *Host) readFonts() {
 // loadFont 按转换请求读取并缓存单个系统字体
 // 入参: ctx 调用上下文, name 字体别名对应的文件名
 // 返回: []byte 字体数据, error 读取错误
-func (h *Host) loadFont(ctx context.Context, name string) ([]byte, error) {
+func (h *host) loadFont(ctx context.Context, name string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1835,7 +2638,7 @@ func (h *Host) loadFont(ctx context.Context, name string) ([]byte, error) {
 // closeEngine 取消会话调用并释放文档及文件引用
 // 入参: id 会话标识
 // 返回: error 关闭错误
-func (h *Host) closeEngine(id string) error {
+func (h *host) closeEngine(id string) error {
 	var results []any
 	h.mu.Lock()
 	if closing := h.closingEngines[id]; closing != nil {
@@ -1894,7 +2697,7 @@ func (h *Host) closeEngine(id string) error {
 }
 
 // close 取消任务并释放当前窗口持有的会话
-func (h *Host) close() {
+func (h *host) close() {
 	h.launchMu.Lock()
 	h.launchClosed = true
 	h.launchMu.Unlock()
@@ -1924,305 +2727,10 @@ func (h *Host) close() {
 		h.docResources.clearAll()
 	}
 	if h.svgStreams != nil {
-		h.svgStreams.clearAll()
+		h.svgStreams.close()
 	}
 	if h.resources != nil {
 		h.resources.Clear()
 	}
 	_ = h.files.close()
-}
-
-// rotatesDocResources 判断操作成功时是否切换、重建或关闭当前文档会话
-// 入参: name 操作名称
-// 返回: bool 是否需要轮换文档资源令牌并清空旧内存池
-func rotatesDocResources(name string) bool {
-	switch name {
-	case "ofdgoOpen", "ofdgoOpenPDF", "ofdgoCreateDocument", "ofdgoImportImages", "ofdgoSelectDocument", "ofdgoSelectDocumentVersion", "ofdgoClose":
-		return true
-	}
-	return false
-}
-
-// fontMIME 根据字体文件魔数推断响应媒体类型
-// 入参: data 字体字节数据
-// 返回: string 媒体类型
-func fontMIME(data []byte) string {
-	if len(data) >= 4 {
-		switch string(data[:4]) {
-		case "wOF2":
-			return "font/woff2"
-		case "wOFF":
-			return "font/woff"
-		case "OTTO":
-			return "font/otf"
-		}
-	}
-	return "font/ttf"
-}
-
-// rawJSONValue 将已编码的JSON字符串直接转为原始JSON片段，避免发往WebView时二次转义
-// 入参: value 原始字段值, fallback 空值时的JSON回退片段
-// 返回: any 原始JSON片段或原对象
-func rawJSONValue(value any, fallback string) any {
-	text, ok := value.(string)
-	if !ok {
-		if value == nil {
-			return json.RawMessage(fallback)
-		}
-		return value
-	}
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" || trimmed == "null" {
-		return json.RawMessage(fallback)
-	}
-	return json.RawMessage(trimmed)
-}
-
-// associationOptions 提供Windows文件关联的固定应用配置
-// 返回: guigo.AssociationOptions 应用配置, error 路径错误
-func associationOptions() (guigo.AssociationOptions, error) {
-	executable, err := os.Executable()
-	if err != nil {
-		return guigo.AssociationOptions{}, err
-	}
-	return guigo.AssociationOptions{
-		AppID: "OFDGo", Name: "OFDGo", Description: "OFD、PDF阅读与编辑工具",
-		Executable: executable, Arguments: []string{"--"},
-		Types: []guigo.FileAssociation{
-			{ID: "OFD", Name: "OFD文档", Extensions: []string{".ofd"}},
-			{ID: "PDF", Name: "PDF文档", Extensions: []string{".pdf"}},
-		},
-	}, nil
-}
-
-// queryAssociations 分别查询两个范围，不因其中一个失败而隐藏另一个
-// 返回: any 两个范围的状态, error 配置错误
-func queryAssociations() (any, error) {
-	options, err := associationOptions()
-	if err != nil {
-		return nil, err
-	}
-	result := make(map[string]associationState)
-	for _, scope := range []guigo.AssociationScope{guigo.AssociationUser, guigo.AssociationMachine} {
-		state, err := guigo.QueryFileAssociations(options, scope)
-		row := associationState{AssociationStatus: state}
-		if err != nil {
-			row.Error = associationError(err).Error()
-		}
-		result[string(scope)] = row
-	}
-	return result, nil
-}
-
-// changeAssociations 执行固定应用配置的单范围注册或撤销
-// 入参: scope 作用范围, remove 是否撤销
-// 返回: error 操作错误
-func changeAssociations(scope string, remove bool) error {
-	options, err := associationOptions()
-	if err != nil {
-		return err
-	}
-	if remove {
-		err = guigo.UnregisterFileAssociations(options, guigo.AssociationScope(scope))
-	} else {
-		err = guigo.RegisterFileAssociations(options, guigo.AssociationScope(scope))
-	}
-	return associationError(err)
-}
-
-// associationError 区分未提升权限和实际访问失败，提供简短提示
-// 入参: err 操作错误
-// 返回: error 用户提示或原始错误
-func associationError(err error) error {
-	if errors.Is(err, guigo.ErrAssociationElevationRequired) {
-		return errors.New("需管理员权限")
-	}
-	if errors.Is(err, os.ErrPermission) {
-		return errors.New("无权访问")
-	}
-	return err
-}
-
-// applicationUpdate 比较官网与当前构建版本的时间戳前缀，仅远程更新时返回true
-// 入参: ctx 请求上下文, version 当前版本, endpoint 官网地址
-// 返回: bool 是否有更新, error 检查错误
-func applicationUpdate(ctx context.Context, version, endpoint string) (bool, error) {
-	current, ok := versionTimestamp(version)
-	if !ok {
-		return false, nil
-	}
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodHead, endpoint, nil)
-	if err != nil {
-		return false, err
-	}
-	request.Header.Set("Cache-Control", "no-store")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return false, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("检查更新失败: %s", response.Status)
-	}
-	latest := strings.TrimSpace(response.Header.Get("X-OFDGo-Build-Version"))
-	if latest == "" {
-		return false, errors.New("缺少构建版本")
-	}
-	remote, ok := versionTimestamp(latest)
-	if !ok {
-		return false, errors.New("构建版本格式无效")
-	}
-	return remote > current, nil
-}
-
-// versionTimestamp 提取构建版本中的Unix时间戳前缀
-// 入参: version 构建版本字符串
-// 返回: int64 时间戳, bool 是否解析成功
-func versionTimestamp(version string) (int64, bool) {
-	version = strings.TrimSpace(version)
-	if version == "" {
-		return 0, false
-	}
-	prefix, _, _ := strings.Cut(version, "-")
-	timestamp, err := strconv.ParseInt(prefix, 10, 64)
-	if err != nil || timestamp <= 0 {
-		return 0, false
-	}
-	return timestamp, true
-}
-
-// handleID 从宿主句柄映射中提取文件或目录授权标识
-// 入参: value 句柄参数
-// 返回: string 授权标识
-func handleID(value any) string {
-	handle, _ := value.(map[string]any)
-	id, _ := handle["nativeHandle"].(string)
-	return id
-}
-
-// dialogFilters 将共用界面的文件类型映射到系统对话框
-// 入参: args 对话框参数
-// 返回: []guigo.FileFilter 文件类型列表
-func dialogFilters(args map[string]any) []guigo.FileFilter {
-	patterns := func(values []string) string {
-		var result []string
-		seen := make(map[string]bool)
-		for _, value := range values {
-			value = strings.ToLower(strings.TrimSpace(value))
-			if !strings.HasPrefix(value, ".") || strings.ContainsAny(value, "/\\;*?\x00") || seen[value] {
-				continue
-			}
-			seen[value] = true
-			result = append(result, "*"+value)
-		}
-		return strings.Join(result, ";")
-	}
-	var filters []guigo.FileFilter
-	if accept, ok := args["accept"].(string); ok {
-		var extensions []string
-		for _, value := range strings.Split(accept, ",") {
-			value = strings.ToLower(strings.TrimSpace(value))
-			if strings.HasPrefix(value, ".") {
-				extensions = append(extensions, value)
-				continue
-			}
-			switch value {
-			case "image/*":
-				extensions = append(extensions, ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".gif", ".webp", ".jb2", ".jbig2")
-			case "font/*":
-				extensions = append(extensions, ".ttf", ".otf", ".ttc", ".otc")
-			default:
-				values, err := mime.ExtensionsByType(value)
-				if err == nil {
-					sort.Strings(values)
-					extensions = append(extensions, values...)
-				}
-			}
-		}
-		if pattern := patterns(extensions); pattern != "" {
-			filters = append(filters, guigo.FileFilter{Name: "支持的文件", Pattern: pattern})
-		}
-	}
-	types, _ := args["types"].([]any)
-	for _, item := range types {
-		value, _ := item.(map[string]any)
-		accept, _ := value["accept"].(map[string]any)
-		var extensions []string
-		var names []string
-		for name := range accept {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			values := accept[name]
-			list, _ := values.([]any)
-			for _, extension := range list {
-				if text, ok := extension.(string); ok {
-					extensions = append(extensions, text)
-				}
-			}
-		}
-		if pattern := patterns(extensions); pattern != "" {
-			name, _ := value["description"].(string)
-			if name == "" {
-				name = pattern
-			}
-			filters = append(filters, guigo.FileFilter{Name: name, Pattern: pattern})
-		}
-	}
-	return append(filters, guigo.FileFilter{Name: "所有文件", Pattern: "*.*"})
-}
-
-// dialogError 将用户取消与业务错误区分
-// 入参: err 对话框错误
-// 返回: error 页面可识别的错误
-func dialogError(err error) error {
-	if errors.Is(err, guigo.ErrCanceled) {
-		return &guigo.BridgeError{Name: "AbortError", Message: "已取消"}
-	}
-	return err
-}
-
-// windowOptions 创建原生窗口配置
-// 入参: dataDir 自定义浏览器数据目录
-// 返回: guigo.Options 窗口配置, error 配置错误
-func windowOptions(dataDir string) (guigo.Options, error) {
-	appID := "ofdgo"
-	cacheName := appID
-	if runtime.GOOS == "windows" {
-		appID = ""
-		cacheName = "OFDGo"
-	}
-	if dataDir == "" {
-		cache, err := os.UserCacheDir()
-		if err != nil {
-			return guigo.Options{}, err
-		}
-		dataDir = filepath.Join(cache, cacheName)
-	}
-	dataDir, err := filepath.Abs(dataDir)
-	if err != nil {
-		return guigo.Options{}, err
-	}
-	icon, err := webuiassets.NativeFS.ReadFile("ofdgo.png")
-	if err != nil {
-		return guigo.Options{}, err
-	}
-	return guigo.Options{
-		AppID:          appID,
-		Title:          "OFDGo - OFD编辑器",
-		TitleBar:       guigo.TitleBarContent,
-		TitleBarColors: themeColors(false),
-		WindowMaterial: guigo.WindowSolid,
-		Icon:           icon,
-		Width:          1440,
-		Height:         900,
-		MinWidth:       360,
-		MinHeight:      240,
-		Center:         true,
-		Maximized:      true,
-		UserDataDir:    dataDir,
-	}, nil
 }

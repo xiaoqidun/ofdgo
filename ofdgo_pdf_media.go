@@ -63,6 +63,13 @@ type pdfAttachmentKey struct {
 	digest [32]byte
 }
 
+// pdfMoviePlaybackSupported 判断OFD视频动作能否保持播放内容、声音及控制方式
+// 入参: movie 视频信息, parameters 播放参数
+// 返回: bool 是否可直接转换，不含播放窗口差异
+func pdfMoviePlaybackSupported(movie pdfgo.Movie, parameters pdfgo.MovieActivation) bool {
+	return (parameters.Start == nil || parameters.Start.Value == 0) && parameters.Duration == nil && parameters.Rate == 1 && parameters.Volume == 1 && !parameters.ShowControls && !parameters.Synchronous && parameters.Mode == "Once" && movie.Rotate == 0
+}
+
 // mediaInstance 为播放目标分配独立标识，同一目标的动作继续共用控制状态
 // 入参: id 已注册的媒体资源, target 目标注解, page 所属页面索引
 // 返回: string 独立资源标识, error 资源复制或取消错误
@@ -407,13 +414,6 @@ func (p *pdfImporter) movieAnnotation(ctx context.Context, page *pdfgo.Page, ann
 		return err
 	}
 	return p.appearanceAnnotation(ctx, page, annotation, Action{Event: "CLICK", Movie: &Movie{ResourceID: id, Operator: "Play"}})
-}
-
-// pdfMoviePlaybackSupported 判断OFD视频动作能否保持播放内容、声音及控制方式
-// 入参: movie 视频信息, parameters 播放参数
-// 返回: bool 是否可直接转换，不含播放窗口差异
-func pdfMoviePlaybackSupported(movie pdfgo.Movie, parameters pdfgo.MovieActivation) bool {
-	return (parameters.Start == nil || parameters.Start.Value == 0) && parameters.Duration == nil && parameters.Rate == 1 && parameters.Volume == 1 && !parameters.ShowControls && !parameters.Synchronous && parameters.Mode == "Once" && movie.Rotate == 0
 }
 
 // movieLinkAction 转换当前页视频操作，不将指定播放区间或速度改为完整默认播放

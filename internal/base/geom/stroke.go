@@ -23,6 +23,13 @@ import (
 // UnsupportedError 表示当前几何实现无法展开的描边形态
 type UnsupportedError string
 
+// geometryPolyline 保存展开后的子路径，独立记录闭合状态
+type geometryPolyline struct {
+	points    []Point
+	closed    bool
+	direction Point
+}
+
 // Error 返回不支持的描边原因
 // 返回: string 错误信息
 func (err UnsupportedError) Error() string {
@@ -94,13 +101,6 @@ func (p Path) Stroke(options StrokeOptions) (Path, error) {
 		return nil, err
 	}
 	return result, nil
-}
-
-// geometryPolyline 保存展开后的子路径，独立记录闭合状态
-type geometryPolyline struct {
-	points    []Point
-	closed    bool
-	direction Point
 }
 
 // dash 按子路径重置相位并合并跨闭合接缝的连续虚线

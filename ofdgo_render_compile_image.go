@@ -22,9 +22,27 @@ import (
 	"math"
 	"slices"
 
-	basegeom "github.com/xiaoqidun/ofdgo/internal/base/geom"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
+
+// imageBorderObject 共用图像圆角边框的标准路径与样式
+// 入参: object 图像对象, box 物理范围
+// 返回: PathObject 边框
+func imageBorderObject(object ImageObject, box Box) PathObject {
+	border := object.Border
+	width := defaultPathLineWidth
+	if border.LineWidth != nil {
+		width = *border.LineWidth
+	}
+	w, h := box.W, box.H
+	data := fmt.Sprintf("M 0 0 L %g 0 L %g %g L 0 %g C", w, w, h, h)
+	rx, ry := min(border.HorizonalCornerRadius, w/2), min(border.VerticalCornerRadius, h/2)
+	if rx > 0 && ry > 0 {
+		data = fmt.Sprintf("M 0 %g A %g %g 0 0 1 %g 0 L %g 0 A %g %g 0 0 1 %g %g L %g %g A %g %g 0 0 1 %g %g L %g %g A %g %g 0 0 1 0 %g C",
+			ry, rx, ry, rx, w-rx, rx, ry, w, ry, w, h-ry, rx, ry, w-rx, h, rx, h, rx, ry, h-ry)
+	}
+	return PathObject{Boundary: object.Boundary, LineWidth: width, DashOffset: &border.DashOffset, DashPattern: border.DashPattern, Alpha: object.Alpha, StrokeColor: border.BorderColor, AbbreviatedData: data}
+}
 
 // DrawStamp 保留签章图片和嵌套OFD的绘制顺序，不混入正文搜索
 // 入参: stamp 印章
@@ -67,7 +85,7 @@ func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) er
 		border.Alpha = nil
 	}
 	if c.measure {
-		path, err := c.geometry.Transform(GeometryPath(basegeom.Rectangle(Box{W: 1, H: 1})), matrix)
+		path, err := c.geometry.Transform(geometryRectangle(Box{W: 1, H: 1}), matrix)
 		if err != nil {
 			return err
 		}
@@ -102,7 +120,7 @@ func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) er
 		if err != nil {
 			return err
 		}
-		origin, _ := renderObjectMatrix(object.Boundary, IdentityMatrix, state)
+		origin, _ := renderObjectMatrix(object.Boundary, IdentityMatrix(), state)
 		border.Boundary = ""
 		return c.pathObject(border, RenderState{Parent: &origin, BoundaryInCTM: true, Clip: borderClip})
 	}
@@ -115,7 +133,7 @@ func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) er
 func (c *semanticCompiler) addImage(img image.Image, matrix Matrix, clip *GeometryPath) error {
 	command := RasterCommand{Image: img, Transform: RasterMatrix(matrix.Values())}
 	if clip != nil {
-		if box, ok := basegeom.RectangleBounds(basegeom.Path(*clip)); ok {
+		if box, ok := geometryRectangleBounds(*clip); ok {
 			bounds := img.Bounds()
 			visible := matrix.TransformBox(Box{X: float64(bounds.Min.X), Y: float64(bounds.Min.Y), W: float64(bounds.Dx()), H: float64(bounds.Dy())})
 			if box.X <= visible.X && box.Y <= visible.Y && visible.X+visible.W <= box.X+box.W && visible.Y+visible.H <= box.Y+box.H {
@@ -123,11 +141,11 @@ func (c *semanticCompiler) addImage(img image.Image, matrix Matrix, clip *Geomet
 			}
 		} else {
 			bounds := img.Bounds()
-			outline, err := GeometryPath(basegeom.Rectangle(Box{X: float64(bounds.Min.X), Y: float64(bounds.Min.Y), W: float64(bounds.Dx()), H: float64(bounds.Dy())})).Transform(matrix)
+			outline, err := geometryRectangle(Box{X: float64(bounds.Min.X), Y: float64(bounds.Min.Y), W: float64(bounds.Dx()), H: float64(bounds.Dy())}).Transform(matrix)
 			if err != nil {
 				return err
 			}
-			if basegeom.ConvexContains(basegeom.Path(*clip), basegeom.Path(outline)) {
+			if geometryConvexContains(*clip, outline) {
 				clip = nil
 			}
 		}
@@ -181,20 +199,20 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 		var clip GeometryPath
 		var segments []RasterSegment
 		if rasterPositive(clipBox.W) && rasterPositive(clipBox.H) {
-			clip = GeometryPath(basegeom.Rectangle(clipBox))
+			clip = geometryRectangle(clipBox)
 			segments, err = c.segments(clip)
 			if err != nil {
 				return err
 			}
 		}
 		renderer := c.renderer.childRenderer(reader)
-		renderer.TransparentBackground = true
+		renderer.transparentBackground = true
 		for _, reference := range document.Pages.Page {
 			content, err := reader.PageContentContext(ctx, reference)
 			if err != nil {
 				return err
 			}
-			page, err := renderer.CompilePage(content)
+			page, err := renderer.CompilePageContext(ctx, content)
 			if err != nil {
 				return err
 			}
@@ -242,14 +260,14 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 	if err != nil {
 		return err
 	}
-	return c.stampImage(img, stamp)
+	return c.stampImage(wrapEncodedImage(img), stamp)
 }
 
 // stampImage 按印章裁剪区域放置图像
 // 入参: img 印章图像, stamp 印章
 // 返回: error 编译错误
 func (c *semanticCompiler) stampImage(img image.Image, stamp Stamp) error {
-	pixels, err := baseimage.PixelDataContext(c.renderer.pageContext, img)
+	pixels, err := baseimage.PixelDataContext(c.renderer.pageContext, unwrapEncodedImage(img))
 	if err != nil {
 		return err
 	}
@@ -259,29 +277,10 @@ func (c *semanticCompiler) stampImage(img image.Image, stamp Stamp) error {
 	box := stamp.Box
 	var clip *GeometryPath
 	if stamp.Clip != nil {
-		path := GeometryPath(basegeom.Rectangle(Box{X: box.X + stamp.Clip.X, Y: box.Y + stamp.Clip.Y, W: stamp.Clip.W, H: stamp.Clip.H}))
+		path := geometryRectangle(Box{X: box.X + stamp.Clip.X, Y: box.Y + stamp.Clip.Y, W: stamp.Clip.W, H: stamp.Clip.H})
 		clip = &path
 	}
 	bounds := img.Bounds()
 	matrix := TranslationMatrix(box.X, box.Y).Multiply(Matrix{a: box.W / float64(bounds.Dx()), d: box.H / float64(bounds.Dy())}).Multiply(TranslationMatrix(-float64(bounds.Min.X), -float64(bounds.Min.Y)))
 	return c.addImage(img, matrix, clip)
-}
-
-// imageBorderObject 共用图像圆角边框的标准路径与样式
-// 入参: object 图像对象, box 物理范围
-// 返回: PathObject 边框
-func imageBorderObject(object ImageObject, box Box) PathObject {
-	border := object.Border
-	width := defaultPathLineWidth
-	if border.LineWidth != nil {
-		width = *border.LineWidth
-	}
-	w, h := box.W, box.H
-	data := fmt.Sprintf("M 0 0 L %g 0 L %g %g L 0 %g C", w, w, h, h)
-	rx, ry := min(border.HorizonalCornerRadius, w/2), min(border.VerticalCornerRadius, h/2)
-	if rx > 0 && ry > 0 {
-		data = fmt.Sprintf("M 0 %g A %g %g 0 0 1 %g 0 L %g 0 A %g %g 0 0 1 %g %g L %g %g A %g %g 0 0 1 %g %g L %g %g A %g %g 0 0 1 0 %g C",
-			ry, rx, ry, rx, w-rx, rx, ry, w, ry, w, h-ry, rx, ry, w-rx, h, rx, h, rx, ry, h-ry)
-	}
-	return PathObject{Boundary: object.Boundary, LineWidth: width, DashOffset: &border.DashOffset, DashPattern: border.DashPattern, Alpha: object.Alpha, StrokeColor: border.BorderColor, AbbreviatedData: data}
 }

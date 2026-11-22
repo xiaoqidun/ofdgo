@@ -25,6 +25,15 @@ import (
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 )
 
+// transformLineBox 变换起点及有符号端点位移
+// 入参: box 直线端点, matrix 坐标变换
+// 返回: Box 变换后的端点
+func transformLineBox(box Box, matrix Matrix) Box {
+	x, y := matrix.Transform(box.X, box.Y)
+	w, h := basegeom.Vector(basegeom.MatrixFromValues(matrix.Values()), box.W, box.H)
+	return Box{X: x, Y: y, W: w, H: h}
+}
+
 // DeleteCompositeObjects 删除内部成员，保留容器、未选对象及其他实例，一次撤销恢复全部
 // 入参: page 页面索引, path 父复合路径, indexes 成员序号
 // 返回: error 错误信息
@@ -245,7 +254,7 @@ func (e *Editor) CopyCompositeStyle(page int, path ObjectPath, indexes []int, so
 				if err != nil {
 					return err
 				}
-				style, err := copyEditorPathStyle(object.TextObject.pathStyle(), source.TextObject.pathStyle(), editorStrokeScale(source.TextObject.CTM)/member.StrokeScale)
+				style, err := copyEditorPathStyle(object.TextObject.pathStyle(), source.TextObject.pathStyle(), editorStrokeScale(source.TextObject.CTM)/safeStrokeScale(member.StrokeScale))
 				if err != nil {
 					return err
 				}
@@ -259,7 +268,7 @@ func (e *Editor) CopyCompositeStyle(page int, path ObjectPath, indexes []int, so
 				}
 			case "PathObject":
 				var err error
-				object.PathObject, err = copyEditorPathStyle(object.PathObject, source.PathObject, editorStrokeScale(source.PathObject.CTM)/member.StrokeScale)
+				object.PathObject, err = copyEditorPathStyle(object.PathObject, source.PathObject, editorStrokeScale(source.PathObject.CTM)/safeStrokeScale(member.StrokeScale))
 				if err != nil {
 					return err
 				}
@@ -397,15 +406,6 @@ func (m CompositeMember) shapeParent() (Matrix, bool) {
 	return m.Matrix.Multiply(inverse), ok
 }
 
-// transformLineBox 变换起点及有符号端点位移
-// 入参: box 直线端点, matrix 坐标变换
-// 返回: Box 变换后的端点
-func transformLineBox(box Box, matrix Matrix) Box {
-	x, y := matrix.Transform(box.X, box.Y)
-	w, h := basegeom.Vector(basegeom.MatrixFromValues(matrix.Values()), box.W, box.H)
-	return Box{X: x, Y: y, W: w, H: h}
-}
-
 // reshapeCompositeObject 按页面几何修改单个内部路径，可选修改箭头类型
 // 入参: page 页面索引, path 父路径, index 成员序号, kind 目标类型，空值保持原类型, box 页面几何, lineOnly 是否仅接受直线
 // 返回: error 错误信息
@@ -455,7 +455,11 @@ func (e *Editor) collectCompositeIDs(node *editorXML, ids map[string]string) err
 		if ids[id] != "" {
 			return fmt.Errorf("duplicate object ID %q", id)
 		}
-		ids[id] = e.nextID()
+		nextID, err := e.nextID()
+		if err != nil {
+			return err
+		}
+		ids[id] = nextID
 	}
 	for _, child := range node.children {
 		if err := e.collectCompositeIDs(child, ids); err != nil {

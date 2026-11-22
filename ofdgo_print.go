@@ -22,6 +22,116 @@ import (
 	"sync"
 )
 
+// 打印排版模式枚举
+const (
+	// PrintModeSingle 单页逐页打印
+	PrintModeSingle PrintMode = "single"
+	// PrintModeMultiple 多页合印
+	PrintModeMultiple PrintMode = "multiple"
+	// PrintModeBooklet 小册子骑马钉拼版
+	PrintModeBooklet PrintMode = "booklet"
+	// PrintModePoster 海报分块拼版
+	PrintModePoster PrintMode = "poster"
+)
+
+// 打印缩放方式枚举
+const (
+	// PrintScalingFit 缩放至贴合单元区域
+	PrintScalingFit PrintScaling = "fit"
+	// PrintScalingShrink 仅在超大时缩小至单元区域
+	PrintScalingShrink PrintScaling = "shrink"
+	// PrintScalingActual 按实际毫米尺寸输出
+	PrintScalingActual PrintScaling = "actual"
+	// PrintScalingCustom 按Scale自定义比例缩放
+	PrintScalingCustom PrintScaling = "custom"
+)
+
+// 打印双面模式枚举
+const (
+	// PrintDuplexSimplex 单面打印
+	PrintDuplexSimplex PrintDuplex = "simplex"
+	// PrintDuplexLongEdge 长边翻页双面打印
+	PrintDuplexLongEdge PrintDuplex = "longEdge"
+	// PrintDuplexShortEdge 短边翻页双面打印
+	PrintDuplexShortEdge PrintDuplex = "shortEdge"
+)
+
+// 打印源页奇偶过滤枚举
+const (
+	// PrintParityAll 打印全部选中页
+	PrintParityAll PrintParity = "all"
+	// PrintParityOdd 仅打印奇数页
+	PrintParityOdd PrintParity = "odd"
+	// PrintParityEven 仅打印偶数页
+	PrintParityEven PrintParity = "even"
+)
+
+// 打印纸面正反过滤枚举
+const (
+	// PrintSidesAll 输出正反全部纸面
+	PrintSidesAll PrintSides = "all"
+	// PrintSidesFront 仅输出正面
+	PrintSidesFront PrintSides = "front"
+	// PrintSidesBack 仅输出背面
+	PrintSidesBack PrintSides = "back"
+)
+
+// 多页合印排列顺序枚举
+const (
+	// PrintPageOrderHorizontal 横向从左到右逐行排列
+	PrintPageOrderHorizontal PrintPageOrder = "horizontal"
+	// PrintPageOrderHorizontalReverse 横向从右到左逐行排列
+	PrintPageOrderHorizontalReverse PrintPageOrder = "horizontalReverse"
+	// PrintPageOrderVertical 纵向从左到右逐列排列
+	PrintPageOrderVertical PrintPageOrder = "vertical"
+	// PrintPageOrderVerticalReverse 纵向从右到左逐列排列
+	PrintPageOrderVerticalReverse PrintPageOrder = "verticalReverse"
+)
+
+// 小册子装订边枚举
+const (
+	// PrintBindingLeft 左侧装订
+	PrintBindingLeft PrintBinding = "left"
+	// PrintBindingRight 右侧装订
+	PrintBindingRight PrintBinding = "right"
+)
+
+// 打印内容筛选枚举
+const (
+	// PrintContentsDocumentAndAnnotations 打印文档正文及全部注释
+	PrintContentsDocumentAndAnnotations PrintContents = "documentAndAnnotations"
+	// PrintContentsDocument 仅打印文档正文并保留表单域外观
+	PrintContentsDocument PrintContents = "document"
+	// PrintContentsAnnotations 仅打印非表单注释
+	PrintContentsAnnotations PrintContents = "annotations"
+	// PrintContentsForms 仅打印表单域外观
+	PrintContentsForms PrintContents = "forms"
+)
+
+// PrintMode 表示打印排版模式
+type PrintMode string
+
+// PrintScaling 表示打印缩放方式
+type PrintScaling string
+
+// PrintDuplex 表示打印双面翻页方式
+type PrintDuplex string
+
+// PrintParity 表示源页码奇偶过滤方式
+type PrintParity string
+
+// PrintSides 表示双面纸面正反过滤方式
+type PrintSides string
+
+// PrintPageOrder 表示多页合印的单元填充顺序
+type PrintPageOrder string
+
+// PrintBinding 表示小册子装订边位置
+type PrintBinding string
+
+// PrintContents 表示参与打印的文档及注释内容范围
+type PrintContents string
+
 // PrintOptions 设置内容排版，长度以毫米为单位，比例1表示100%
 // Pages为零基有序页码，nil表示全部，非nil空列表表示不选择页面；与PageRange互斥
 // Mode支持single、multiple、booklet、poster；Scaling支持fit、shrink、actual、custom
@@ -41,44 +151,40 @@ import (
 // Raster将纸面光栅化，Grayscale以光栅方式输出灰度；DPI默认300，上限2400
 // Borders绘制单元边框，CropMarks绘制裁切标记，TileOnlyLarge仅分块超大页面
 type PrintOptions struct {
-	Pages         []int        `json:"pages,omitempty"`
-	PageRange     string       `json:"pageRange,omitempty"`
-	Mode          string       `json:"mode,omitempty"`
-	Scaling       string       `json:"scaling,omitempty"`
-	PaperWidth    float64      `json:"paperWidth,omitempty"`
-	PaperHeight   float64      `json:"paperHeight,omitempty"`
-	Margins       PrintMargins `json:"margins"`
-	PrintableArea *Box         `json:"printableArea,omitempty"`
-	Duplex        string       `json:"duplex,omitempty"`
-	BackRotate    bool         `json:"backRotate,omitempty"`
-	Copies        int          `json:"copies,omitempty"`
-	Collate       *bool        `json:"collate,omitempty"`
-	SheetFrom     int          `json:"sheetFrom,omitempty"`
-	SheetTo       int          `json:"sheetTo,omitempty"`
-	Scale         float64      `json:"scale,omitempty"`
-	Rotate        bool         `json:"rotate,omitempty"`
-	Reverse       bool         `json:"reverse,omitempty"`
-	Parity        string       `json:"parity,omitempty"`
-	Sides         string       `json:"sides,omitempty"`
-	Rows          int          `json:"rows,omitempty"`
-	Columns       int          `json:"columns,omitempty"`
-	// ColumnOrder 兼容纵向填充设置，仅在PageOrder为空时生效
-	ColumnOrder   bool    `json:"columnOrder,omitempty"`
-	PageOrder     string  `json:"pageOrder,omitempty"`
-	Gap           float64 `json:"gap,omitempty"`
-	Overlap       float64 `json:"overlap,omitempty"`
-	BookletSheets int     `json:"bookletSheets,omitempty"`
-	Binding       string  `json:"binding,omitempty"`
-	// Annotations 兼容注解开关，仅在Contents为空时生效
-	Annotations   *bool   `json:"annotations,omitempty"`
-	Contents      string  `json:"contents,omitempty"`
-	Raster        bool    `json:"raster,omitempty"`
-	DPI           float64 `json:"dpi,omitempty"`
-	Grayscale     bool    `json:"grayscale,omitempty"`
-	Borders       bool    `json:"borders,omitempty"`
-	CropMarks     bool    `json:"cropMarks,omitempty"`
-	TileOnlyLarge bool    `json:"tileOnlyLarge,omitempty"`
-	Labels        bool    `json:"labels,omitempty"`
+	Pages         []int          `json:"pages,omitempty"`
+	PageRange     string         `json:"pageRange,omitempty"`
+	Mode          PrintMode      `json:"mode,omitempty"`
+	Scaling       PrintScaling   `json:"scaling,omitempty"`
+	PaperWidth    float64        `json:"paperWidth,omitempty"`
+	PaperHeight   float64        `json:"paperHeight,omitempty"`
+	Margins       PrintMargins   `json:"margins"`
+	PrintableArea *Box           `json:"printableArea,omitempty"`
+	Duplex        PrintDuplex    `json:"duplex,omitempty"`
+	BackRotate    bool           `json:"backRotate,omitempty"`
+	Copies        int            `json:"copies,omitempty"`
+	Collate       *bool          `json:"collate,omitempty"`
+	SheetFrom     int            `json:"sheetFrom,omitempty"`
+	SheetTo       int            `json:"sheetTo,omitempty"`
+	Scale         float64        `json:"scale,omitempty"`
+	Rotate        bool           `json:"rotate,omitempty"`
+	Reverse       bool           `json:"reverse,omitempty"`
+	Parity        PrintParity    `json:"parity,omitempty"`
+	Sides         PrintSides     `json:"sides,omitempty"`
+	Rows          int            `json:"rows,omitempty"`
+	Columns       int            `json:"columns,omitempty"`
+	PageOrder     PrintPageOrder `json:"pageOrder,omitempty"`
+	Gap           float64        `json:"gap,omitempty"`
+	Overlap       float64        `json:"overlap,omitempty"`
+	BookletSheets int            `json:"bookletSheets,omitempty"`
+	Binding       PrintBinding   `json:"binding,omitempty"`
+	Contents      PrintContents  `json:"contents,omitempty"`
+	Raster        bool           `json:"raster,omitempty"`
+	DPI           float64        `json:"dpi,omitempty"`
+	Grayscale     bool           `json:"grayscale,omitempty"`
+	Borders       bool           `json:"borders,omitempty"`
+	CropMarks     bool           `json:"cropMarks,omitempty"`
+	TileOnlyLarge bool           `json:"tileOnlyLarge,omitempty"`
+	Labels        bool           `json:"labels,omitempty"`
 }
 
 // PrintMargins 保存纸面四边的非负页边距
@@ -127,7 +233,7 @@ type PrintLayout struct {
 	CopiesLimit int         `json:"copiesLimit"`
 	Copies      int         `json:"copies"`
 	Collate     bool        `json:"collate"`
-	Duplex      string      `json:"duplex"`
+	Duplex      PrintDuplex `json:"duplex"`
 	Sheets      int         `json:"sheets"`
 	BackContent bool        `json:"backContent"`
 	Sides       []PrintSide `json:"sides"`
@@ -155,125 +261,6 @@ func PlanPrint(pages []Box, options PrintOptions) (PrintLayout, error) {
 		return PrintLayout{CopiesLimit: -1}, err
 	}
 	return planPrint(pages, o)
-}
-
-// Layout 返回可供第三方预览和检查的独立布局副本
-// 返回: PrintLayout 独立布局副本
-func (p *PrintDocument) Layout() PrintLayout {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	result := p.layout
-	result.Sides = slices.Clone(result.Sides)
-	for i := range result.Sides {
-		result.Sides[i].Placements = slices.Clone(result.Sides[i].Placements)
-	}
-	return result
-}
-
-// Reconfigure 在相同文档快照上创建新的打印任务，不改变原任务的布局
-// 入参: ctx 准备上下文, options 新排版选项
-// 返回: *PrintDocument 独立打印任务, error 布局或读取错误
-func (p *PrintDocument) Reconfigure(ctx context.Context, options PrintOptions) (*PrintDocument, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
-		return nil, fmt.Errorf("print document is closed")
-	}
-	return p.renderer.PreparePrint(ctx, options)
-}
-
-// Close 释放任务持有的派生缓存和快照，不关闭调用方借入的输入
-// 返回: error 资源释放错误
-func (p *PrintDocument) Close() error {
-	if p == nil {
-		return nil
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
-		return nil
-	}
-	p.closed = true
-	p.pages.clear()
-	p.renderer.ClearCache()
-	err := p.renderer.Reader.Close()
-	p.renderer = nil
-	return err
-}
-
-// PreparePrint 固定当前阅读入口、版本及配置，底层输入由调用方保持存活
-// 入参: ctx 准备上下文, options 内容排版选项
-// 返回: *PrintDocument 独立打印任务, error 布局或读取错误
-func (r *Renderer) PreparePrint(ctx context.Context, options PrintOptions) (*PrintDocument, error) {
-	if ctx == nil {
-		return nil, fmt.Errorf("nil print context")
-	}
-	if r == nil || r.Reader == nil {
-		return nil, fmt.Errorf("missing print renderer")
-	}
-	o, err := normalizePrintOptions(options)
-	if err != nil {
-		return nil, err
-	}
-	view, err := r.Fork(ctx)
-	if err != nil {
-		return nil, err
-	}
-	doc, err := view.Reader.docStructureContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	needed, err := selectedPrintPageSet(len(doc.Pages.Page), o)
-	if err != nil {
-		return nil, err
-	}
-	boxes := make([]Box, len(doc.Pages.Page))
-	for i, page := range doc.Pages.Page {
-		if !needed[i] {
-			boxes[i] = Box{W: 1, H: 1}
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		area, err := view.Reader.readPageHeaderContext(ctx, page)
-		if err != nil {
-			return nil, err
-		}
-		boxes[i], err = view.GetPageBox(&area)
-		if err != nil {
-			return nil, err
-		}
-	}
-	layout, err := planPrint(boxes, o)
-	if err != nil {
-		return nil, err
-	}
-	layout.CopiesLimit = doc.Permissions.Copies
-	view.printing = true
-	view.printContents = o.Contents
-	view.RenderAnnotations = true
-	return &PrintDocument{renderer: view, layout: layout, options: o, pages: resourceCache[int, []byte](view.Reader.resources, 32<<20)}, nil
-}
-
-// PreparePrint 从独立编辑快照创建打印任务，不修改源编辑器或撤销记录
-// 入参: ctx 准备上下文, options 排版选项, rendererOptions 字体及后端配置
-// 返回: *PrintDocument 打印任务, error 快照或准备错误
-func (e *Editor) PreparePrint(ctx context.Context, options PrintOptions, rendererOptions ...RendererOption) (*PrintDocument, error) {
-	if ctx == nil || e == nil {
-		return nil, fmt.Errorf("missing print editor or context")
-	}
-	snapshot, err := e.Snapshot(ctx)
-	if err != nil {
-		return nil, err
-	}
-	reader, err := snapshot.Reader(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
-	renderer := NewRenderer(reader, rendererOptions...)
-	return renderer.PreparePrint(ctx, options)
 }
 
 // planPrint 按已校验的选项计算纸面，供独立布局和打印任务共用
@@ -519,24 +506,24 @@ func planPrint(pages []Box, o PrintOptions) (PrintLayout, error) {
 // 返回: PrintOptions 独立规范选项, error 配置错误
 func normalizePrintOptions(o PrintOptions) (PrintOptions, error) {
 	if o.Mode == "" {
-		o.Mode = "single"
+		o.Mode = PrintModeSingle
 	}
 	if o.Scaling == "" {
-		o.Scaling = "shrink"
+		o.Scaling = PrintScalingShrink
 	}
 	if o.Parity == "" {
-		o.Parity = "all"
+		o.Parity = PrintParityAll
 	}
 	if o.Sides == "" {
-		o.Sides = "all"
+		o.Sides = PrintSidesAll
 	}
 	if o.Binding == "" {
-		o.Binding = "left"
+		o.Binding = PrintBindingLeft
 	}
 	if o.Duplex == "" {
-		o.Duplex = "simplex"
-		if o.Mode == "booklet" {
-			o.Duplex = "shortEdge"
+		o.Duplex = PrintDuplexSimplex
+		if o.Mode == PrintModeBooklet {
+			o.Duplex = PrintDuplexShortEdge
 		}
 	}
 	if o.Copies == 0 {
@@ -550,19 +537,12 @@ func normalizePrintOptions(o PrintOptions) (PrintOptions, error) {
 		o.Collate = &collate
 	}
 	if o.PageOrder == "" {
-		o.PageOrder = "horizontal"
-		if o.ColumnOrder {
-			o.PageOrder = "vertical"
-		}
+		o.PageOrder = PrintPageOrderHorizontal
 	}
 	if o.Contents == "" {
-		o.Contents = "documentAndAnnotations"
-		if o.Annotations != nil && !*o.Annotations {
-			o.Contents = "document"
-		}
+		o.Contents = PrintContentsDocumentAndAnnotations
 	}
-	o.ColumnOrder, o.Annotations = false, nil
-	if !slices.Contains([]string{"document", "documentAndAnnotations", "annotations", "forms"}, o.Contents) {
+	if !slices.Contains([]PrintContents{PrintContentsDocument, PrintContentsDocumentAndAnnotations, PrintContentsAnnotations, PrintContentsForms}, o.Contents) {
 		return o, fmt.Errorf("invalid print contents")
 	}
 	if o.Scale == 0 {
@@ -577,10 +557,10 @@ func normalizePrintOptions(o PrintOptions) (PrintOptions, error) {
 	if o.Columns == 0 {
 		o.Columns = 2
 	}
-	if !slices.Contains([]string{"single", "multiple", "booklet", "poster"}, o.Mode) || !slices.Contains([]string{"fit", "shrink", "actual", "custom"}, o.Scaling) || !slices.Contains([]string{"all", "odd", "even"}, o.Parity) || !slices.Contains([]string{"all", "front", "back"}, o.Sides) || !slices.Contains([]string{"left", "right"}, o.Binding) || !slices.Contains([]string{"simplex", "longEdge", "shortEdge"}, o.Duplex) || !slices.Contains([]string{"horizontal", "horizontalReverse", "vertical", "verticalReverse"}, o.PageOrder) {
+	if !slices.Contains([]PrintMode{PrintModeSingle, PrintModeMultiple, PrintModeBooklet, PrintModePoster}, o.Mode) || !slices.Contains([]PrintScaling{PrintScalingFit, PrintScalingShrink, PrintScalingActual, PrintScalingCustom}, o.Scaling) || !slices.Contains([]PrintParity{PrintParityAll, PrintParityOdd, PrintParityEven}, o.Parity) || !slices.Contains([]PrintSides{PrintSidesAll, PrintSidesFront, PrintSidesBack}, o.Sides) || !slices.Contains([]PrintBinding{PrintBindingLeft, PrintBindingRight}, o.Binding) || !slices.Contains([]PrintDuplex{PrintDuplexSimplex, PrintDuplexLongEdge, PrintDuplexShortEdge}, o.Duplex) || !slices.Contains([]PrintPageOrder{PrintPageOrderHorizontal, PrintPageOrderHorizontalReverse, PrintPageOrderVertical, PrintPageOrderVerticalReverse}, o.PageOrder) {
 		return o, fmt.Errorf("invalid print mode")
 	}
-	if o.Copies < 1 || o.Copies > 999 || o.SheetFrom < 0 || o.SheetTo < 0 || o.SheetTo > 0 && o.SheetTo < o.SheetFrom || o.Duplex == "simplex" && (o.Mode == "booklet" || o.Sides != "all") {
+	if o.Copies < 1 || o.Copies > 999 || o.SheetFrom < 0 || o.SheetTo < 0 || o.SheetTo > 0 && o.SheetTo < o.SheetFrom || o.Duplex == PrintDuplexSimplex && (o.Mode == PrintModeBooklet || o.Sides != PrintSidesAll) {
 		return o, fmt.Errorf("invalid print job options")
 	}
 	if o.PrintableArea != nil {
@@ -688,4 +668,149 @@ func selectedPrintPageSet(pageCount int, o PrintOptions) (map[int]bool, error) {
 		return nil, fmt.Errorf("no pages selected for printing")
 	}
 	return needed, nil
+}
+
+// Layout 返回可供第三方预览和检查的独立布局副本
+// 返回: PrintLayout 独立布局副本
+func (p *PrintDocument) Layout() PrintLayout {
+	if p == nil {
+		return PrintLayout{CopiesLimit: -1}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	result := p.layout
+	result.Sides = slices.Clone(result.Sides)
+	for i := range result.Sides {
+		result.Sides[i].Placements = slices.Clone(result.Sides[i].Placements)
+	}
+	return result
+}
+
+// Reconfigure 在相同文档快照上创建新的打印任务，不改变原任务的布局
+// 入参: ctx 准备上下文, options 新排版选项
+// 返回: *PrintDocument 独立打印任务, error 布局或读取错误
+func (p *PrintDocument) Reconfigure(ctx context.Context, options PrintOptions) (*PrintDocument, error) {
+	if p == nil {
+		return nil, fmt.Errorf("nil print document")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.renderer == nil {
+		return nil, fmt.Errorf("print document is closed")
+	}
+	return p.renderer.PreparePrint(ctx, options)
+}
+
+// Close 释放任务持有的派生缓存和快照，不关闭调用方借入的输入
+// 返回: error 资源释放错误
+func (p *PrintDocument) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil
+	}
+	p.closed = true
+	p.pages.clear()
+	if p.renderer == nil {
+		return nil
+	}
+	p.renderer.ClearCache()
+	err := p.renderer.reader.Close()
+	p.renderer = nil
+	return err
+}
+
+// PreparePrint 固定当前阅读入口、版本及配置，底层输入由调用方保持存活
+// 入参: ctx 准备上下文, options 内容排版选项
+// 返回: *PrintDocument 独立打印任务, error 布局或读取错误
+func (r *Renderer) PreparePrint(ctx context.Context, options PrintOptions) (*PrintDocument, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("nil print context")
+	}
+	if r == nil || r.reader == nil {
+		return nil, fmt.Errorf("missing print renderer")
+	}
+	o, err := normalizePrintOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	view, err := r.Fork(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = view.reader.Close()
+		}
+	}()
+	doc, err := view.reader.docStructureContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	needed, err := selectedPrintPageSet(len(doc.Pages.Page), o)
+	if err != nil {
+		return nil, err
+	}
+	boxes := make([]Box, len(doc.Pages.Page))
+	for i, page := range doc.Pages.Page {
+		if !needed[i] {
+			boxes[i] = Box{W: 1, H: 1}
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		area, err := view.reader.readPageHeaderContext(ctx, page)
+		if err != nil {
+			return nil, err
+		}
+		boxes[i], err = view.GetPageBoxContext(ctx, &area)
+		if err != nil {
+			return nil, err
+		}
+	}
+	layout, err := planPrint(boxes, o)
+	if err != nil {
+		return nil, err
+	}
+	layout.CopiesLimit = doc.Permissions.Copies
+	view.printing = true
+	view.printContents = string(o.Contents)
+	view.renderAnnotations = true
+	cleanup = false
+	return &PrintDocument{renderer: view, layout: layout, options: o, pages: resourceCache[int, []byte](view.reader.resources, 32<<20)}, nil
+}
+
+// PreparePrint 从独立编辑快照创建打印任务，继承编辑器后端与字体配置，不修改源编辑器或撤销记录
+// 入参: ctx 准备上下文, options 排版选项, rendererOptions 字体及后端覆盖配置
+// 返回: *PrintDocument 打印任务, error 快照或准备错误
+func (e *Editor) PreparePrint(ctx context.Context, options PrintOptions, rendererOptions ...RendererOption) (*PrintDocument, error) {
+	if ctx == nil || e == nil {
+		return nil, fmt.Errorf("missing print editor or context")
+	}
+	snapshot, err := e.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer snapshot.Close()
+	reader, err := snapshot.Reader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	opts := make([]RendererOption, 0, 3+len(rendererOptions))
+	opts = append(opts, WithRenderBackends(e.backends))
+	if len(e.fontDirs) > 0 {
+		opts = append(opts, WithFontDirs(e.fontDirs...))
+	}
+	if len(e.fontFS) > 0 {
+		opts = append(opts, WithFontFS(e.fontFS...))
+	}
+	opts = append(opts, rendererOptions...)
+	renderer := NewRenderer(reader, opts...)
+	return renderer.PreparePrint(ctx, options)
 }

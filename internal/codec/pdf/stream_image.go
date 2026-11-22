@@ -28,6 +28,12 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// PDF图像导出像素与单缓冲分配上限，防止恶意超大尺寸触发内存耗尽或32位乘法溢出
+const (
+	maxExportImagePixels uint64 = 128 << 20
+	maxExportImageBuffer uint64 = 256 << 20
+)
+
 // EncodedImageStream 保存已编码待流式写出的PDF图像及可选软蒙版数据
 type EncodedImageStream struct {
 	Dict      pdfgo.Dictionary
@@ -55,30 +61,33 @@ func EncodeRawImageStream(ctx context.Context, raw *RawImage, compression pdfgo.
 			}
 		} else if compression.Mode == pdfgo.CompressionLossy {
 			needsResize := target.X > 0 && target.Y > 0 && (target.X < width || target.Y < height)
-			decoded, err := jpeg.Decode(bytes.NewReader(data))
-			if err == nil {
-				candidateImg := decoded
-				if needsResize {
-					if resized, rerr := pdfgo.ResizeImage(ctx, decoded, target); rerr == nil && resized != nil {
-						candidateImg = resized
-					}
-				}
-				var jbuf bytes.Buffer
-				if jerr := jpeg.Encode(&jbuf, candidateImg, &jpeg.Options{Quality: compression.ImageQuality()}); jerr == nil {
-					cand := jbuf.Bytes()
-					if opt, oerr := pdfgo.OptimizeJPEG(ctx, cand); oerr == nil && len(opt) < len(cand) {
-						cand = opt
-					}
-					if len(cand) < len(data) {
-						data = cand
-						b := candidateImg.Bounds()
-						width, height = b.Dx(), b.Dy()
-						if _, ok := candidateImg.(*image.Gray); ok {
-							colorSpace = "DeviceGray"
-						} else {
-							colorSpace = "DeviceRGB"
+			cfg, cfgErr := jpeg.DecodeConfig(bytes.NewReader(data))
+			if cfgErr == nil && checkImagePixels(cfg.Width, cfg.Height) == nil && (!needsResize || checkImagePixels(target.X, target.Y) == nil) {
+				decoded, err := jpeg.Decode(bytes.NewReader(data))
+				if err == nil {
+					candidateImg := decoded
+					if needsResize {
+						if resized, rerr := pdfgo.ResizeImage(ctx, decoded, target); rerr == nil && resized != nil {
+							candidateImg = resized
 						}
-						bpc = 8
+					}
+					var jbuf bytes.Buffer
+					if jerr := jpeg.Encode(&jbuf, candidateImg, &jpeg.Options{Quality: compression.ImageQuality()}); jerr == nil {
+						cand := jbuf.Bytes()
+						if opt, oerr := pdfgo.OptimizeJPEG(ctx, cand); oerr == nil && len(opt) < len(cand) {
+							cand = opt
+						}
+						if len(cand) < len(data) {
+							data = cand
+							b := candidateImg.Bounds()
+							width, height = b.Dx(), b.Dy()
+							if _, ok := candidateImg.(*image.Gray); ok {
+								colorSpace = "DeviceGray"
+							} else {
+								colorSpace = "DeviceRGB"
+							}
+							bpc = 8
+						}
 					}
 				}
 			}
@@ -110,6 +119,13 @@ func EncodePDFImageStream(ctx context.Context, src image.Image, compression pdfg
 	if err := ctx.Err(); err != nil {
 		return EncodedImageStream{}, err
 	}
+	if src == nil {
+		return EncodedImageStream{}, fmt.Errorf("PDF output image pixel bounds differ")
+	}
+	origBounds := src.Bounds()
+	if err := checkImagePixels(origBounds.Dx(), origBounds.Dy()); err != nil {
+		return EncodedImageStream{}, err
+	}
 	lossy := compression.Mode == pdfgo.CompressionLossy
 	pixels, err := decodeExportImage(ctx, src, lossy)
 	if err != nil {
@@ -117,10 +133,13 @@ func EncodePDFImageStream(ctx context.Context, src image.Image, compression pdfg
 	}
 	b := pixels.Bounds()
 	w, h := b.Dx(), b.Dy()
-	if w <= 0 || h <= 0 {
-		return EncodedImageStream{}, fmt.Errorf("PDF output image pixel bounds differ")
+	if err := checkImagePixels(w, h); err != nil {
+		return EncodedImageStream{}, err
 	}
 	if target.X > 0 && target.Y > 0 && (target.X < w || target.Y < h) {
+		if err := checkImagePixels(target.X, target.Y); err != nil {
+			return EncodedImageStream{}, err
+		}
 		resized, rerr := pdfgo.ResizeImage(ctx, pixels, target)
 		if rerr != nil {
 			return EncodedImageStream{}, rerr
@@ -128,6 +147,9 @@ func EncodePDFImageStream(ctx context.Context, src image.Image, compression pdfg
 		pixels = resized
 		b = pixels.Bounds()
 		w, h = b.Dx(), b.Dy()
+		if err := checkImagePixels(w, h); err != nil {
+			return EncodedImageStream{}, err
+		}
 	}
 	switch img := pixels.(type) {
 	case *image.CMYK:
@@ -153,20 +175,53 @@ func EncodePDFImageStream(ctx context.Context, src image.Image, compression pdfg
 
 // TargetImageSize 按图像在页面上的毫米渲染尺寸与目标DPI计算降采样像素尺寸
 // 入参: widthMM 渲染宽度(毫米), heightMM 渲染高度(毫米), dpi 目标DPI
-// 返回: image.Point 目标像素尺寸，无需降采样时为零值
+// 返回: image.Point 目标像素尺寸，无需降采样或超限时为零值
 func TargetImageSize(widthMM, heightMM float64, dpi int) image.Point {
 	if dpi <= 0 || !finite(widthMM) || !finite(heightMM) || widthMM <= 0 || heightMM <= 0 {
 		return image.Point{}
 	}
-	tw := int(math.Ceil(widthMM * float64(dpi) / 25.4))
-	th := int(math.Ceil(heightMM * float64(dpi) / 25.4))
-	if tw < 1 {
-		tw = 1
+	fw := math.Ceil(widthMM * float64(dpi) / 25.4)
+	fh := math.Ceil(heightMM * float64(dpi) / 25.4)
+	if !finite(fw) || !finite(fh) || fw <= 0 || fh <= 0 || fw > float64(math.MaxInt32) || fh > float64(math.MaxInt32) {
+		return image.Point{}
 	}
-	if th < 1 {
-		th = 1
+	tw, th := max(1, int(fw)), max(1, int(fh))
+	if checkImagePixels(tw, th) != nil {
+		return image.Point{}
 	}
 	return image.Point{X: tw, Y: th}
+}
+
+// checkImagePixels 校验图像宽高为正且像素总量不溢出、不超过导出像素上限
+// 入参: w 宽度, h 高度
+// 返回: error 尺寸非法或超限错误
+func checkImagePixels(w, h int) error {
+	if w <= 0 || h <= 0 {
+		return fmt.Errorf("PDF output image pixel bounds differ")
+	}
+	uw, uh := uint64(w), uint64(h)
+	if uw > maxExportImagePixels/uh {
+		return fmt.Errorf("PDF image pixels exceed limit")
+	}
+	return nil
+}
+
+// checkedSampleBytes 用64位除法校验并计算样本缓冲区字节数，防止32位乘法溢出与超额内存分配
+// 入参: w 宽度, h 高度, bytesPerPixel 单像素字节数
+// 返回: int 总字节数, error 尺寸或内存预算错误
+func checkedSampleBytes(w, h, bytesPerPixel int) (int, error) {
+	if err := checkImagePixels(w, h); err != nil {
+		return 0, err
+	}
+	if bytesPerPixel <= 0 {
+		return 0, fmt.Errorf("invalid PDF image sample bytes")
+	}
+	limit := min(maxExportImageBuffer, uint64(math.MaxInt))
+	uw, uh, ub := uint64(w), uint64(h), uint64(bytesPerPixel)
+	if uw > limit/ub || uh > limit/(uw*ub) {
+		return 0, fmt.Errorf("PDF image buffer exceeds limit")
+	}
+	return int(uw * uh * ub), nil
 }
 
 // encodeCMYKPDFImage 将CMYK图像按原始四通道无损编码为PDF图像流
@@ -175,7 +230,11 @@ func TargetImageSize(widthMM, heightMM float64, dpi int) image.Point {
 func encodeCMYKPDFImage(ctx context.Context, img *image.CMYK, level int) (EncodedImageStream, error) {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
-	raw := make([]byte, w*h*4)
+	rawSize, err := checkedSampleBytes(w, h, 4)
+	if err != nil {
+		return EncodedImageStream{}, err
+	}
+	raw := make([]byte, rawSize)
 	for y := range h {
 		if err := ctx.Err(); err != nil {
 			return EncodedImageStream{}, err
@@ -197,7 +256,11 @@ func encodeCMYKPDFImage(ctx context.Context, img *image.CMYK, level int) (Encode
 func encodeGray16PDFImage(ctx context.Context, img *image.Gray16, level int) (EncodedImageStream, error) {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
-	raw := make([]byte, w*h*2)
+	rawSize, err := checkedSampleBytes(w, h, 2)
+	if err != nil {
+		return EncodedImageStream{}, err
+	}
+	raw := make([]byte, rawSize)
 	for y := range h {
 		if err := ctx.Err(); err != nil {
 			return EncodedImageStream{}, err
@@ -219,6 +282,9 @@ func encodeGray16PDFImage(ctx context.Context, img *image.Gray16, level int) (En
 func encodeNRGBA64PDFImage(ctx context.Context, img *image.NRGBA64, level int) (EncodedImageStream, error) {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
+	if _, err := checkedSampleBytes(w, h, 8); err != nil {
+		return EncodedImageStream{}, err
+	}
 	rgb := make([]byte, w*h*6)
 	alpha := make([]byte, w*h*2)
 	hasAlpha := false
@@ -265,6 +331,9 @@ func encodeNRGBA64PDFImage(ctx context.Context, img *image.NRGBA64, level int) (
 // 返回: EncodedImageStream 编码结果, error 压缩或取消错误
 func encodeGeneric16PDFImage(ctx context.Context, b image.Rectangle, src interface{ NRGBA64At(int, int) color.NRGBA64 }, level int) (EncodedImageStream, error) {
 	w, h := b.Dx(), b.Dy()
+	if _, err := checkedSampleBytes(w, h, 8); err != nil {
+		return EncodedImageStream{}, err
+	}
 	rgb := make([]byte, w*h*6)
 	alpha := make([]byte, w*h*2)
 	hasAlpha := false
@@ -314,6 +383,9 @@ func encodeGeneric16PDFImage(ctx context.Context, b image.Rectangle, src interfa
 func encode8BitPDFImage(ctx context.Context, pixels image.Image, compression pdfgo.CompressionOptions, level int) (EncodedImageStream, error) {
 	b := pixels.Bounds()
 	w, h := b.Dx(), b.Dy()
+	if _, err := checkedSampleBytes(w, h, 4); err != nil {
+		return EncodedImageStream{}, err
+	}
 	n := w * h
 	rgb := make([]byte, n*3)
 	alpha := make([]byte, n)
@@ -525,14 +597,29 @@ func tryLossyJPEG(ctx context.Context, img image.Image, quality, maxBytes int) (
 // 入参: raw 紧凑样本字节, width 宽度, height 高度, colors 通道数, bpc 位深, level zlib级别
 // 返回: []byte 压缩载荷, pdfgo.Dictionary 解码参数(无预测器时为nil), error 压缩错误
 func compressImageSamples(raw []byte, width, height, colors, bpc, level int) ([]byte, pdfgo.Dictionary, error) {
-	rowBytes := (width*colors*bpc + 7) / 8
+	if width <= 0 || height <= 0 || colors <= 0 || bpc <= 0 {
+		return nil, nil, fmt.Errorf("invalid PDF image sample layout")
+	}
+	bitsPerPixel := uint64(colors) * uint64(bpc)
+	if uint64(width) > (math.MaxUint64-7)/bitsPerPixel {
+		return nil, nil, fmt.Errorf("PDF image row bytes overflow")
+	}
+	rowBytesU64 := (uint64(width)*bitsPerPixel + 7) / 8
+	limit := min(maxExportImageBuffer, uint64(math.MaxInt))
+	if rowBytesU64 == 0 || rowBytesU64 > limit || uint64(height) > uint64(len(raw))/rowBytesU64 {
+		return nil, nil, fmt.Errorf("invalid PDF image sample buffer")
+	}
+	rowBytes := int(rowBytesU64)
 	var zw *zlib.Writer
 	var zbuf bytes.Buffer
 	plain, zw, err := CompressBytes(zw, &zbuf, level, raw)
 	if err != nil {
 		return nil, nil, err
 	}
-	if height <= 1 || rowBytes == 0 || len(raw) < 64 {
+	if height <= 1 || len(raw) < 64 {
+		return plain, nil, nil
+	}
+	if rowBytesU64+1 > limit/uint64(height) {
 		return plain, nil, nil
 	}
 	filtered := make([]byte, height*(rowBytes+1))
@@ -570,7 +657,7 @@ func compressImageSamples(raw []byte, width, height, colors, bpc, level int) ([]
 // 入参: samples 灰度样本, width 宽度, height 高度
 // 返回: []byte 1位打包字节
 func pack1BitSamples(samples []byte, width, height int) []byte {
-	rowBytes := (width + 7) / 8
+	rowBytes := int((uint64(width) + 7) / 8)
 	out := make([]byte, rowBytes*height)
 	for y := range height {
 		src := samples[y*width:]
@@ -636,6 +723,9 @@ func normalizeLossyImage(ctx context.Context, pixels image.Image) (image.Image, 
 	case *image.Gray16:
 		b := src.Bounds()
 		w, h := b.Dx(), b.Dy()
+		if _, err := checkedSampleBytes(w, h, 1); err != nil {
+			return nil, err
+		}
 		dst := image.NewGray(image.Rect(0, 0, w, h))
 		for y := range h {
 			if err := ctx.Err(); err != nil {
@@ -651,6 +741,9 @@ func normalizeLossyImage(ctx context.Context, pixels image.Image) (image.Image, 
 	case *image.NRGBA64:
 		b := src.Bounds()
 		w, h := b.Dx(), b.Dy()
+		if _, err := checkedSampleBytes(w, h, 4); err != nil {
+			return nil, err
+		}
 		dst := image.NewNRGBA(image.Rect(0, 0, w, h))
 		for y := range h {
 			if err := ctx.Err(); err != nil {
@@ -667,6 +760,9 @@ func normalizeLossyImage(ctx context.Context, pixels image.Image) (image.Image, 
 	}
 	b := pixels.Bounds()
 	w, h := b.Dx(), b.Dy()
+	if _, err := checkedSampleBytes(w, h, 4); err != nil {
+		return nil, err
+	}
 	dst := image.NewNRGBA(image.Rect(0, 0, w, h))
 	for y := range h {
 		if err := ctx.Err(); err != nil {

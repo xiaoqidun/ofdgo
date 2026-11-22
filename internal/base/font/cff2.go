@@ -156,7 +156,7 @@ func staticCIDFont(table map[string][]byte, chars [][]byte) ([]byte, error) {
 	if units < 16 || units > 16384 {
 		return nil, fmt.Errorf("invalid CFF design units")
 	}
-	name := FaceInfo(table["name"], 0).PostScriptName
+	name := faceInfo(table["name"], 0).PostScriptName
 	if name == "" {
 		name = "OpenTypeInstance"
 	}

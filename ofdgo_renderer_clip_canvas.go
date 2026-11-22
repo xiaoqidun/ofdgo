@@ -30,198 +30,6 @@ type clipRenderer struct {
 	unions *renderCache[[32]byte, *canvas.Path]
 }
 
-// Size 返回不限定边界的裁剪画布尺寸
-// 返回: float64 宽度, float64 高度
-func (r *clipRenderer) Size() (float64, float64) {
-	return 0, 0
-}
-
-// RenderPath 合并路径填充及描边轮廓
-// 入参: path 路径, style 绘制样式, m 变换矩阵
-func (r *clipRenderer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix) {
-	if style.HasFill() {
-		r.add(applyClipPath(path.Copy().Transform(m), r.clip))
-	}
-	if style.HasStroke() {
-		p := strokeCanvasPath(path.Dash(style.DashOffset, style.Dashes...), style.StrokeWidth, style.StrokeCapper, style.StrokeJoiner, canvas.Tolerance)
-		r.add(applyClipPath(p.Transform(m), r.clip))
-	}
-}
-
-// RenderText 合并文字字形轮廓
-// 入参: text 文字, m 变换矩阵
-func (r *clipRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
-	text.RenderTo(r, m, 0)
-}
-
-// RenderImage 裁剪区不包含图像对象
-// 入参: img 图像, m 变换矩阵
-func (r *clipRenderer) RenderImage(img image.Image, m canvas.Matrix) {}
-
-// add 合并裁剪轮廓，按完整输入复用已有并集
-// 入参: path 裁剪路径
-func (r *clipRenderer) add(path *canvas.Path) {
-	if r.path == nil {
-		r.path = path
-	} else if r.unions == nil || path == nil {
-		r.path = unionClipPath(r.path, path)
-	} else {
-		key := canvasGeometryDigest(r.path, path)
-		if merged, ok := r.unions.get(key); ok {
-			r.path = merged.Copy()
-		} else {
-			r.path = unionClipPath(r.path, path)
-			if cost := len(r.path.Data())*8 + 256; cost <= r.unions.limit {
-				r.unions.put(key, r.path.Copy(), cost)
-			}
-		}
-	}
-}
-
-// buildObjectClipPath 构建对象裁剪路径并应用父级变换
-// 入参: clips 裁剪对象, pageH 页面高度, boundary 外接矩形, objectCTM 对象CTM, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM
-// 返回: *canvas.Path 路径对象
-func (r *Renderer) buildObjectClipPath(clips *Clips, pageH float64, boundary string, objectCTM Matrix, parentCTM *Matrix, boundaryInCTM bool) *canvas.Path {
-	path, err := r.objectGeometryClip(clips, boundary, objectCTM, RenderState{Parent: parentCTM, BoundaryInCTM: boundaryInCTM})
-	if err != nil {
-		r.renderError = err
-		return nil
-	}
-	p, err := geometryToCanvasPath(path)
-	if err != nil {
-		r.renderError = err
-		return nil
-	}
-	if p != nil {
-		p = p.Translate(0, pageH)
-	}
-	return p
-}
-
-// buildClipPath 构建裁剪路径
-// 入参: clips 裁剪对象, pageH 页面高度, bx 边界X坐标, by 边界Y坐标, matrix 裁剪坐标到页面的变换
-// 返回: *canvas.Path 路径对象
-func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, matrix Matrix) *canvas.Path {
-	if clips == nil {
-		return nil
-	}
-	var p *canvas.Path
-	for _, clip := range clips.Clip {
-		renderer := &clipRenderer{unions: r.canvasClipUnions()}
-		for _, area := range clip.Area {
-			areaCTM := matrix.Multiply(NewMatrix(area.CTM))
-			for _, pathObj := range area.Path {
-				renderer.add(r.buildClipAreaPath(pathObj, area.DrawParam, areaCTM, pageH, bx, by))
-				if r.renderError != nil {
-					return nil
-				}
-			}
-			for _, textObj := range area.Text {
-				box, _ := ParseBox(textObj.Boundary)
-				ctm := NewMatrix(textObj.CTM)
-				m := areaCTM.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(ctm)
-				ctx := canvas.NewContext(renderer)
-				ctx.SetView(canvas.Matrix{{m.a, -m.c, bx + m.e}, {-m.b, m.d, pageH - by - m.f}})
-				renderer.clip = r.buildObjectClipPath(textObj.Clips, pageH, textObj.Boundary, ctm, &areaCTM, true)
-				if renderer.clip != nil {
-					renderer.clip = renderer.clip.Translate(bx, -by)
-				}
-				textObj.Boundary, textObj.CTM = "", ""
-				textObj.Clips = nil
-				textObj.Alpha = nil
-				textObj.FillColor = &FillColor{}
-				textObj.StrokeColor = &StrokeColor{}
-				textRenderer := *r
-				if scale := math.Sqrt(math.Abs(m.a*m.d - m.b*m.c)); scale > 0 {
-					textRenderer.DPI *= scale
-				}
-				textRenderer.pageText = nil
-				textRenderer.textOnly = false
-				textRenderer.renderText(ctx, textObj, 0, r.drawParamDefaults(area.DrawParam, nil), nil, false, nil)
-				if textRenderer.renderError != nil {
-					r.renderError = textRenderer.renderError
-					return nil
-				}
-			}
-		}
-		if renderer.path == nil {
-			renderer.path = &canvas.Path{}
-		}
-		p = r.intersectCachedClipPath(p, renderer.path)
-	}
-	return p
-}
-
-// buildClipAreaPath 构建裁剪轮廓，再应用区域变换
-// 未启用填充和勾边的路径按填充规则确定内部区域，勾边路径仍按绘制参数展开
-// 入参: obj 裁剪路径, drawParam 区域绘制参数, parent 区域变换, pageH 页面高度, bx 横向位移, by 纵向位移
-// 返回: *canvas.Path 裁剪轮廓
-func (r *Renderer) buildClipAreaPath(obj PathObject, drawParam string, parent Matrix, pageH, bx, by float64) *canvas.Path {
-	if obj.Visible != nil && !*obj.Visible {
-		return &canvas.Path{}
-	}
-	box, _ := ParseBox(obj.Boundary)
-	local := NewMatrix(obj.CTM)
-	m := parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(local)
-	clip := r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, local, &parent, true)
-	obj.Boundary = ""
-	p := r.buildPath(obj, 0, IdentityMatrix, false)
-	var result *canvas.Path
-	stroke := obj.Stroke != nil && *obj.Stroke
-	fill := obj.Fill != nil && *obj.Fill || !stroke && obj.Fill == nil
-	if fill {
-		paths := canvas.Paths(p.Copy().Split())
-		for _, path := range paths {
-			path.Close()
-		}
-		result = paths.Merge()
-		if obj.Rule == "Even-Odd" {
-			result = settleCanvasPath(result, canvas.EvenOdd)
-		}
-	}
-	if stroke {
-		dp := r.drawParamDefaults(obj.DrawParam, r.drawParamDefaults(drawParam, nil))
-		if dp != nil {
-			copy := *dp
-			copy.FillColor, copy.StrokeColor = nil, nil
-			dp = &copy
-		}
-		obj.FillColor, obj.StrokeColor = nil, nil
-		style := r.newPathStyle(dp, 0, 0, 0, nil)
-		style.applyPathObject(r, obj, 0, 0, 0)
-		if scale := math.Sqrt(math.Abs(m.a*m.d - m.b*m.c)); scale > 0 {
-			style.lineWidth = r.deviceLineWidth(style.lineWidth*scale) / scale
-		} else {
-			style.lineWidth = r.deviceLineWidth(style.lineWidth)
-		}
-		result = unionClipPath(result, r.strokeDashedCanvasPath(p, style.lineWidth, style.lineCap, style.lineJoin, style.dashOffset, style.dashPattern, false))
-	}
-	if result == nil {
-		return &canvas.Path{}
-	}
-	result = result.Transform(canvas.Matrix{{m.a, -m.c, m.e}, {-m.b, m.d, pageH - m.f}})
-	return applyClipPath(result, clip).Translate(bx, -by)
-}
-
-// intersectCachedClipPath 按完整几何内容复用复杂裁剪交集，缓存命中时返回独立副本
-// 入参: parent 父级裁剪路径, current 当前裁剪路径
-// 返回: *canvas.Path 相交后的裁剪路径
-func (r *Renderer) intersectCachedClipPath(parent, current *canvas.Path) *canvas.Path {
-	if parent == nil || current == nil || len(parent.Data())+len(current.Data()) < 256 {
-		return intersectClipPath(parent, current)
-	}
-	key := canvasGeometryDigest(parent, current)
-	cache := r.canvasClipIntersections()
-	if path, ok := cache.get(key); ok {
-		return path.Copy()
-	}
-	path := intersectClipPath(parent, current)
-	if cost := len(path.Data())*8 + 256; cost <= cache.limit {
-		cache.put(key, path.Copy(), cost)
-	}
-	return path
-}
-
 // intersectClipPath 求裁剪路径交集
 // 入参: parent 父级裁剪路径, current 当前裁剪路径
 // 返回: *canvas.Path 相交后的裁剪路径
@@ -594,4 +402,197 @@ func rectangularPath(path *canvas.Path) (canvas.Rect, bool) {
 		corners |= corner
 	}
 	return rect, corners == 15
+}
+
+// Size 返回不限定边界的裁剪画布尺寸
+// 返回: float64 宽度, float64 高度
+func (r *clipRenderer) Size() (float64, float64) {
+	return 0, 0
+}
+
+// RenderPath 合并路径填充及描边轮廓
+// 入参: path 路径, style 绘制样式, m 变换矩阵
+func (r *clipRenderer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix) {
+	if style.HasFill() {
+		r.add(applyClipPath(path.Copy().Transform(m), r.clip))
+	}
+	if style.HasStroke() {
+		p := strokeCanvasPath(path.Dash(style.DashOffset, style.Dashes...), style.StrokeWidth, style.StrokeCapper, style.StrokeJoiner, canvas.Tolerance)
+		r.add(applyClipPath(p.Transform(m), r.clip))
+	}
+}
+
+// RenderText 合并文字字形轮廓
+// 入参: text 文字, m 变换矩阵
+func (r *clipRenderer) RenderText(text *canvas.Text, m canvas.Matrix) {
+	text.RenderTo(r, m, 0)
+}
+
+// RenderImage 裁剪区不包含图像对象
+// 入参: img 图像, m 变换矩阵
+func (r *clipRenderer) RenderImage(img image.Image, m canvas.Matrix) {}
+
+// add 合并裁剪轮廓，按完整输入复用已有并集
+// 入参: path 裁剪路径
+func (r *clipRenderer) add(path *canvas.Path) {
+	if r.path == nil {
+		r.path = path
+	} else if r.unions == nil || path == nil {
+		r.path = unionClipPath(r.path, path)
+	} else {
+		key := canvasGeometryDigest(r.path, path)
+		if merged, ok := r.unions.get(key); ok {
+			r.path = merged.Copy()
+		} else {
+			r.path = unionClipPath(r.path, path)
+			if cost := len(r.path.Data())*8 + 256; cost <= r.unions.limit {
+				r.unions.put(key, r.path.Copy(), cost)
+			}
+		}
+	}
+}
+
+// buildObjectClipPath 构建对象裁剪路径并应用父级变换
+// 入参: clips 裁剪对象, pageH 页面高度, boundary 外接矩形, objectCTM 对象CTM, parentCTM 父级CTM, boundaryInCTM 边界是否参与父级CTM
+// 返回: *canvas.Path 路径对象
+func (r *Renderer) buildObjectClipPath(clips *Clips, pageH float64, boundary string, objectCTM Matrix, parentCTM *Matrix, boundaryInCTM bool) *canvas.Path {
+	path, err := r.objectGeometryClip(clips, boundary, objectCTM, RenderState{Parent: parentCTM, BoundaryInCTM: boundaryInCTM})
+	if err != nil {
+		r.renderError = err
+		return nil
+	}
+	p, err := geometryToCanvasPath(path)
+	if err != nil {
+		r.renderError = err
+		return nil
+	}
+	if p != nil {
+		p = p.Translate(0, pageH)
+	}
+	return p
+}
+
+// buildClipPath 构建裁剪路径
+// 入参: clips 裁剪对象, pageH 页面高度, bx 边界X坐标, by 边界Y坐标, matrix 裁剪坐标到页面的变换
+// 返回: *canvas.Path 路径对象
+func (r *Renderer) buildClipPath(clips *Clips, pageH float64, bx, by float64, matrix Matrix) *canvas.Path {
+	if clips == nil {
+		return nil
+	}
+	var p *canvas.Path
+	for _, clip := range clips.Clip {
+		renderer := &clipRenderer{unions: r.canvasClipUnions()}
+		for _, area := range clip.Area {
+			areaCTM := matrix.Multiply(NewMatrix(area.CTM))
+			for _, pathObj := range area.Path {
+				renderer.add(r.buildClipAreaPath(pathObj, area.DrawParam, areaCTM, pageH, bx, by))
+				if r.renderError != nil {
+					return nil
+				}
+			}
+			for _, textObj := range area.Text {
+				box, _ := ParseBox(textObj.Boundary)
+				ctm := NewMatrix(textObj.CTM)
+				m := areaCTM.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(ctm)
+				ctx := canvas.NewContext(renderer)
+				ctx.SetView(canvas.Matrix{{m.a, -m.c, bx + m.e}, {-m.b, m.d, pageH - by - m.f}})
+				renderer.clip = r.buildObjectClipPath(textObj.Clips, pageH, textObj.Boundary, ctm, &areaCTM, true)
+				if renderer.clip != nil {
+					renderer.clip = renderer.clip.Translate(bx, -by)
+				}
+				textObj.Boundary, textObj.CTM = "", ""
+				textObj.Clips = nil
+				textObj.Alpha = nil
+				textObj.FillColor = &FillColor{}
+				textObj.StrokeColor = &StrokeColor{}
+				prevDPI, prevPageText, prevTextOnly, prevErr := r.dpi, r.pageText, r.textOnly, r.renderError
+				if scale := math.Sqrt(math.Abs(m.a*m.d - m.b*m.c)); scale > 0 {
+					r.dpi *= scale
+				}
+				r.pageText, r.textOnly, r.renderError = nil, false, nil
+				r.renderText(ctx, textObj, 0, r.drawParamDefaults(area.DrawParam, nil), nil, false, nil)
+				textErr := r.renderError
+				r.dpi, r.pageText, r.textOnly, r.renderError = prevDPI, prevPageText, prevTextOnly, prevErr
+				if textErr != nil {
+					r.renderError = textErr
+					return nil
+				}
+			}
+		}
+		if renderer.path == nil {
+			renderer.path = &canvas.Path{}
+		}
+		p = r.intersectCachedClipPath(p, renderer.path)
+	}
+	return p
+}
+
+// buildClipAreaPath 构建裁剪轮廓，再应用区域变换
+// 未启用填充和勾边的路径按填充规则确定内部区域，勾边路径仍按绘制参数展开
+// 入参: obj 裁剪路径, drawParam 区域绘制参数, parent 区域变换, pageH 页面高度, bx 横向位移, by 纵向位移
+// 返回: *canvas.Path 裁剪轮廓
+func (r *Renderer) buildClipAreaPath(obj PathObject, drawParam string, parent Matrix, pageH, bx, by float64) *canvas.Path {
+	if obj.Visible != nil && !*obj.Visible {
+		return &canvas.Path{}
+	}
+	box, _ := ParseBox(obj.Boundary)
+	local := NewMatrix(obj.CTM)
+	m := parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(local)
+	clip := r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, local, &parent, true)
+	obj.Boundary = ""
+	p := r.buildPath(obj, 0, IdentityMatrix(), false)
+	var result *canvas.Path
+	stroke := obj.Stroke != nil && *obj.Stroke
+	fill := obj.Fill != nil && *obj.Fill || !stroke && obj.Fill == nil
+	if fill {
+		paths := canvas.Paths(p.Copy().Split())
+		for _, path := range paths {
+			path.Close()
+		}
+		result = paths.Merge()
+		if obj.Rule == "Even-Odd" {
+			result = settleCanvasPath(result, canvas.EvenOdd)
+		}
+	}
+	if stroke {
+		dp := r.drawParamDefaults(obj.DrawParam, r.drawParamDefaults(drawParam, nil))
+		if dp != nil {
+			copy := *dp
+			copy.FillColor, copy.StrokeColor = nil, nil
+			dp = &copy
+		}
+		obj.FillColor, obj.StrokeColor = nil, nil
+		style := r.newPathStyle(dp, 0, 0, 0, nil)
+		style.applyPathObject(r, obj, 0, 0, 0)
+		if scale := math.Sqrt(math.Abs(m.a*m.d - m.b*m.c)); scale > 0 {
+			style.lineWidth = r.deviceLineWidth(style.lineWidth*scale) / scale
+		} else {
+			style.lineWidth = r.deviceLineWidth(style.lineWidth)
+		}
+		result = unionClipPath(result, r.strokeDashedCanvasPath(p, style.lineWidth, style.lineCap, style.lineJoin, style.dashOffset, style.dashPattern, false))
+	}
+	if result == nil {
+		return &canvas.Path{}
+	}
+	result = result.Transform(canvas.Matrix{{m.a, -m.c, m.e}, {-m.b, m.d, pageH - m.f}})
+	return applyClipPath(result, clip).Translate(bx, -by)
+}
+
+// intersectCachedClipPath 按完整几何内容复用复杂裁剪交集，缓存命中时返回独立副本
+// 入参: parent 父级裁剪路径, current 当前裁剪路径
+// 返回: *canvas.Path 相交后的裁剪路径
+func (r *Renderer) intersectCachedClipPath(parent, current *canvas.Path) *canvas.Path {
+	if parent == nil || current == nil || len(parent.Data())+len(current.Data()) < 256 {
+		return intersectClipPath(parent, current)
+	}
+	key := canvasGeometryDigest(parent, current)
+	cache := r.canvasClipIntersections()
+	if path, ok := cache.get(key); ok {
+		return path.Copy()
+	}
+	path := intersectClipPath(parent, current)
+	if cost := len(path.Data())*8 + 256; cost <= cache.limit {
+		cache.put(key, path.Copy(), cost)
+	}
+	return path
 }

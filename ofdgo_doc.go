@@ -110,12 +110,12 @@ type CustomTag struct {
 
 // CommonData 文档公共数据
 type CommonData struct {
-	MaxUnitID    uint32         `xml:"MaxUnitID"`
+	MaxUnitID    uint64         `xml:"MaxUnitID"`
 	PageArea     PageArea       `xml:"PageArea"`
 	PublicRes    []string       `xml:"PublicRes"`
 	DocumentRes  []string       `xml:"DocumentRes"`
 	TemplatePage []TemplatePage `xml:"TemplatePage"`
-	DefaultCS    uint32         `xml:"DefaultCS"`
+	DefaultCS    uint64         `xml:"DefaultCS,omitempty"`
 }
 
 // PageArea 页面区域定义
@@ -210,6 +210,152 @@ type Permissions struct {
 type ValidPeriod struct {
 	StartDate string `xml:"StartDate,attr" json:"startDate,omitempty"`
 	EndDate   string `xml:"EndDate,attr" json:"endDate,omitempty"`
+}
+
+// print 打印权限节点
+type print struct {
+	Printable *bool `xml:"Printable,attr"`
+	Copies    *int  `xml:"Copies,attr"`
+}
+
+// DefaultPermissions 获取GB/T 33190标准默认文档权限
+// 返回: Permissions 默认文档权限
+func DefaultPermissions() Permissions {
+	return Permissions{
+		Edit:          true,
+		Annot:         true,
+		Export:        true,
+		Signature:     true,
+		Watermark:     true,
+		PrintScreen:   true,
+		Print:         true,
+		Copies:        -1,
+		Copy:          true,
+		ContentRegist: true,
+	}
+}
+
+// decodeOFDTrimmedUint64 解析忽略前后空白的无符号整数子节点
+// 入参: d XML解码器, start 起始节点, target 目标无符号整数指针
+// 返回: error 解析错误
+func decodeOFDTrimmedUint64(d *xml.Decoder, start xml.StartElement, target *uint64) error {
+	var raw string
+	if err := d.DecodeElement(&raw, &start); err != nil {
+		return err
+	}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		*target = 0
+		return nil
+	}
+	value, err := strconv.ParseUint(trimmed, 10, 64)
+	if err != nil {
+		return err
+	}
+	*target = value
+	return nil
+}
+
+// decodeOFDTrimmedString 解析并裁剪节点文本前后空白
+// 入参: d XML解码器, start 起始节点, target 目标字符串指针
+// 返回: error 解析错误
+func decodeOFDTrimmedString(d *xml.Decoder, start xml.StartElement, target *string) error {
+	var raw string
+	if err := d.DecodeElement(&raw, &start); err != nil {
+		return err
+	}
+	if value := strings.TrimSpace(raw); value != "" {
+		*target = value
+	}
+	return nil
+}
+
+// decodeOFDTrimmedBool 解析忽略前后空白的布尔子节点
+// 入参: d XML解码器, start 起始节点, target 目标布尔指针
+// 返回: error 解析错误
+func decodeOFDTrimmedBool(d *xml.Decoder, start xml.StartElement, target *bool) error {
+	var raw string
+	if err := d.DecodeElement(&raw, &start); err != nil {
+		return err
+	}
+	value, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return err
+	}
+	*target = value
+	return nil
+}
+
+// decodeOFDTrimmedFloat 解析忽略前后空白的浮点子节点
+// 入参: d XML解码器, start 起始节点, target 目标浮点指针
+// 返回: error 解析错误
+func decodeOFDTrimmedFloat(d *xml.Decoder, start xml.StartElement, target *float64) error {
+	var raw string
+	if err := d.DecodeElement(&raw, &start); err != nil {
+		return err
+	}
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil {
+		return err
+	}
+	*target = value
+	return nil
+}
+
+// decodeDocumentIndex 读取索引的直接条目及路径文本，不提升外部扩展中的节点
+// 入参: d XML解码器, start 起始节点, name 条目名称, location 路径文本, values 条目列表
+// 返回: error 解析错误
+func decodeDocumentIndex[T any](d *xml.Decoder, start xml.StartElement, name string, location *string, values *[]T) error {
+	var text strings.Builder
+	for {
+		token, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch node := token.(type) {
+		case xml.StartElement:
+			if node.Name.Local == name && ofdXMLChild(start.Name, node.Name) {
+				err = d.DecodeElement(values, &node)
+			} else {
+				err = d.Skip()
+			}
+			if err != nil {
+				return err
+			}
+		case xml.CharData:
+			text.Write(node)
+		case xml.EndElement:
+			if node.Name == start.Name {
+				*location = text.String()
+				return nil
+			}
+		}
+	}
+}
+
+// outlineInfos 转换目录节点信息
+// 入参: outlines 大纲节点, bookmarks 书签, pages 页码索引
+// 返回: []OutlineInfo 目录节点信息
+func outlineInfos(outlines []OutlineElem, bookmarks map[string]Dest, pages map[string]int) []OutlineInfo {
+	infos := make([]OutlineInfo, 0, len(outlines))
+	for _, outline := range outlines {
+		info := OutlineInfo{Title: outline.Title, Expanded: outline.Expanded, ActionCount: len(outline.Actions)}
+		for _, action := range outline.Actions {
+			if action.Goto != nil {
+				if dest := gotoDest(action.Goto, bookmarks); dest != nil {
+					info.Page, _ = resourceValue(pages, dest.PageID)
+					if info.Page != 0 {
+						break
+					}
+				}
+			}
+		}
+		if len(outline.OutlineElem) > 0 {
+			info.Children = outlineInfos(outline.OutlineElem, bookmarks, pages)
+		}
+		infos = append(infos, info)
+	}
+	return infos
 }
 
 // UnmarshalXML 按命名空间读取文档结构，扩展数据仍由原解码器保留原文
@@ -475,24 +621,22 @@ func (tag *CustomTag) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error
 func (common *CommonData) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	*common = CommonData{}
 	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
-		var target any
 		switch node.Name.Local {
 		case "MaxUnitID":
-			target = &common.MaxUnitID
+			return decodeOFDTrimmedUint64(d, node, &common.MaxUnitID)
 		case "PageArea":
-			target = &common.PageArea
+			return d.DecodeElement(&common.PageArea, &node)
 		case "PublicRes":
-			target = &common.PublicRes
+			return d.DecodeElement(&common.PublicRes, &node)
 		case "DocumentRes":
-			target = &common.DocumentRes
+			return d.DecodeElement(&common.DocumentRes, &node)
 		case "TemplatePage":
-			target = &common.TemplatePage
+			return d.DecodeElement(&common.TemplatePage, &node)
 		case "DefaultCS":
-			target = &common.DefaultCS
+			return decodeOFDTrimmedUint64(d, node, &common.DefaultCS)
 		default:
 			return d.Skip()
 		}
-		return d.DecodeElement(target, &node)
 	})
 }
 
@@ -666,23 +810,6 @@ func (v *VPreferences) UnmarshalXML(d *xml.Decoder, start xml.StartElement) erro
 	return nil
 }
 
-// DefaultPermissions 获取GB/T 33190标准默认文档权限
-// 返回: Permissions 默认文档权限
-func DefaultPermissions() Permissions {
-	return Permissions{
-		Edit:          true,
-		Annot:         true,
-		Export:        true,
-		Signature:     true,
-		Watermark:     true,
-		PrintScreen:   true,
-		Print:         true,
-		Copies:        -1,
-		Copy:          true,
-		ContentRegist: true,
-	}
-}
-
 // UnmarshalXML 解析文档权限并应用默认值
 // 入参: d XML解码器, start 起始节点
 // 返回: error 错误信息
@@ -735,110 +862,72 @@ func (p *Permissions) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error
 	})
 }
 
-// print 打印权限节点
-type print struct {
-	Printable *bool `xml:"Printable,attr"`
-	Copies    *int  `xml:"Copies,attr"`
-}
-
-// decodeOFDTrimmedString 解析并裁剪节点文本前后空白
-// 入参: d XML解码器, start 起始节点, target 目标字符串指针
-// 返回: error 解析错误
-func decodeOFDTrimmedString(d *xml.Decoder, start xml.StartElement, target *string) error {
-	var raw string
-	if err := d.DecodeElement(&raw, &start); err != nil {
+// MarshalXML 按GB/T 33190标准序列化文档权限，与UnmarshalXML严格对称
+// 入参: e XML编码器, start 起始节点
+// 返回: error 编码错误
+func (p Permissions) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+	if start.Name.Local == "" {
+		start.Name.Local = "Permissions"
+	}
+	if err := e.EncodeToken(start); err != nil {
 		return err
 	}
-	if value := strings.TrimSpace(raw); value != "" {
-		*target = value
+	space := start.Name.Space
+	encodeBool := func(local string, value bool) error {
+		return e.EncodeElement(strconv.FormatBool(value), xml.StartElement{Name: xml.Name{Space: space, Local: local}})
 	}
-	return nil
-}
-
-// decodeOFDTrimmedBool 解析忽略前后空白的布尔子节点
-// 入参: d XML解码器, start 起始节点, target 目标布尔指针
-// 返回: error 解析错误
-func decodeOFDTrimmedBool(d *xml.Decoder, start xml.StartElement, target *bool) error {
-	var raw string
-	if err := d.DecodeElement(&raw, &start); err != nil {
-		return err
-	}
-	value, err := strconv.ParseBool(strings.TrimSpace(raw))
-	if err != nil {
-		return err
-	}
-	*target = value
-	return nil
-}
-
-// decodeOFDTrimmedFloat 解析忽略前后空白的浮点子节点
-// 入参: d XML解码器, start 起始节点, target 目标浮点指针
-// 返回: error 解析错误
-func decodeOFDTrimmedFloat(d *xml.Decoder, start xml.StartElement, target *float64) error {
-	var raw string
-	if err := d.DecodeElement(&raw, &start); err != nil {
-		return err
-	}
-	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
-	if err != nil {
-		return err
-	}
-	*target = value
-	return nil
-}
-
-// decodeDocumentIndex 读取索引的直接条目及路径文本，不提升外部扩展中的节点
-// 入参: d XML解码器, start 起始节点, name 条目名称, location 路径文本, values 条目列表
-// 返回: error 解析错误
-func decodeDocumentIndex[T any](d *xml.Decoder, start xml.StartElement, name string, location *string, values *[]T) error {
-	var text strings.Builder
-	for {
-		token, err := d.Token()
-		if err != nil {
+	for _, item := range []struct {
+		name  string
+		value bool
+	}{
+		{"Edit", p.Edit},
+		{"Annot", p.Annot},
+		{"Export", p.Export},
+		{"Signature", p.Signature},
+		{"Watermark", p.Watermark},
+		{"PrintScreen", p.PrintScreen},
+	} {
+		if err := encodeBool(item.name, item.value); err != nil {
 			return err
 		}
-		switch node := token.(type) {
-		case xml.StartElement:
-			if node.Name.Local == name && ofdXMLChild(start.Name, node.Name) {
-				err = d.DecodeElement(values, &node)
-			} else {
-				err = d.Skip()
-			}
-			if err != nil {
-				return err
-			}
-		case xml.CharData:
-			text.Write(node)
-		case xml.EndElement:
-			if node.Name == start.Name {
-				*location = text.String()
-				return nil
-			}
+	}
+	printElem := xml.StartElement{
+		Name: xml.Name{Space: space, Local: "Print"},
+		Attr: []xml.Attr{
+			{Name: xml.Name{Local: "Printable"}, Value: strconv.FormatBool(p.Print)},
+			{Name: xml.Name{Local: "Copies"}, Value: strconv.Itoa(p.Copies)},
+		},
+	}
+	if err := e.EncodeToken(printElem); err != nil {
+		return err
+	}
+	if err := e.EncodeToken(printElem.End()); err != nil {
+		return err
+	}
+	if p.ValidPeriod != nil {
+		vpElem := xml.StartElement{Name: xml.Name{Space: space, Local: "ValidPeriod"}}
+		if startDate := strings.TrimSpace(p.ValidPeriod.StartDate); startDate != "" {
+			vpElem.Attr = append(vpElem.Attr, xml.Attr{Name: xml.Name{Local: "StartDate"}, Value: startDate})
+		}
+		if endDate := strings.TrimSpace(p.ValidPeriod.EndDate); endDate != "" {
+			vpElem.Attr = append(vpElem.Attr, xml.Attr{Name: xml.Name{Local: "EndDate"}, Value: endDate})
+		}
+		if err := e.EncodeToken(vpElem); err != nil {
+			return err
+		}
+		if err := e.EncodeToken(vpElem.End()); err != nil {
+			return err
 		}
 	}
-}
-
-// outlineInfos 转换目录节点信息
-// 入参: outlines 大纲节点, bookmarks 书签, pages 页码索引
-// 返回: []OutlineInfo 目录节点信息
-func outlineInfos(outlines []OutlineElem, bookmarks map[string]Dest, pages map[string]int) []OutlineInfo {
-	infos := make([]OutlineInfo, 0, len(outlines))
-	for _, outline := range outlines {
-		info := OutlineInfo{Title: outline.Title, Expanded: outline.Expanded, ActionCount: len(outline.Actions)}
-		for _, action := range outline.Actions {
-			if action.Goto != nil {
-				if dest := gotoDest(action.Goto, bookmarks); dest != nil {
-					info.Page, _ = resourceValue(pages, dest.PageID)
-					if info.Page != 0 {
-						break
-					}
-				}
-			}
+	if !p.Copy {
+		if err := encodeBool("CopyText", p.Copy); err != nil {
+			return err
 		}
-		if len(outline.OutlineElem) > 0 {
-			info.Children = outlineInfos(outline.OutlineElem, bookmarks, pages)
-		}
-		infos = append(infos, info)
 	}
-	return infos
+	if !p.ContentRegist {
+		if err := encodeBool("ContentRegist", p.ContentRegist); err != nil {
+			return err
+		}
+	}
+	return e.EncodeToken(start.End())
 }

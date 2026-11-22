@@ -37,36 +37,6 @@ type editorFontDocument struct {
 	unsafe       bool
 }
 
-// apply 隔离其他文档及版本的共享文件，提交字体修改和路径引用
-// 入参: ctx 取消上下文, changes 按原文件路径保存的修改
-// 返回: error 引用扫描或XML修改错误
-func (s *editorFontDocument) apply(ctx context.Context, changes map[string][]byte) error {
-	view := *s.reader
-	if s.index != view.documentIndex {
-		view.selectedVersion = nil
-	}
-	view.documentIndex = s.index
-	view.documentRoot, view.versionInfo = "", nil
-	parts, err := view.versionChanges(ctx, changes)
-	if err != nil {
-		return err
-	}
-	next := *s.reader
-	next.files = maps.Clone(next.files)
-	if next.files == nil {
-		next.files = make(map[string][]byte)
-	}
-	maps.Copy(next.files, parts)
-	if err := next.initRootContext(ctx); err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	*s.reader = next
-	return nil
-}
-
 // editorFontXML 保存字体声明及文字引用所在的XML
 type editorFontXML struct {
 	name string
@@ -279,8 +249,8 @@ func editorDocumentViewContext(ctx context.Context, reader *Reader, index int) (
 		return reader.DocumentContext(ctx, index)
 	}
 	next := &Reader{
-		Path:            reader.Path,
-		Zip:             reader.Zip,
+		path:            reader.path,
+		zip:             reader.zip,
 		encrypted:       reader.encryptedSource(),
 		sourceFile:      reader.sourceFile,
 		archiveID:       reader.archiveID,
@@ -298,6 +268,7 @@ func editorDocumentViewContext(ctx context.Context, reader *Reader, index int) (
 	if _, err := next.DocContext(ctx); err != nil {
 		return nil, err
 	}
+	next.bindEncryptionHold()
 	return next, nil
 }
 
@@ -337,4 +308,34 @@ func customTagsResourceSafe(ctx context.Context, reader *Reader, index int) (boo
 		}
 	}
 	return true, ctx.Err()
+}
+
+// apply 隔离其他文档及版本的共享文件，提交字体修改和路径引用
+// 入参: ctx 取消上下文, changes 按原文件路径保存的修改
+// 返回: error 引用扫描或XML修改错误
+func (s *editorFontDocument) apply(ctx context.Context, changes map[string][]byte) error {
+	view := *s.reader
+	if s.index != view.documentIndex {
+		view.selectedVersion = nil
+	}
+	view.documentIndex = s.index
+	view.documentRoot, view.versionInfo = "", nil
+	parts, err := view.versionChanges(ctx, changes)
+	if err != nil {
+		return err
+	}
+	next := *s.reader
+	next.files = maps.Clone(next.files)
+	if next.files == nil {
+		next.files = make(map[string][]byte)
+	}
+	maps.Copy(next.files, parts)
+	if err := next.initRootContext(ctx); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	*s.reader = next
+	return nil
 }

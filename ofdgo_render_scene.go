@@ -14,7 +14,26 @@
 
 package ofdgo
 
-import "slices"
+import (
+	"context"
+	"slices"
+)
+
+// 场景遍历的绘制、分组及跳过指令
+const (
+	// sceneObject 绘制单个图形对象
+	sceneObject sceneCommandKind = iota
+	// sceneStamp 绘制签章外观
+	sceneStamp
+	// sceneBeginObject 开始图形对象分组
+	sceneBeginObject
+	// sceneBeginAnnotation 开始页面注解分组
+	sceneBeginAnnotation
+	// sceneEnd 结束当前对象或注解分组
+	sceneEnd
+	// sceneSkip 跳过不可见对象计数
+	sceneSkip
+)
 
 // PageScene 保存后端无关的页面语义与绘制顺序，不提前展开文字或重新编码图片
 // 场景借用源页面及资源的只读引用，编辑文档后应重新构建
@@ -24,6 +43,33 @@ type PageScene struct {
 	renderer    *Renderer
 	patternPage *Matrix
 	commands    []sceneCommand
+}
+
+// sceneCommand 保存叶子对象、签章或嵌套分组事件
+type sceneCommand struct {
+	kind          sceneCommandKind
+	object        *GraphicObject
+	state         RenderState
+	stamp         Stamp
+	annotation    string
+	count         int
+	pageResources []*parsedRes
+}
+
+// sceneCommandKind 区分场景中的绘制和分组事件
+type sceneCommandKind uint8
+
+// sceneRecorder 收集公共遍历事件，不解释绘制外观
+type sceneRecorder PageScene
+
+// closeSceneGroups 在访问器失败时配对结束已建立的分组
+// 入参: groups 分组访问器, stack 分组状态
+func closeSceneGroups(groups PageGroups, stack []bool) {
+	for i := len(stack) - 1; i >= 0; i-- {
+		if stack[i] {
+			groups.EndObject()
+		}
+	}
 }
 
 // Walk 重放语义场景，访问器仍可自行处理文字和原始图片
@@ -92,7 +138,20 @@ func (s *PageScene) Walk(visitor PageVisitor) error {
 // 入参: page 源页面
 // 返回: *PageScene 只读语义场景, error 遍历或几何错误
 func (r *Renderer) CompileScene(page *PageContent) (*PageScene, error) {
-	box, err := r.GetPageBox(page)
+	return r.CompileSceneContext(context.Background(), page)
+}
+
+// CompileSceneContext 按取消上下文展开页面结构，保留原文、字形索引、动作和对象标识
+// 入参: ctx 取消上下文，nil使用后台上下文, page 源页面
+// 返回: *PageScene 只读语义场景, error 遍历、几何或取消错误
+func (r *Renderer) CompileSceneContext(ctx context.Context, page *PageContent) (*PageScene, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	box, err := r.GetPageBoxContext(ctx, page)
 	if err != nil {
 		return nil, err
 	}
@@ -102,44 +161,11 @@ func (r *Renderer) CompileScene(page *PageContent) (*PageScene, error) {
 		patternPage = &shift
 	}
 	scene := &PageScene{Source: page, Box: box, renderer: r, patternPage: patternPage}
-	if err := r.WalkPage(page, (*sceneRecorder)(scene)); err != nil {
+	if err := r.WalkPageContext(ctx, page, (*sceneRecorder)(scene)); err != nil {
 		return nil, err
 	}
 	return scene, nil
 }
-
-// sceneCommand 保存叶子对象、签章或嵌套分组事件
-type sceneCommand struct {
-	kind          sceneCommandKind
-	object        *GraphicObject
-	state         RenderState
-	stamp         Stamp
-	annotation    string
-	count         int
-	pageResources []*parsedRes
-}
-
-// sceneCommandKind 区分场景中的绘制和分组事件
-type sceneCommandKind uint8
-
-// 场景遍历的绘制、分组及跳过指令
-const (
-	// sceneObject 绘制单个图形对象
-	sceneObject sceneCommandKind = iota
-	// sceneStamp 绘制签章外观
-	sceneStamp
-	// sceneBeginObject 开始图形对象分组
-	sceneBeginObject
-	// sceneBeginAnnotation 开始页面注解分组
-	sceneBeginAnnotation
-	// sceneEnd 结束当前对象或注解分组
-	sceneEnd
-	// sceneSkip 跳过不可见对象计数
-	sceneSkip
-)
-
-// sceneRecorder 收集公共遍历事件，不解释绘制外观
-type sceneRecorder PageScene
 
 // DrawObject 保留源对象及继承状态
 // 入参: object 源对象, state 继承状态
@@ -182,14 +208,4 @@ func (s *sceneRecorder) EndObject() {
 // 入参: count 对象数量
 func (s *sceneRecorder) SkipObjects(count int) {
 	s.commands = append(s.commands, sceneCommand{kind: sceneSkip, count: count, pageResources: s.renderer.pageResources})
-}
-
-// closeSceneGroups 在访问器失败时配对结束已建立的分组
-// 入参: groups 分组访问器, stack 分组状态
-func closeSceneGroups(groups PageGroups, stack []bool) {
-	for i := len(stack) - 1; i >= 0; i-- {
-		if stack[i] {
-			groups.EndObject()
-		}
-	}
 }

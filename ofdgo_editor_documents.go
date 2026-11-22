@@ -27,6 +27,16 @@ import (
 	"strings"
 )
 
+// editorDocumentIdentity 标记编辑状态所属的文档和版本，不持有页面或资源数据
+type editorDocumentIdentity struct {
+	root    string
+	id      string
+	version string
+	fresh   bool
+	single  bool
+	fromNew bool
+}
+
 // DocumentCount 获取编辑包内的文档数量，新建编辑器包含一个当前文档
 // 返回: int 文档数量
 func (e *Editor) DocumentCount() int {
@@ -69,10 +79,12 @@ func (e *Editor) SelectDocumentContext(ctx context.Context, index int) error {
 	if err != nil {
 		return err
 	}
+	defer reader.Close()
 	target, err := reader.DocumentContext(ctx, index)
 	if err != nil {
 		return err
 	}
+	defer target.Close()
 	before := e.transactionSnapshot()
 	next := *e
 	if err := next.adoptDocumentReader(ctx, target, retiredTags); err != nil {
@@ -96,7 +108,7 @@ func (e *Editor) DocumentInfo(index int) (DocInfo, error) {
 	if index == e.DocumentIndex() {
 		return cloneEditorData(e.Info), nil
 	}
-	info := cloneEditorData(e.source.reader.OFD.DocBody[index].DocInfo)
+	info := cloneEditorData(e.source.reader.ofd.DocBody[index].DocInfo)
 	if info.CustomDatas != nil {
 		for i := range info.CustomDatas.CustomData {
 			info.CustomDatas.CustomData[i].sourceIndex = i + 1
@@ -190,6 +202,7 @@ func (e *Editor) AddDocumentContext(ctx context.Context, title string, width, he
 		if err != nil {
 			return 0, err
 		}
+		defer createdReader.Close()
 		for name, content := range createdReader.files {
 			if err := ctx.Err(); err != nil {
 				return 0, err
@@ -334,10 +347,10 @@ func (e *Editor) DeleteDocumentContext(ctx context.Context, index int) error {
 		if err != nil {
 			return 0, err
 		}
-		directory := path.Dir(cleanPackagePath(reader.OFD.DocBody[index].DocRoot))
-		if directory != "." && !slices.ContainsFunc(reader.OFD.DocBody, func(body DocBody) bool {
+		directory := path.Dir(cleanPackagePath(reader.ofd.DocBody[index].DocRoot))
+		if directory != "." && !slices.ContainsFunc(reader.ofd.DocBody, func(body DocBody) bool {
 			name := cleanPackagePath(body.DocRoot)
-			return name != cleanPackagePath(reader.OFD.DocBody[index].DocRoot) && strings.HasPrefix(name, directory+"/")
+			return name != cleanPackagePath(reader.ofd.DocBody[index].DocRoot) && strings.HasPrefix(name, directory+"/")
 		}) {
 			for name := range reader.fileNames {
 				if err := ctx.Err(); err != nil {
@@ -349,7 +362,7 @@ func (e *Editor) DeleteDocumentContext(ctx context.Context, index int) error {
 			}
 		}
 		var others []int
-		for other := range reader.OFD.DocBody {
+		for other := range reader.ofd.DocBody {
 			if other != index {
 				others = append(others, other)
 			}
@@ -373,10 +386,10 @@ func (e *Editor) DeleteDocumentContext(ctx context.Context, index int) error {
 				delete(reader.files, name)
 			}
 		}
-		if reader.Zip != nil {
-			reader.Zip = &zip.Reader{Comment: reader.Zip.Comment, File: slices.DeleteFunc(slices.Clone(reader.Zip.File), func(file *zip.File) bool {
-				return removed[cleanPackagePath(file.Name)]
-			})}
+		if reader.zip != nil {
+			pruneReaderZip(reader, func(file *zip.File) bool {
+				return !removed[cleanPackagePath(file.Name)]
+			})
 		}
 		if src := reader.encryptedSource(); src != nil {
 			reader.setEncryptedSource(src.omit(removed))
@@ -391,16 +404,6 @@ func (e *Editor) DeleteDocumentContext(ctx context.Context, index int) error {
 		}
 		return selected, nil
 	})
-}
-
-// editorDocumentIdentity 标记编辑状态所属的文档和版本，不持有页面或资源数据
-type editorDocumentIdentity struct {
-	root    string
-	id      string
-	version string
-	fresh   bool
-	single  bool
-	fromNew bool
 }
 
 // matches 判断两个编辑状态是否属于同一文档版本，允许新文档首次建立包结构
@@ -428,6 +431,7 @@ func (e *Editor) editDocumentsContext(ctx context.Context, edit func(*Reader, []
 	if err != nil {
 		return err
 	}
+	defer reader.Close()
 	beforeCount := reader.DocumentCount()
 	beforeIndex := reader.DocumentIndex()
 	return e.editDocumentSnapshotWithRetired(ctx, reader, retiredTags, true, func(r *Reader, data []byte, root *editorXML) (int, error) {
@@ -471,6 +475,7 @@ func (e *Editor) editDocumentsWithVersion(ctx context.Context, keepVersion bool,
 	if err != nil {
 		return err
 	}
+	defer reader.Close()
 	return e.editDocumentSnapshotWithRetired(ctx, reader, retiredTags, keepVersion, edit)
 }
 
@@ -528,7 +533,7 @@ func (e *Editor) editDocumentSnapshotWithRetired(ctx context.Context, reader *Re
 // 入参: ctx 取消上下文, reader 不拥有输入文件的独立阅读器, retiredTags 已淘汰的旧标引路径
 // 返回: error 编辑器初始化错误
 func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader, retiredTags map[string]bool) error {
-	if reader.Zip != nil && reader.sourceFile == nil {
+	if reader.zip != nil && reader.sourceFile == nil {
 		reader.sourceFile = e.sourceFile
 	}
 	version, err := reader.DocumentVersionID()
@@ -539,11 +544,19 @@ func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader, retire
 	if err != nil {
 		return err
 	}
-	sameDoc := e.source != nil && e.documentRoot() == reader.documentRoot && current == version && e.Info.DocID == reader.OFD.DocBody[reader.documentIndex].DocInfo.DocID
+	targetDocID := ""
+	if reader.ofd != nil && reader.documentIndex >= 0 && reader.documentIndex < len(reader.ofd.DocBody) {
+		targetDocID = reader.ofd.DocBody[reader.documentIndex].DocInfo.DocID
+	}
+	sameDoc := e.source != nil && e.documentRoot() == reader.documentRoot && current == version && e.Info.DocID != "" && e.Info.DocID == targetDocID
 	next, err := reader.EditorContext(ctx)
 	if err != nil {
 		return err
 	}
+	nextHold := next.encHold
+	defer func() {
+		nextHold.release()
+	}()
 	var retired map[string]bool
 	if e.source != nil && len(e.source.retiredAttachments) != 0 {
 		retired = maps.Clone(e.source.retiredAttachments)
@@ -590,11 +603,13 @@ func (e *Editor) adoptDocumentReader(ctx context.Context, reader *Reader, retire
 	next.revision, next.serial = e.revision, e.serial
 	next.OnWriteProgress, next.output = e.OnWriteProgress, e.output
 	next.encryption = e.encryption
+	next.encHold = e.encHold
 	next.saveTarget, next.sourceFile = e.saveTarget, e.sourceFile
 	next.backends, next.fontDirs, next.fontFS = e.backends, e.fontDirs, e.fontFS
 	next.SetResources(e.runtimeResources)
 	next.validatedPaths = e.validatedPaths
 	*e = *next
+	e.syncEncryptionHold()
 	return nil
 }
 
