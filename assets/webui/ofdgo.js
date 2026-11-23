@@ -14112,7 +14112,7 @@ function renderSignatures() {
 			const details = document.createElement("details");
 			const title = document.createElement("summary");
 			const trustedTimestamp = timestamp.valid && timestamp.certTrustChecked && timestamp.certTrustOK;
-			title.textContent = trustedTimestamp ? "可信时间戳" : timestamp.valid && !timestamp.certTrustChecked ? "时间戳（未验信任）" : "时间戳详情";
+			title.textContent = trustedTimestamp ? "可信时戳" : "时戳详情";
 			details.append(title);
 			appendInfoLine(details, trustedTimestamp ? "时间" : "声明时间", formatDocumentTime(timestamp.time));
 			appendInfoLine(details, "签署机构", timestamp.signer);
