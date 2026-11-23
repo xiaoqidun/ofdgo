@@ -699,11 +699,13 @@ func remapGraphicObjects(objects []GraphicObject, idMap map[string]string) {
 					remapID(&area.Text[k].DrawParam)
 					remapColor(area.Text[k].FillColor)
 					remapColor((*FillColor)(area.Text[k].StrokeColor))
+					remapClips(area.Text[k].Clips)
 				}
 				for k := range area.Path {
 					remapID(&area.Path[k].DrawParam)
 					remapColor(area.Path[k].FillColor)
 					remapColor((*FillColor)(area.Path[k].StrokeColor))
+					remapClips(area.Path[k].Clips)
 				}
 			}
 		}
@@ -864,6 +866,8 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 	savedModelAttachments := maps.Clone(importer.modelAttachments)
 	savedFontWarnings := maps.Clone(importer.fontWarnings)
 	savedHalftoneWarnings := maps.Clone(importer.halftoneWarnings)
+	savedIsolatedGroupImages := maps.Clone(importer.isolatedGroupImages)
+	savedUsedReferences := importer.usedReferences
 	savedRenditionsHad := importer.renditions != nil
 	var savedRenditionMedia map[pdfgo.Reference][]pdfRenditionResource
 	if savedRenditionsHad {
@@ -893,6 +897,8 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 			importer.modelAttachments = savedModelAttachments
 			importer.fontWarnings = savedFontWarnings
 			importer.halftoneWarnings = savedHalftoneWarnings
+			importer.isolatedGroupImages = savedIsolatedGroupImages
+			importer.usedReferences = savedUsedReferences
 			if !savedRenditionsHad {
 				importer.renditions = nil
 			} else if importer.renditions != nil {
@@ -2818,6 +2824,8 @@ func (p *PDFImport) commitParallelPageResult(ctx context.Context, index int, res
 	savedModelAttachments := maps.Clone(importer.modelAttachments)
 	savedFontWarnings := maps.Clone(importer.fontWarnings)
 	savedHalftoneWarnings := maps.Clone(importer.halftoneWarnings)
+	savedIsolatedGroupImages := maps.Clone(importer.isolatedGroupImages)
+	savedUsedReferences := importer.usedReferences
 	savedRenditionsHad := importer.renditions != nil
 	var savedRenditionMedia map[pdfgo.Reference][]pdfRenditionResource
 	if savedRenditionsHad {
@@ -2847,6 +2855,8 @@ func (p *PDFImport) commitParallelPageResult(ctx context.Context, index int, res
 			importer.modelAttachments = savedModelAttachments
 			importer.fontWarnings = savedFontWarnings
 			importer.halftoneWarnings = savedHalftoneWarnings
+			importer.isolatedGroupImages = savedIsolatedGroupImages
+			importer.usedReferences = savedUsedReferences
 			if !savedRenditionsHad {
 				importer.renditions = nil
 			} else if importer.renditions != nil {
@@ -3051,6 +3061,8 @@ func (p *PDFImport) convertDuplicatePage(ctx context.Context, index, leader int)
 	savedModelAttachments := maps.Clone(importer.modelAttachments)
 	savedFontWarnings := maps.Clone(importer.fontWarnings)
 	savedHalftoneWarnings := maps.Clone(importer.halftoneWarnings)
+	savedIsolatedGroupImages := maps.Clone(importer.isolatedGroupImages)
+	savedUsedReferences := importer.usedReferences
 	savedRenditionsHad := importer.renditions != nil
 	var savedRenditionMedia map[pdfgo.Reference][]pdfRenditionResource
 	if savedRenditionsHad {
@@ -3079,6 +3091,8 @@ func (p *PDFImport) convertDuplicatePage(ctx context.Context, index, leader int)
 			importer.modelAttachments = savedModelAttachments
 			importer.fontWarnings = savedFontWarnings
 			importer.halftoneWarnings = savedHalftoneWarnings
+			importer.isolatedGroupImages = savedIsolatedGroupImages
+			importer.usedReferences = savedUsedReferences
 			if !savedRenditionsHad {
 				importer.renditions = nil
 			} else if importer.renditions != nil {

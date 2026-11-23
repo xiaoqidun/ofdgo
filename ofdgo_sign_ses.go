@@ -201,9 +201,6 @@ func parseSESSignature(data []byte) (*sesSignature, error) {
 	if tbsItems[4].Class != asn1.ClassUniversal || tbsItems[4].Tag != asn1.TagIA5String || tbsItems[4].IsCompound {
 		return nil, fmt.Errorf("invalid ses property info")
 	}
-	if strings.TrimSpace(asn1String(tbsItems[4])) == "" {
-		return nil, fmt.Errorf("empty ses property info")
-	}
 	if len(tbsItems) == 6 && (tbsItems[5].Class != asn1.ClassContextSpecific || tbsItems[5].Tag != 0) {
 		return nil, fmt.Errorf("invalid ses extDatas")
 	}

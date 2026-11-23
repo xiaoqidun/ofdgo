@@ -2696,6 +2696,25 @@ func (r *Reader) resolvePageArea(area PageArea, templates []Template) (PageArea,
 	return r.resolvePageAreaContext(context.Background(), area, templates)
 }
 
+// mergePageArea 按字段补全页面区域中未声明的矩形框
+// 入参: dst 当前页面区域, src 父级页面区域
+// 返回: PageArea 合并后的页面区域
+func mergePageArea(dst, src PageArea) PageArea {
+	if strings.TrimSpace(dst.PhysicalBox) == "" {
+		dst.PhysicalBox = src.PhysicalBox
+	}
+	if strings.TrimSpace(dst.ApplicationBox) == "" {
+		dst.ApplicationBox = src.ApplicationBox
+	}
+	if strings.TrimSpace(dst.ContentBox) == "" {
+		dst.ContentBox = src.ContentBox
+	}
+	if strings.TrimSpace(dst.BleedBox) == "" {
+		dst.BleedBox = src.BleedBox
+	}
+	return dst
+}
+
 // resolvePageAreaContext 按页面、模板页和文档公共数据顺序解析页面区域继承，读取过程中响应取消
 // 入参: ctx 取消上下文, area 页面区域, templates 模板引用
 // 返回: PageArea 页面区域, error 读取或取消错误
@@ -2703,7 +2722,7 @@ func (r *Reader) resolvePageAreaContext(ctx context.Context, area PageArea, temp
 	if err := ctx.Err(); err != nil {
 		return PageArea{}, err
 	}
-	if area != (PageArea{}) || r.doc == nil {
+	if strings.TrimSpace(area.PhysicalBox) != "" || r.doc == nil {
 		return area, nil
 	}
 	for _, ref := range templates {
@@ -2718,13 +2737,14 @@ func (r *Reader) resolvePageAreaContext(ctx context.Context, area PageArea, temp
 			if err != nil {
 				return PageArea{}, err
 			}
-			if content.Area != (PageArea{}) {
-				return content.Area, nil
+			area = mergePageArea(area, content.Area)
+			if strings.TrimSpace(area.PhysicalBox) != "" {
+				return area, nil
 			}
 			break
 		}
 	}
-	return r.doc.CommonData.PageArea, nil
+	return mergePageArea(area, r.doc.CommonData.PageArea), nil
 }
 
 // readDocumentPartContext 读取并解析文档关联文件，传递取消信号到文件读取和XML解码

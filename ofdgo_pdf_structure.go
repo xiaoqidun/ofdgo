@@ -1006,7 +1006,11 @@ func (v *pdfStructureValues) encode(object pdfgo.Object, depth int) (StructureNo
 		dataName := "RawData"
 		if !v.auxiliary {
 			dataName = "DecodedData"
-			data, err = value.DecodeContext(v.ctx)
+			if v.reader != nil {
+				data, err = v.reader.DecodeStreamContext(v.ctx, value)
+			} else {
+				data, err = value.DecodeContext(v.ctx)
+			}
 		}
 		if err != nil {
 			return node, err
@@ -1702,7 +1706,7 @@ func (p *pdfImporter) documentMetadata(ctx context.Context, strict bool) error {
 	var packet []byte
 	var root *StructureNode
 	if stream != nil {
-		packet, err = stream.DecodeContext(ctx)
+		packet, err = p.reader.DecodeStreamContext(ctx, stream)
 		if err != nil {
 			if err := p.recoverPDFObject(ctx, "Metadata", stream, err); err != nil {
 				return err

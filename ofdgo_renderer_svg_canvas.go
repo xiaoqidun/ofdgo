@@ -143,13 +143,15 @@ type svgClipDef struct {
 	path string
 }
 
-// svgTemplateKey 按模板页、视口、压缩与资源模式区分共享SVG片段
+// svgTemplateKey 按模板页、视口、精度、分辨率、压缩与资源模式区分共享SVG片段
 type svgTemplateKey struct {
 	template       *PageContent
 	width          float64
 	height         float64
 	offsetX        float64
 	offsetY        float64
+	dpi            float64
+	precision      int
 	printing       bool
 	printContents  string
 	externalImages bool
@@ -710,9 +712,6 @@ func (b svgIntBox) union(other svgIntBox) svgIntBox {
 // effectivePrecision 获取当前渲染器生效的毫米路径精度
 // 返回: int 小数位数, int64 定点缩放倍率
 func (s *svgResourceRenderer) effectivePrecision() (int, int64) {
-	if s.collectClips {
-		return svgPrecisionScale(svgDefaultPrecision)
-	}
 	return svgPrecisionScale(s.precision)
 }
 
@@ -1126,6 +1125,27 @@ func (s *svgResourceRenderer) endObject() {
 	s.flushPendingPath()
 	s.objectStack = s.objectStack[:len(s.objectStack)-1]
 	fmt.Fprint(s.writer, `</g>`)
+}
+
+// beginTransparencyGroup 开启SVG标准透明组隔离
+// 入参: alpha 透明组不透明度
+// 返回: bool 是否开启成功
+func (s *svgResourceRenderer) beginTransparencyGroup(alpha uint8) bool {
+	if s.err != nil {
+		return false
+	}
+	s.flushPendingPath()
+	opacity := math.Round(float64(alpha)/255*10000) / 10000
+	_, s.err = fmt.Fprintf(s.writer, `<g opacity="%s">`, strconv.FormatFloat(opacity, 'f', -1, 64))
+	return s.err == nil
+}
+
+// endTransparencyGroup 结束SVG透明组隔离
+func (s *svgResourceRenderer) endTransparencyGroup() {
+	s.flushPendingPath()
+	if s.err == nil {
+		_, s.err = fmt.Fprint(s.writer, `</g>`)
+	}
 }
 
 // beginAnnotation 标记完整注解外观，内部图元保持原有层级和绘制顺序

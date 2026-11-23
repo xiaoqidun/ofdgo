@@ -90,6 +90,43 @@ func (v *canvasPageVisitor) DrawStamp(stamp Stamp) error {
 	return v.renderer.renderError
 }
 
+// canCanvasTransparencyGroup 判断画布后端是否支持离屏透明组隔离
+// 入参: renderer 目标画布渲染器
+// 返回: bool 是否支持透明组
+func canCanvasTransparencyGroup(renderer canvas.Renderer) bool {
+	switch renderer.(type) {
+	case *canvasPageCompiler, *pdfRenderer, *svgResourceRenderer:
+		return true
+	default:
+		return false
+	}
+}
+
+// beginCanvasTransparencyGroup 在支持的画布后端上开启离屏透明组隔离并返回关闭闭包
+// 入参: renderer 目标画布渲染器, alpha 透明组整体不透明度
+// 返回: func() 关闭闭包, bool 是否成功开启
+func beginCanvasTransparencyGroup(renderer canvas.Renderer, alpha uint8) (func(), bool) {
+	switch out := renderer.(type) {
+	case *canvasPageCompiler:
+		out.page.Commands = append(out.page.Commands, RasterCommand{Group: RasterGroupBegin, GroupAlpha: alpha})
+		return func() {
+			out.page.Commands = append(out.page.Commands, RasterCommand{Group: RasterGroupEnd})
+		}, true
+	case *pdfRenderer:
+		if !out.beginTransparencyGroup(alpha) {
+			return nil, false
+		}
+		return out.endTransparencyGroup, true
+	case *svgResourceRenderer:
+		if !out.beginTransparencyGroup(alpha) {
+			return nil, false
+		}
+		return out.endTransparencyGroup, true
+	default:
+		return nil, false
+	}
+}
+
 // BeginTransparencyGroup 为复合图元开启离屏透明组隔离
 // 入参: alpha 透明组不透明度
 // 返回: bool 是否开启了透明组
@@ -100,6 +137,9 @@ func (v *canvasPageVisitor) BeginTransparencyGroup(alpha uint8) bool {
 	}
 	if pdfOut, ok := v.ctx.Renderer.(*pdfRenderer); ok {
 		return pdfOut.beginTransparencyGroup(alpha)
+	}
+	if svgOut, ok := v.ctx.Renderer.(*svgResourceRenderer); ok {
+		return svgOut.beginTransparencyGroup(alpha)
 	}
 	return false
 }
@@ -112,6 +152,10 @@ func (v *canvasPageVisitor) EndTransparencyGroup() {
 	}
 	if pdfOut, ok := v.ctx.Renderer.(*pdfRenderer); ok {
 		pdfOut.endTransparencyGroup()
+		return
+	}
+	if svgOut, ok := v.ctx.Renderer.(*svgResourceRenderer); ok {
+		svgOut.endTransparencyGroup()
 	}
 }
 
@@ -169,12 +213,15 @@ func (v *canvasPageVisitor) renderTemplatePage(template *PageContent, offsetX, o
 	}
 	if svgOut, isSVG := v.ctx.Renderer.(*svgResourceRenderer); isSVG && !svgOut.embeddedFonts && len(svgOut.objectStack) == 0 && svgOut.err == nil {
 		w, h := svgOut.Size()
+		prec, _ := svgOut.effectivePrecision()
 		key := svgTemplateKey{
 			template:       template,
 			width:          w,
 			height:         h,
 			offsetX:        offsetX,
 			offsetY:        offsetY,
+			dpi:            r.dpi,
+			precision:      prec,
 			printing:       r.printing,
 			printContents:  r.printContents,
 			externalImages: svgOut.imageNames != nil,
@@ -199,6 +246,7 @@ func (v *canvasPageVisitor) renderTemplatePage(template *PageContent, offsetX, o
 			seen:         make(map[string]bool),
 			collectClips: true,
 			mergePaths:   true,
+			precision:    prec,
 		}
 		if svgOut.imageNames != nil {
 			sub.imageNames = make(map[svgImageKey]string)

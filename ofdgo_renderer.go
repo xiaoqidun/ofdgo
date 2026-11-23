@@ -361,10 +361,9 @@ func (r *Renderer) RebindReader(reader *Reader) {
 	r.scopedDrawParams = nil
 	r.scopedComposites = nil
 	r.pageResources = nil
-	r.resolvedFonts = make(map[resolvedFontKey]resolvedFontResult)
-	r.preparedFonts = make(map[string]*PreparedFont)
 	r.templatePageCache = make(map[string]*PageContent)
 	r.transparentEdges = nil
+	r.resetFontCache()
 }
 
 // BindPageResources 解析并绑定指定页面的局部资源作用域，返回恢复闭包

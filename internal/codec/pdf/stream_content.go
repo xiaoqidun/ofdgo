@@ -62,6 +62,7 @@ type ContentBuilder struct {
 // contentGState 保存当前内容流的PDF图形状态缓存
 type contentGState struct {
 	alpha          uint8
+	alphaValid     bool
 	fill           canvas.Paint
 	fillValid      bool
 	stroke         canvas.Paint
@@ -76,6 +77,7 @@ type contentGState struct {
 	fontSize       float64
 	fontDirection  ctext.Direction
 	textPos        canvas.Matrix
+	textDirty      bool
 	textRenderMode int
 }
 
@@ -84,34 +86,63 @@ type contentPathAdapter struct {
 	b *ContentBuilder
 }
 
-// NewContentBuilder 创建内容流构建器并初始化毫米到点的缩放矩阵
-// 入参: sink 全局资源登记回调
+// unknownGState 返回所有图形状态均未确定的初始状态，用于Form XObject或状态失效恢复
+// 返回: contentGState 全未知图形状态
+func unknownGState() contentGState {
+	return contentGState{
+		lineWidth:      -1,
+		lineCap:        -1,
+		lineJoin:       -1,
+		miterLimit:     -1,
+		fontDirection:  ctext.LeftToRight,
+		textPos:        canvas.Identity,
+		textRenderMode: -1,
+	}
+}
+
+// newContentBuilder 使用指定初始图形状态创建内容流构建器并写入毫米到点缩放矩阵
+// 入参: sink 全局资源登记回调, state 初始图形状态
 // 返回: *ContentBuilder 内容流构建器
-func NewContentBuilder(sink ContentResourceSink) *ContentBuilder {
+func newContentBuilder(sink ContentResourceSink, state contentGState) *ContentBuilder {
 	b := &ContentBuilder{
-		sink: sink,
-		buf:  make([]byte, 0, 1024),
-		state: contentGState{
-			alpha:          255,
-			fill:           canvas.Paint{Color: canvas.Black},
-			fillValid:      true,
-			stroke:         canvas.Paint{Color: canvas.Black},
-			strokeValid:    true,
-			lineWidth:      1,
-			lineCap:        0,
-			lineJoin:       0,
-			miterLimit:     10,
-			dashes:         []float64{0},
-			fontDirection:  ctext.LeftToRight,
-			textPos:        canvas.Identity,
-			textRenderMode: 0,
-		},
+		sink:  sink,
+		buf:   make([]byte, 0, 1024),
+		state: state,
 	}
 	b.buf = appendCompactFloatBytes(b.buf, PtPerMM, 7)
 	b.buf = append(b.buf, " 0 0 "...)
 	b.buf = appendCompactFloatBytes(b.buf, PtPerMM, 7)
 	b.buf = append(b.buf, " 0 0 cm"...)
 	return b
+}
+
+// NewContentBuilder 创建页面内容流构建器并按ISO 32000-1页面默认值初始化图形状态
+// 入参: sink 全局资源登记回调
+// 返回: *ContentBuilder 内容流构建器
+func NewContentBuilder(sink ContentResourceSink) *ContentBuilder {
+	return newContentBuilder(sink, contentGState{
+		alpha:          255,
+		alphaValid:     true,
+		fill:           canvas.Paint{Color: canvas.Black},
+		fillValid:      true,
+		stroke:         canvas.Paint{Color: canvas.Black},
+		strokeValid:    true,
+		lineWidth:      1,
+		lineCap:        0,
+		lineJoin:       0,
+		miterLimit:     10,
+		dashes:         []float64{0},
+		fontDirection:  ctext.LeftToRight,
+		textPos:        canvas.Identity,
+		textRenderMode: 0,
+	})
+}
+
+// NewFormContentBuilder 创建Form XObject内容流构建器，不假设继承自调用点的图形状态为默认值
+// 入参: sink 全局资源登记回调
+// 返回: *ContentBuilder Form内容流构建器
+func NewFormContentBuilder(sink ContentResourceSink) *ContentBuilder {
+	return newContentBuilder(sink, unknownGState())
 }
 
 // appendClipPathOps 将页面坐标系裁剪路径转为紧凑PDF裁剪指令并追加W n
@@ -168,15 +199,13 @@ func transformedAxisRect(path *canvas.Path, m canvas.Matrix, requireClosed bool)
 			return canvas.Rect{}, false
 		}
 	}
-	explicitlyClosed := closed
 	if n == 5 {
 		if !pts[4].Equals(pts[0]) {
 			return canvas.Rect{}, false
 		}
 		n = 4
-		explicitlyClosed = true
 	}
-	if n != 4 || (requireClosed && !explicitlyClosed) {
+	if n != 4 || (requireClosed && !closed) {
 		return canvas.Rect{}, false
 	}
 	a, b, c, d := pts[0], pts[1], pts[2], pts[3]
@@ -373,14 +402,10 @@ func (b *ContentBuilder) SpanCount() int {
 	return len(b.spanStarts)
 }
 
-// IsolateNextText 断开与前驱文字对象的BT合并并记录隔离前图形状态快照
+// IsolateNextText 断开与前驱文字对象的BT合并，并在首个隔离文字span处记录图形状态快照
 func (b *ContentBuilder) IsolateNextText() {
 	b.EndText()
 	b.isolateNext = true
-	if !b.hasSavedState {
-		b.savedState = b.cloneState()
-		b.hasSavedState = true
-	}
 }
 
 // ClearTextIsolation 清除当前文字对象隔离快照
@@ -493,12 +518,15 @@ func (b *ContentBuilder) RenderText(text *canvas.Text, m canvas.Matrix, onSubCan
 			if b.isolateNext {
 				b.EndText()
 				b.isolateNext = false
+				b.savedState = b.cloneState()
+				b.hasSavedState = true
 			}
 			spanStart := len(b.buf)
 			b.spanStarts = append(b.spanStarts, spanStart)
 			if !b.inText {
 				b.buf = append(b.buf, " BT"...)
 				b.state.textPos = canvas.Identity
+				b.state.textDirty = false
 				b.inText = true
 			}
 			b.setFill(span.Face.Fill, m)
@@ -536,7 +564,7 @@ func (b *ContentBuilder) WrapFauxBold(firstSpan int, lineWidth float64, fillColo
 	var prefix []byte
 	prefix = append(prefix, " q "...)
 	prefix = appendCompactFloatBytes(prefix, lineWidth, 4)
-	prefix = append(prefix, " w 1 j 1 J "...)
+	prefix = append(prefix, " w 1 j 1 J [] 0 d "...)
 	if fillColor.R == fillColor.G && fillColor.G == fillColor.B {
 		prefix = appendCompactFloatBytes(prefix, float64(fillColor.R)/255, 4)
 		prefix = append(prefix, " G"...)
@@ -628,7 +656,7 @@ func (b *ContentBuilder) DrawImage(name pdfgo.Name, ref pdfgo.Reference, imgW, i
 		b.buf = appendCompactFloatBytes(b.buf, br.Y, 4)
 		b.buf = append(b.buf, " l h W n"...)
 	}
-	if b.state.alpha != 255 {
+	if !b.state.alphaValid || b.state.alpha != 255 {
 		gsName, gsRef := b.sink.OpacityGS(255)
 		b.addExtGState(gsName, gsRef)
 		b.buf = append(b.buf, " /"...)
@@ -651,7 +679,7 @@ func (b *ContentBuilder) DrawForm(name pdfgo.Name, ref pdfgo.Reference, m canvas
 	if clip != nil {
 		b.buf = appendClipPathOps(b.buf, clip)
 	}
-	if alpha != b.state.alpha {
+	if !b.state.alphaValid || alpha != b.state.alpha {
 		gsName, gsRef := b.sink.OpacityGS(alpha)
 		b.addExtGState(gsName, gsRef)
 		b.buf = append(b.buf, " /"...)
@@ -684,7 +712,7 @@ func (a contentPathAdapter) RenderText(_ *canvas.Text, _ canvas.Matrix) {}
 // 入参: img 图像, m 变换矩阵
 func (a contentPathAdapter) RenderImage(_ image.Image, _ canvas.Matrix) {}
 
-// insertBytes 在内容流指定位置原地插入字节片段
+// insertBytes 在内容流指定位置原地插入字节片段并平移后续span偏移
 // 入参: pos 插入偏移, data 待插入字节
 func (b *ContentBuilder) insertBytes(pos int, data []byte) {
 	n := len(data)
@@ -695,9 +723,14 @@ func (b *ContentBuilder) insertBytes(pos int, data []byte) {
 	b.buf = append(b.buf, data...)
 	copy(b.buf[pos+n:], b.buf[pos:oldLen])
 	copy(b.buf[pos:pos+n], data)
+	for i := range b.spanStarts {
+		if b.spanStarts[i] > pos {
+			b.spanStarts[i] += n
+		}
+	}
 }
 
-// injectFauxBoldRenderMode 在指定区间内所有顶层BT指令后注入2 Tr，自动跳过字符串字面量
+// injectFauxBoldRenderMode 在指定区间内将顶层0 Tr替换为2 Tr并在顶层BT后注入2 Tr，自动跳过字符串字面量
 // 入参: start 区间起始偏移
 func (b *ContentBuilder) injectFauxBoldRenderMode(start int) {
 	segment := b.buf[start:]
@@ -718,6 +751,15 @@ func (b *ContentBuilder) injectFauxBoldRenderMode(start int) {
 		if c == '(' {
 			parenDepth = 1
 			continue
+		}
+		if c == '0' && i+3 < len(segment) && segment[i+1] == ' ' && segment[i+2] == 'T' && segment[i+3] == 'r' {
+			prevOK := i == 0 || isPDFDelimiterOrSpace(segment[i-1])
+			nextOK := i+4 == len(segment) || isPDFDelimiterOrSpace(segment[i+4])
+			if prevOK && nextOK {
+				segment[i] = '2'
+				i += 3
+				continue
+			}
 		}
 		if c == 'B' && i+1 < len(segment) && segment[i+1] == 'T' {
 			prevOK := i == 0 || isPDFDelimiterOrSpace(segment[i-1])
@@ -746,6 +788,20 @@ func (b *ContentBuilder) injectFauxBoldRenderMode(start int) {
 		copy(b.buf[dst:dst+len(trOp)], trOp)
 		srcEnd = split
 	}
+	for i, off := range b.spanStarts {
+		if off <= start {
+			continue
+		}
+		shift := 0
+		for _, rel := range positions {
+			if start+rel <= off {
+				shift += len(trOp)
+			}
+		}
+		if shift > 0 {
+			b.spanStarts[i] = off + shift
+		}
+	}
 }
 
 // cloneState 复制当前图形状态快照
@@ -767,16 +823,7 @@ func (b *ContentBuilder) restoreAfterQ() {
 		}
 		return
 	}
-	b.state.fillValid = false
-	b.state.strokeValid = false
-	b.state.font = nil
-	b.state.fontEntry = nil
-	b.state.lineWidth = -1
-	b.state.lineCap = -1
-	b.state.lineJoin = -1
-	b.state.miterLimit = -1
-	b.state.dashes = nil
-	b.state.textRenderMode = -1
+	b.state = unknownGState()
 }
 
 // addFont 登记内容流引用的字体资源
@@ -818,7 +865,7 @@ func (b *ContentBuilder) addPattern(name pdfgo.Name, ref pdfgo.Reference) {
 // setAlpha 同步当前非描边与描边透明度图形状态
 // 入参: alpha 八位透明度值
 func (b *ContentBuilder) setAlpha(alpha uint8) {
-	if alpha == b.state.alpha {
+	if b.state.alphaValid && alpha == b.state.alpha {
 		return
 	}
 	name, ref := b.sink.OpacityGS(alpha)
@@ -827,6 +874,7 @@ func (b *ContentBuilder) setAlpha(alpha uint8) {
 	b.buf = append(b.buf, name...)
 	b.buf = append(b.buf, " gs"...)
 	b.state.alpha = alpha
+	b.state.alphaValid = true
 }
 
 // setFill 设置当前填充颜色或渐变，渐变前强制重置不透明状态
@@ -846,7 +894,7 @@ func (b *ContentBuilder) setFill(fill canvas.Paint, m canvas.Matrix) {
 		b.state.fillValid = false
 		return
 	}
-	if b.state.fillValid && fill.Equal(b.state.fill) && b.state.alpha == fill.Color.A {
+	if b.state.fillValid && fill.Equal(b.state.fill) && b.state.alphaValid && b.state.alpha == fill.Color.A {
 		return
 	}
 	c := fill.Color
@@ -890,7 +938,7 @@ func (b *ContentBuilder) setStroke(stroke canvas.Paint, m canvas.Matrix) {
 		b.state.strokeValid = false
 		return
 	}
-	if b.state.strokeValid && stroke.Equal(b.state.stroke) && b.state.alpha == stroke.Color.A {
+	if b.state.strokeValid && stroke.Equal(b.state.stroke) && b.state.alphaValid && b.state.alpha == stroke.Color.A {
 		return
 	}
 	c := stroke.Color
@@ -1050,10 +1098,10 @@ func (b *ContentBuilder) setFont(font *canvas.Font, size float64, direction ctex
 // setTextPosition 更新PDF文字矩阵，线性部分一致时输出更紧凑的Td指令
 // 入参: m 目标文字矩阵
 func (b *ContentBuilder) setTextPosition(m canvas.Matrix) {
-	if m.Equals(b.state.textPos) {
+	if !b.state.textDirty && m.Equals(b.state.textPos) {
 		return
 	}
-	if canvas.Equal(m[0][0], b.state.textPos[0][0]) && canvas.Equal(m[0][1], b.state.textPos[0][1]) && canvas.Equal(m[1][0], b.state.textPos[1][0]) && canvas.Equal(m[1][1], b.state.textPos[1][1]) {
+	if !canvas.Equal(b.state.textPos.Det(), 0) && canvas.Equal(m[0][0], b.state.textPos[0][0]) && canvas.Equal(m[0][1], b.state.textPos[0][1]) && canvas.Equal(m[1][0], b.state.textPos[1][0]) && canvas.Equal(m[1][1], b.state.textPos[1][1]) {
 		d := b.state.textPos.Inv().Dot(canvas.Point{X: m[0][2], Y: m[1][2]})
 		b.buf = append(b.buf, ' ')
 		b.buf = appendCompactFloatBytes(b.buf, d.X, 4)
@@ -1064,6 +1112,7 @@ func (b *ContentBuilder) setTextPosition(m canvas.Matrix) {
 		b.appendMatrixOp(m, " Tm")
 	}
 	b.state.textPos = m
+	b.state.textDirty = false
 }
 
 // setTextRenderMode 更新PDF文字渲染模式
@@ -1076,7 +1125,7 @@ func (b *ContentBuilder) setTextRenderMode(mode int) {
 	b.state.textRenderMode = mode
 }
 
-// writeGlyphs 编码并写入字形序列及精确字距调整，无字距调整时直接输出Tj
+// writeGlyphs 编码并写入字形序列及精确字距调整，对齐整数W宽度以消除长行累计漂移
 // 入参: mode 排版方向, glyphs 字形列表
 func (b *ContentBuilder) writeGlyphs(mode canvas.WritingMode, glyphs []ctext.Glyph) {
 	if len(glyphs) == 0 || b.state.font == nil || b.state.fontEntry == nil || b.state.font.SFNT == nil || b.state.font.SFNT.Head == nil || b.state.font.SFNT.Head.UnitsPerEm == 0 {
@@ -1093,44 +1142,51 @@ func (b *ContentBuilder) writeGlyphs(mode canvas.WritingMode, glyphs []ctext.Gly
 	}
 	f := 1000.0 / float64(b.state.font.SFNT.Head.UnitsPerEm)
 	hasAdjust := false
+	var targetPos float64
+	pdfPos := 0
 	for j, glyph := range glyphs {
 		if j == len(glyphs)-1 {
-			continue
+			break
 		}
+		var pdfW int
 		if mode == canvas.HorizontalTB || !glyph.Vertical {
-			origAdv := int32(b.state.font.SFNT.GlyphAdvance(glyph.ID))
-			if int(math.Round(f*float64(glyph.XAdvance-origAdv))) != 0 {
-				hasAdjust = true
-				break
-			}
+			pdfW = int(f*float64(b.state.font.SFNT.GlyphAdvance(glyph.ID)) + 0.5)
+			targetPos += f * float64(glyph.XAdvance)
 		} else {
-			origAdv := -int32(b.state.font.SFNT.GlyphVerticalAdvance(glyph.ID))
-			if int(math.Round(f*float64(glyph.YAdvance-origAdv))) != 0 {
-				hasAdjust = true
-				break
-			}
+			pdfW = -int(math.Round(f * float64(b.state.font.SFNT.GlyphVerticalAdvance(glyph.ID))))
+			targetPos += f * float64(glyph.YAdvance)
 		}
+		adj := int(math.Round(float64(pdfPos+pdfW) - targetPos))
+		if adj != 0 {
+			hasAdjust = true
+			break
+		}
+		pdfPos += pdfW
 	}
 	if !hasAdjust {
 		b.appendGlyphString(entry, glyphs)
 		b.buf = append(b.buf, "Tj"...)
+		b.state.textDirty = true
 		return
 	}
 	b.buf = append(b.buf, '[')
 	start := 0
+	targetPos = 0
+	pdfPos = 0
 	for j, glyph := range glyphs {
-		var adj int
-		if mode == canvas.HorizontalTB || !glyph.Vertical {
-			origAdv := int32(b.state.font.SFNT.GlyphAdvance(glyph.ID))
-			if glyph.XAdvance != origAdv {
-				adj = -int(math.Round(f * float64(glyph.XAdvance-origAdv)))
-			}
-		} else {
-			origAdv := -int32(b.state.font.SFNT.GlyphVerticalAdvance(glyph.ID))
-			if glyph.YAdvance != origAdv {
-				adj = -int(math.Round(f * float64(glyph.YAdvance-origAdv)))
-			}
+		if j == len(glyphs)-1 {
+			break
 		}
+		var pdfW int
+		if mode == canvas.HorizontalTB || !glyph.Vertical {
+			pdfW = int(f*float64(b.state.font.SFNT.GlyphAdvance(glyph.ID)) + 0.5)
+			targetPos += f * float64(glyph.XAdvance)
+		} else {
+			pdfW = -int(math.Round(f * float64(b.state.font.SFNT.GlyphVerticalAdvance(glyph.ID))))
+			targetPos += f * float64(glyph.YAdvance)
+		}
+		adj := int(math.Round(float64(pdfPos+pdfW) - targetPos))
+		pdfPos += pdfW - adj
 		if adj != 0 {
 			b.appendGlyphString(entry, glyphs[start:j+1])
 			b.buf = strconv.AppendInt(b.buf, int64(adj), 10)
@@ -1141,6 +1197,7 @@ func (b *ContentBuilder) writeGlyphs(mode canvas.WritingMode, glyphs []ctext.Gly
 		b.appendGlyphString(entry, glyphs[start:])
 	}
 	b.buf = append(b.buf, "]TJ"...)
+	b.state.textDirty = true
 }
 
 // appendGlyphString 将字形序列按标准字体WinAnsi或子集CID双字节写入PDF字面量串

@@ -79,11 +79,13 @@ type pdfStampFormKey struct {
 	printing bool
 }
 
-// pdfCompositeFormKey 按复合图元定义指针、打印模式与透明组隔离属性复用PDF Form
+// pdfCompositeFormKey 按复合图元定义指针、打印模式、分辨率、缩放档位与透明组隔离属性复用PDF Form
 type pdfCompositeFormKey struct {
 	unit          *CompositeGraphicUnit
 	printing      bool
 	printContents string
+	highRes       bool
+	scaleStep     int
 	group         bool
 }
 
@@ -175,6 +177,7 @@ type pdfRenderer struct {
 	glyphUnicode  map[*canvas.Font]map[uint16]rune
 	imageKey      any
 	imageClip     *canvas.Path
+	imageScale    float64
 	imageError    error
 	text          []codecpdf.TextPage
 	textClip      *canvas.Path
@@ -271,6 +274,21 @@ func newPDFPageRenderer(session *pdfStreamSession, ctx context.Context, width, h
 		width:      width,
 		height:     height,
 		content:    codecpdf.NewContentBuilder(session),
+		glyphPaths: *resourceCache[*canvas.Path, *canvas.Path](resources, 16<<20),
+		text:       make([]codecpdf.TextPage, 1),
+	}
+}
+
+// newPDFFormRenderer 为PDF Form XObject创建独占的流式渲染器，避免误假设继承自调用点的默认图形状态
+// 入参: session 共享PDF会话, ctx 取消上下文, width 表单宽度(毫米), height 表单高度(毫米), resources 缓存配额来源
+// 返回: *pdfRenderer 表单渲染器
+func newPDFFormRenderer(session *pdfStreamSession, ctx context.Context, width, height float64, resources *Resources) *pdfRenderer {
+	return &pdfRenderer{
+		session:    session,
+		ctx:        ctx,
+		width:      width,
+		height:     height,
+		content:    codecpdf.NewFormContentBuilder(session),
 		glyphPaths: *resourceCache[*canvas.Path, *canvas.Path](resources, 16<<20),
 		text:       make([]codecpdf.TextPage, 1),
 	}
@@ -951,6 +969,10 @@ func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 	if dpi := r.session.compression.ImageDPI(); dpi > 0 {
 		widthMM := math.Hypot(matrix[0][0], matrix[1][0]) * float64(w)
 		heightMM := math.Hypot(matrix[0][1], matrix[1][1]) * float64(h)
+		if r.imageScale > 1 {
+			widthMM *= r.imageScale
+			heightMM *= r.imageScale
+		}
 		target = codecpdf.TargetImageSize(widthMM, heightMM, dpi)
 		if target.X >= w && target.Y >= h {
 			target = image.Point{}
@@ -989,7 +1011,7 @@ func (r *pdfRenderer) pushForm(width, height float64) {
 	r.contentStack = append(r.contentStack, r.content)
 	r.sizeStack = append(r.sizeStack, [2]float64{r.width, r.height})
 	r.text = append(r.text, codecpdf.TextPage{})
-	r.content = codecpdf.NewContentBuilder(r.session)
+	r.content = codecpdf.NewFormContentBuilder(r.session)
 	r.width, r.height = width, height
 }
 
@@ -1423,7 +1445,7 @@ func (r *Renderer) drawPDFTemplatePage(pdfOut *pdfRenderer, template *PageConten
 		}
 		close(entry.done)
 	}()
-	subPDF := newPDFPageRenderer(pdfOut.session, pdfOut.ctx, pdfOut.width, pdfOut.height, r.reader.resources)
+	subPDF := newPDFFormRenderer(pdfOut.session, pdfOut.ctx, pdfOut.width, pdfOut.height, r.reader.resources)
 	subPDF.activeComp = pdfOut.activeComp
 	var subErr error
 	func() {
@@ -1527,7 +1549,7 @@ func (r *Renderer) drawPDFOFDStamp(pdfOut *pdfRenderer, s Stamp, pageH float64, 
 					if !rasterPositive(sealBox.W) || !rasterPositive(sealBox.H) {
 						continue
 					}
-					subPDF := newPDFPageRenderer(pdfOut.session, ctx, sealBox.W, sealBox.H, r.reader.resources)
+					subPDF := newPDFFormRenderer(pdfOut.session, ctx, sealBox.W, sealBox.H, r.reader.resources)
 					subPDF.activeComp = pdfOut.activeComp
 					pageRenderer := session.renderer
 					var renderErr error
@@ -1640,7 +1662,19 @@ func (r *Renderer) drawPDFCompositeForm(pdfOut *pdfRenderer, ref *CompositeGraph
 	if err := pdfContextErr(pdfOut.ctx); err != nil {
 		return err
 	}
-	key := pdfCompositeFormKey{unit: ref, printing: r.printing, printContents: r.printContents, group: needGroup}
+	scaleStep := 0
+	var subScale float64
+	if pdfOut.session.compression.ImageDPI() > 0 {
+		scale := max(math.Hypot(matrix.a, matrix.b), math.Hypot(matrix.c, matrix.d))
+		if pdfOut.imageScale > 1 {
+			scale *= pdfOut.imageScale
+		}
+		if scale > 1 {
+			scaleStep = int(math.Ceil(scale * 4))
+			subScale = float64(scaleStep) / 4
+		}
+	}
+	key := pdfCompositeFormKey{unit: ref, printing: r.printing, printContents: r.printContents, highRes: r.dpi >= 300, scaleStep: scaleStep, group: needGroup}
 	pdfOut.session.formMu.Lock()
 	if existing, ok := pdfOut.session.compForms[key]; ok {
 		waitingSet := false
@@ -1716,13 +1750,16 @@ func (r *Renderer) drawPDFCompositeForm(pdfOut *pdfRenderer, ref *CompositeGraph
 		pdfOut.session.formMu.Unlock()
 		close(entry.done)
 	}()
-	subPDF := newPDFPageRenderer(pdfOut.session, pdfOut.ctx, ref.Width, ref.Height, r.reader.resources)
+	subPDF := newPDFFormRenderer(pdfOut.session, pdfOut.ctx, ref.Width, ref.Height, r.reader.resources)
 	subPDF.activeComp = entry
+	subPDF.imageScale = subScale
 	var subErr error
 	func() {
 		prevCtx, prevErr, prevPattern := r.pageContext, r.renderError, r.patternPage
 		r.pageContext, r.renderError, r.patternPage = context.WithValue(pdfOut.ctx, pdfRendererCtxKey{}, subPDF), nil, nil
+		restoreBase := r.bindParsedResources(nil)
 		defer func() {
+			restoreBase()
 			r.pageContext, r.renderError, r.patternPage = prevCtx, prevErr, prevPattern
 		}()
 		subVisitor := &canvasPageVisitor{renderer: r, ctx: canvas.NewContext(subPDF), height: ref.Height}

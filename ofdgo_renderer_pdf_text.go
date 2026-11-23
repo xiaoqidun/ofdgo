@@ -51,14 +51,14 @@ func pdfOpaqueSolidColor(paint any) (color.RGBA, bool) {
 // pdfSingleGlyphID 解析可直接合并为批量PDF字形输出的唯一GID
 // 入参: face 字体, glyph 绘制字形
 // 返回: uint16 字形编号, bool 是否可作为单字形批量输出
-func pdfSingleGlyphID(face *canvas.FontFace, glyph textGlyph) (uint16, bool) {
+func (r *Renderer) pdfSingleGlyphID(face *canvas.FontFace, glyph textGlyph) (uint16, bool) {
 	if glyph.GlyphID > 0 && glyph.GlyphID <= 0xFFFF {
 		return uint16(glyph.GlyphID), true
 	}
 	if glyph.GlyphID < 0 {
 		runes := []rune(glyph.Text)
 		if len(runes) == 1 {
-			if id := face.Font.GlyphIndex(runes[0]); id != 0 {
+			if id := r.canvasGlyphIndex(face.Font, runes[0]); id != 0 {
 				return id, true
 			}
 		}
@@ -229,7 +229,7 @@ func (r *Renderer) pdfTextSupported(object TextObject, fontID string, face *canv
 			}
 			if glyph.GlyphID < 0 {
 				for _, char := range glyph.Text {
-					if face.Font.GlyphIndex(char) == 0 {
+					if r.canvasGlyphIndex(face.Font, char) == 0 {
 						return false
 					}
 				}
@@ -267,27 +267,27 @@ func (r *Renderer) pdfTextSupported(object TextObject, fontID string, face *canv
 }
 
 // glyphToUnicodeRune 缓存字体字形编号在PDF ToUnicode表中的首字符映射
-// 入参: font 画布字体, gid 字形编号
+// 入参: renderer 渲染器, font 画布字体, gid 字形编号
 // 返回: rune 映射码点, bool 是否存在有效映射
-func (r *pdfRenderer) glyphToUnicodeRune(font *canvas.Font, gid uint16) (rune, bool) {
+func (p *pdfRenderer) glyphToUnicodeRune(renderer *Renderer, font *canvas.Font, gid uint16) (rune, bool) {
 	if font == nil || font.SFNT == nil {
 		return 0, false
 	}
-	table := r.glyphUnicode[font]
+	table := p.glyphUnicode[font]
 	if table != nil {
 		if ch, ok := table[gid]; ok {
 			return ch, ch >= 0
 		}
 	} else {
-		if r.glyphUnicode == nil {
-			r.glyphUnicode = make(map[*canvas.Font]map[uint16]rune)
+		if p.glyphUnicode == nil {
+			p.glyphUnicode = make(map[*canvas.Font]map[uint16]rune)
 		}
 		table = make(map[uint16]rune)
-		r.glyphUnicode[font] = table
+		p.glyphUnicode[font] = table
 	}
-	if rs := font.SFNT.GlyphToUnicode(gid); len(rs) > 0 {
-		table[gid] = rs[0]
-		return rs[0], true
+	if ch, ok := renderer.canvasGlyphToUnicode(font, gid); ok {
+		table[gid] = ch
+		return ch, true
 	}
 	table[gid] = -1
 	return 0, false
@@ -324,11 +324,11 @@ func (r *Renderer) checkPDFTextNeedsActualText(pdfOutput *pdfRenderer, object Te
 				return true
 			}
 			for i, glyph := range glyphs {
-				gid, ok := pdfSingleGlyphID(face, glyph)
+				gid, ok := r.pdfSingleGlyphID(face, glyph)
 				if !ok {
 					return true
 				}
-				mapped, has := pdfOutput.glyphToUnicodeRune(face.Font, gid)
+				mapped, has := pdfOutput.glyphToUnicodeRune(r, face.Font, gid)
 				if !has || mapped > 0xFFFF {
 					return true
 				}
@@ -353,11 +353,11 @@ func (r *Renderer) checkPDFTextNeedsActualText(pdfOutput *pdfRenderer, object Te
 				if ch > 0xFFFF {
 					return true
 				}
-				gid := face.Font.GlyphIndex(ch)
+				gid := r.canvasGlyphIndex(face.Font, ch)
 				if gid == 0 {
 					return true
 				}
-				mapped, has := pdfOutput.glyphToUnicodeRune(face.Font, gid)
+				mapped, has := pdfOutput.glyphToUnicodeRune(r, face.Font, gid)
 				if !has || mapped != ch {
 					return true
 				}
@@ -373,11 +373,11 @@ func (r *Renderer) checkPDFTextNeedsActualText(pdfOutput *pdfRenderer, object Te
 			if runes[i] > 0xFFFF {
 				return true
 			}
-			gid, ok := pdfSingleGlyphID(face, glyph)
+			gid, ok := r.pdfSingleGlyphID(face, glyph)
 			if !ok {
 				return true
 			}
-			mapped, has := pdfOutput.glyphToUnicodeRune(face.Font, gid)
+			mapped, has := pdfOutput.glyphToUnicodeRune(r, face.Font, gid)
 			if !has || mapped != runes[i] {
 				return true
 			}

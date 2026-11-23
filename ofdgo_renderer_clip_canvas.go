@@ -343,15 +343,11 @@ func applyFillClipPath(path, clip *canvas.Path) *canvas.Path {
 			return &canvas.Path{}
 		}
 	}
-	if len(path.Data()) >= 64 {
-		if result, ok := intersectLinearCanvasContours(path, clip); ok {
-			return result
-		}
+	if result, ok := intersectLinearCanvasContours(path, clip); ok {
+		return result
 	}
-	if path.HasSubpaths() && len(path.Split()) >= 8 {
-		if result, ok := intersectCanvasContours(path, clip); ok {
-			return result
-		}
+	if result, ok := intersectCanvasContours(path, clip); ok {
+		return result
 	}
 	return applyClipPath(path, clip)
 }
@@ -543,7 +539,7 @@ func (r *Renderer) buildClipAreaPath(obj PathObject, drawParam string, parent Ma
 	p := r.buildPath(obj, 0, IdentityMatrix(), false)
 	var result *canvas.Path
 	stroke := obj.Stroke != nil && *obj.Stroke
-	fill := obj.Fill != nil && *obj.Fill || !stroke && obj.Fill == nil
+	fill := obj.Fill != nil && *obj.Fill || !stroke
 	if fill {
 		paths := canvas.Paths(p.Copy().Split())
 		for _, path := range paths {

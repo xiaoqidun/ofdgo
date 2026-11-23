@@ -47,7 +47,7 @@ func (p *pdfImporter) threeDAnnotation(ctx context.Context, page *pdfgo.Page, an
 	var data []byte
 	id := p.modelAttachments[source.Stream]
 	if id == "" {
-		data, err = source.Stream.DecodeContext(ctx)
+		data, err = p.reader.DecodeStreamContext(ctx, source.Stream)
 		if err != nil {
 			return p.interactiveAppearanceFallback(ctx, page, annotation, "model", err)
 		}
@@ -213,7 +213,7 @@ func (p *pdfImporter) threeDMarkupAnnotation(ctx context.Context, annotation pdf
 		sum, ok := state.sums[source.Stream]
 		if !ok {
 			var err error
-			sum, err = pdfgo.ThreeDArtworkChecksum(ctx, source.Stream)
+			sum, err = p.reader.ThreeDArtworkChecksum(ctx, source.Stream)
 			if err != nil {
 				return annotation, p.recoverPDFObject(ctx, "Annotation.ExData", annotation.Dictionary["ExData"], err)
 			}

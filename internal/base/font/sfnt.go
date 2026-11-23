@@ -231,6 +231,16 @@ func (f *SFNT) GlyphIndex(char rune) uint16 {
 	return 0
 }
 
+// GlyphToUnicode 返回指定字形在Unicode优先级编码表下对应的全部字符
+// 入参: gid 字形编号
+// 返回: []rune 排序后的字符列表
+func (f *SFNT) GlyphToUnicode(gid uint16) []rune {
+	if f == nil {
+		return nil
+	}
+	return f.glyphCharacters(gid)
+}
+
 // GlyphAdvance 返回水平字宽
 // 入参: gid 字形编号
 // 返回: uint16 字宽

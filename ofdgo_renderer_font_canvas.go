@@ -324,6 +324,80 @@ func (r *Renderer) cachedTextGlyphPath(face *canvas.FontFace, glyph textGlyph) (
 	return cached.path, cached.width
 }
 
+// canvasFontOutliner 获取或按摘要缓存Canvas字体对应的OpenType轮廓与标准映射解析器
+// 入参: font 画布字体
+// 返回: *basefont.Outliner 轮廓解析器, error 解析错误
+func (r *Renderer) canvasFontOutliner(font *canvas.Font) (*basefont.Outliner, error) {
+	if font == nil {
+		return nil, nil
+	}
+	state := r.canvasState()
+	if outlines := state.fontOutlines[font]; outlines != nil {
+		return outlines, nil
+	}
+	digest, ok := state.fontDigests[font]
+	if !ok {
+		digest = sha256.Sum256(basefont.SFNTData(font.Tables))
+		state.fontDigests[font] = digest
+	}
+	cache := r.canvasFontOutlines()
+	ctx := r.pageContext
+	if ctx == nil {
+		ctx = r.outputContext()
+	}
+	outlines, err := cache.load(ctx, digest, func() (*basefont.Outliner, int, error) {
+		metrics, parseErr := basefont.ParseSFNTTables(font.Tables)
+		if parseErr != nil {
+			return nil, 0, parseErr
+		}
+		cost := uint64(512)
+		for _, data := range metrics.Tables {
+			cost += uint64(len(data))
+		}
+		cost += metrics.CmapEntries() * 16
+		return &basefont.Outliner{Font: metrics}, int(min(cost, uint64(cache.limit))), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	state.fontOutlines[font] = outlines
+	return outlines, nil
+}
+
+// canvasGlyphIndex 按OpenType标准Unicode优先级查询Canvas字体的字形编号，避免被MacRoman等旧子表覆盖
+// 入参: font 画布字体, char 字符
+// 返回: uint16 字形编号
+func (r *Renderer) canvasGlyphIndex(font *canvas.Font, char rune) uint16 {
+	if font == nil {
+		return 0
+	}
+	if outlines, err := r.canvasFontOutliner(font); err == nil && outlines != nil {
+		return outlines.Font.GlyphIndex(char)
+	}
+	return font.GlyphIndex(char)
+}
+
+// canvasGlyphToUnicode 按OpenType标准Unicode优先级反查字形对应的首个Unicode码点
+// 入参: font 画布字体, gid 字形编号
+// 返回: rune 映射码点, bool 是否存在有效映射
+func (r *Renderer) canvasGlyphToUnicode(font *canvas.Font, gid uint16) (rune, bool) {
+	if font == nil {
+		return 0, false
+	}
+	if outlines, err := r.canvasFontOutliner(font); err == nil && outlines != nil {
+		if rs := outlines.Font.GlyphToUnicode(gid); len(rs) > 0 {
+			return rs[0], true
+		}
+		return 0, false
+	}
+	if font.SFNT != nil {
+		if rs := font.SFNT.GlyphToUnicode(gid); len(rs) > 0 {
+			return rs[0], true
+		}
+	}
+	return 0, false
+}
+
 // cachedTextGlyph 获取缓存的字形路径、宽度与局部包围盒
 // 入参: face 字体, glyph 绘制字形
 // 返回: textGlyphPathCacheValue 字形缓存值
@@ -350,31 +424,10 @@ func (r *Renderer) cachedTextGlyph(face *canvas.FontFace, glyph textGlyph) textG
 	if cached, ok := glyphCache.get(key); ok {
 		return cached
 	}
-	outlines := state.fontOutlines[face.Font]
-	if outlines == nil {
-		cache := r.canvasFontOutlines()
-		ctx := r.pageContext
-		if ctx == nil {
-			ctx = r.outputContext()
-		}
-		var err error
-		outlines, err = cache.load(ctx, digest, func() (*basefont.Outliner, int, error) {
-			metrics, parseErr := basefont.ParseSFNTTables(face.Font.Tables)
-			if parseErr != nil {
-				return nil, 0, parseErr
-			}
-			cost := uint64(512)
-			for _, data := range metrics.Tables {
-				cost += uint64(len(data))
-			}
-			cost += metrics.CmapEntries() * 16
-			return &basefont.Outliner{Font: metrics}, int(min(cost, uint64(cache.limit))), nil
-		})
-		if err != nil {
-			r.renderError = err
-			return textGlyphPathCacheValue{path: &canvas.Path{}}
-		}
-		state.fontOutlines[face.Font] = outlines
+	outlines, err := r.canvasFontOutliner(face.Font)
+	if err != nil {
+		r.renderError = err
+		return textGlyphPathCacheValue{path: &canvas.Path{}}
 	}
 	path, width, err := textGlyphPath(face, glyph, outlines)
 	if err != nil {

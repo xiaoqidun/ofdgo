@@ -583,7 +583,7 @@ func (p *pdfImporter) documentAttachments(ctx context.Context) error {
 			p.warning(pdfgo.Diagnostic{Message: "PDF embedded file without embedded data ignored"})
 			return nil
 		}
-		data, err := file.Embedded.DecodeContext(ctx)
+		data, err := p.reader.DecodeStreamContext(ctx, file.Embedded)
 		if err != nil {
 			if p.warning != nil && pdfAuxiliaryError(err) {
 				p.warning(pdfgo.Diagnostic{Message: "PDF document attachment retained as metadata: " + err.Error()})

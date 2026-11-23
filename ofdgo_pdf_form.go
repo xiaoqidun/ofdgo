@@ -22,7 +22,6 @@ import (
 	"encoding/xml"
 	"hash"
 	"math"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -482,12 +481,14 @@ func canonicalFormObject(object GraphicObject) GraphicObject {
 	return object
 }
 
-// isolatedGroupContentDigest 计算独立透明组子图元局部几何与继承图形状态的确定性摘要，避免跨状态光栅缓存误命中
+// isolatedGroupContentDigest 计算独立透明组子图元局部几何与继承图形状态的确定性值摘要，遇不可摘要复杂对象返回false避免缓存碰撞
 // 入参: nodes 剥离外层裁剪后的子图元切片, toLocal 页面到表单局部毫米坐标的变换矩阵, space 组混合颜色空间
-// 返回: [32]byte 内容与状态特征摘要
-func isolatedGroupContentDigest(nodes []pdfCompositeNode, toLocal pdfgo.Matrix, space *pdfgo.ColorSpace) [32]byte {
+// 返回: [32]byte 内容与状态特征摘要, bool 是否允许跨页缓存
+func isolatedGroupContentDigest(nodes []pdfCompositeNode, toLocal pdfgo.Matrix, space *pdfgo.ColorSpace) ([32]byte, bool) {
+	var zero [32]byte
 	h := sha256.New()
 	var buf [8]byte
+	cacheable := true
 	writeU64 := func(v uint64) {
 		binary.LittleEndian.PutUint64(buf[:], v)
 		h.Write(buf[:])
@@ -510,17 +511,17 @@ func isolatedGroupContentDigest(nodes []pdfCompositeNode, toLocal pdfgo.Matrix, 
 		writeU64(uint64(len(s)))
 		h.Write([]byte(s))
 	}
-	writePtr := func(v any) {
-		if v == nil {
-			writeU64(0)
+	writeBytes := func(b []byte) {
+		writeU64(uint64(len(b)))
+		h.Write(b)
+	}
+	writeObject := func(obj pdfgo.Object) {
+		if !cacheable {
 			return
 		}
-		rv := reflect.ValueOf(v)
-		if rv.Kind() != reflect.Pointer || rv.IsNil() {
-			writeU64(0)
-			return
+		if !pdfgo.HashObject(h, obj) {
+			cacheable = false
 		}
-		writeU64(uint64(rv.Pointer()))
 	}
 	writeMatrix := func(m pdfgo.Matrix) {
 		for _, v := range m {
@@ -528,12 +529,94 @@ func isolatedGroupContentDigest(nodes []pdfCompositeNode, toLocal pdfgo.Matrix, 
 		}
 	}
 	writeColorSpace := func(cs *pdfgo.ColorSpace) {
-		writePtr(cs)
-		if cs != nil {
-			writeString(string(cs.Model))
+		if !cacheable {
+			return
+		}
+		writeBool(cs != nil)
+		if cs == nil {
+			return
+		}
+		digest, ok := cs.Digest()
+		if !ok {
+			cacheable = false
+			return
+		}
+		h.Write(digest[:])
+	}
+	writeFont := func(font *pdfgo.Font) {
+		if !cacheable {
+			return
+		}
+		writeBool(font != nil)
+		if font == nil {
+			return
+		}
+		writeString(font.Name)
+		writeString(string(font.Subtype))
+		writeString(string(font.ProgramType))
+		writeBool(font.Vertical)
+		writeBytes(font.Program)
+		writeObject(font.Dictionary)
+	}
+	writeGlyphs := func(glyphs []pdfgo.Glyph, positions []pdfgo.Point) {
+		writeU64(uint64(len(glyphs)))
+		for _, g := range glyphs {
+			writeU64(uint64(g.Code))
+			writeU64(uint64(g.CID))
+			writeU64(uint64(g.ID))
+			writeBool(g.HasID)
+			writeString(g.Name)
+			writeString(g.Text)
+			writeFloat(g.Width)
+			writeFloat(g.Vertical.Origin.X)
+			writeFloat(g.Vertical.Origin.Y)
+			writeFloat(g.Vertical.Advance)
+			writeBool(g.WordSpace)
+		}
+		writeU64(uint64(len(positions)))
+		for _, pos := range positions {
+			writeFloat(pos.X)
+			writeFloat(pos.Y)
 		}
 	}
+	writeTextClip := func(tc *pdfgo.TextClip) {
+		if !cacheable {
+			return
+		}
+		writeBool(tc != nil)
+		if tc == nil {
+			return
+		}
+		writeFont(tc.Font)
+		writeFloat(tc.Size)
+		writeFloat(tc.HorizontalScale)
+		writeMatrix(toLocal.Mul(tc.Matrix))
+		writeGlyphs(tc.Glyphs, tc.Positions)
+	}
+	writeImage := func(img *pdfgo.Image) {
+		if !cacheable {
+			return
+		}
+		writeBool(img != nil)
+		if img == nil {
+			return
+		}
+		writeU64(uint64(img.Width))
+		writeU64(uint64(img.Height))
+		writeU64(uint64(img.BitsPerComponent))
+		writeBool(img.ImageMask)
+		writeBool(img.Interpolate)
+		writeString(string(img.Intent))
+		writeObject(img.ColorSpace)
+		writeObject(img.Decode)
+		writeObject(img.Mask)
+		writeObject(img.SoftMask)
+		writeObject(img.Stream)
+	}
 	writePath := func(path pdfgo.Path, mat pdfgo.Matrix) {
+		if !cacheable {
+			return
+		}
 		writeBool(path.EvenOdd)
 		writeU64(uint64(len(path.Segments)))
 		for _, seg := range path.Segments {
@@ -547,10 +630,17 @@ func isolatedGroupContentDigest(nodes []pdfCompositeNode, toLocal pdfgo.Matrix, 
 		}
 		writeU64(uint64(len(path.Text)))
 		for _, tc := range path.Text {
-			writePtr(tc)
+			writeTextClip(tc)
 		}
 	}
 	writePaint := func(paint pdfgo.Paint) {
+		if !cacheable {
+			return
+		}
+		if paint.Process != nil || paint.Colorant != nil || paint.Axial != nil || paint.Radial != nil || paint.Function != nil || paint.Mesh != nil || paint.Tiling != nil || paint.Shading != nil {
+			cacheable = false
+			return
+		}
 		writeBool(paint.None)
 		writeFloat(paint.Alpha)
 		for _, v := range paint.RGB {
@@ -564,19 +654,19 @@ func isolatedGroupContentDigest(nodes []pdfCompositeNode, toLocal pdfgo.Matrix, 
 		}
 		writeColorSpace(paint.Space)
 		writeString(string(paint.SourceSpace))
+		writeU64(uint64(len(paint.Values)))
 		for _, v := range paint.Values {
 			writeFloat(v)
 		}
-		writePtr(paint.Process)
-		writePtr(paint.Colorant)
-		writePtr(paint.Axial)
-		writePtr(paint.Radial)
-		writePtr(paint.Function)
-		writePtr(paint.Mesh)
-		writePtr(paint.Tiling)
-		writePtr(paint.Shading)
 	}
 	writeStyle := func(st pdfgo.Style) {
+		if !cacheable {
+			return
+		}
+		if st.SoftMask != nil || st.Halftone != nil || st.Transfer != nil {
+			cacheable = false
+			return
+		}
 		writePaint(st.Fill)
 		writePaint(st.Stroke)
 		writeFloat(st.LineWidth)
@@ -595,7 +685,6 @@ func isolatedGroupContentDigest(nodes []pdfCompositeNode, toLocal pdfgo.Matrix, 
 		writeString(string(st.RenderingIntent))
 		writeString(string(st.BlendMode))
 		writeBool(st.AlphaIsShape)
-		writePtr(st.SoftMask)
 		writeBool(st.Smoothness != nil)
 		if st.Smoothness != nil {
 			writeFloat(*st.Smoothness)
@@ -604,47 +693,40 @@ func isolatedGroupContentDigest(nodes []pdfCompositeNode, toLocal pdfgo.Matrix, 
 		if st.Antialias != nil {
 			writeBool(*st.Antialias)
 		}
-		writePtr(st.Halftone)
-		writePtr(st.Transfer)
 		writeU64(uint64(len(st.Clips)))
 		for _, clip := range st.Clips {
 			writePath(clip, toLocal)
 		}
 	}
 	writeTextMark := func(tm *pdfgo.TextMark) {
-		writePtr(tm.Font)
-		if tm.Font != nil {
-			writeString(tm.Font.Name)
+		if !cacheable {
+			return
 		}
+		writeFont(tm.Font)
 		writeU64(uint64(tm.Mode))
 		writeFloat(tm.Size)
 		writeFloat(tm.HorizontalScale)
 		writeMatrix(toLocal.Mul(tm.Matrix))
+		writeBool(tm.StrokeMatrix != (pdfgo.Matrix{}))
 		if tm.StrokeMatrix != (pdfgo.Matrix{}) {
 			writeMatrix(toLocal.Mul(tm.StrokeMatrix))
 		}
 		writeStyle(tm.Style)
-		writeU64(uint64(len(tm.Glyphs)))
-		for _, g := range tm.Glyphs {
-			writeU64(uint64(g.Code))
-			writeU64(uint64(g.CID))
-			writeString(g.Name)
-			writeFloat(g.Width)
-		}
-		writeU64(uint64(len(tm.Positions)))
-		for _, pos := range tm.Positions {
-			writeFloat(pos.X)
-			writeFloat(pos.Y)
-		}
+		writeGlyphs(tm.Glyphs, tm.Positions)
+		writeTextClip(tm.Clip)
 	}
 	var hashNodes func(h hash.Hash, list []pdfCompositeNode)
 	hashNodes = func(h hash.Hash, list []pdfCompositeNode) {
 		writeU64(uint64(len(list)))
 		for _, node := range list {
+			if !cacheable {
+				return
+			}
 			if node.path != nil {
 				h.Write([]byte{'P'})
 				writeBool(node.path.Fill)
 				writeBool(node.path.Stroke)
+				writeBool(node.path.StrokeMatrix != (pdfgo.Matrix{}))
 				if node.path.StrokeMatrix != (pdfgo.Matrix{}) {
 					writeMatrix(toLocal.Mul(node.path.StrokeMatrix))
 				}
@@ -657,7 +739,7 @@ func isolatedGroupContentDigest(nodes []pdfCompositeNode, toLocal pdfgo.Matrix, 
 			}
 			if node.image != nil {
 				h.Write([]byte{'I'})
-				writePtr(node.image.Image)
+				writeImage(node.image.Image)
 				writeMatrix(toLocal.Mul(node.image.Matrix))
 				writeStyle(node.image.Style)
 			}
@@ -666,13 +748,16 @@ func isolatedGroupContentDigest(nodes []pdfCompositeNode, toLocal pdfgo.Matrix, 
 				writeTextMark(node.glyph)
 			}
 			if node.group != nil {
+				if node.group.SoftMask != nil {
+					cacheable = false
+					return
+				}
 				h.Write([]byte{'G'})
 				writeFloat(node.group.Alpha)
 				writeBool(node.group.Isolated)
 				writeBool(node.group.Knockout)
 				writeString(string(node.group.BlendMode))
 				writeColorSpace(node.group.ColorSpace)
-				writePtr(node.group.SoftMask)
 			}
 			if len(node.children) != 0 {
 				h.Write([]byte{'C'})
@@ -682,9 +767,12 @@ func isolatedGroupContentDigest(nodes []pdfCompositeNode, toLocal pdfgo.Matrix, 
 	}
 	writeColorSpace(space)
 	hashNodes(h, nodes)
+	if !cacheable {
+		return zero, false
+	}
 	var sum [32]byte
 	h.Sum(sum[:0])
-	return sum
+	return sum, true
 }
 
 // encode 按原顺序编码对象分块并规范化浮点舍入噪声，不为缓存检查整理连续对象数组
@@ -1270,6 +1358,7 @@ func (p *pdfImporter) compositeIsolatedGroupRaster(node pdfCompositeNode) (bool,
 	if space != nil {
 		spaceName = string(space.Model)
 	}
+	digest, cacheable := isolatedGroupContentDigest(strippedChildren, formToLocal, space)
 	cacheKey := pdfIsolatedGroupKey{
 		ref:           g.Ref,
 		stream:        g.Stream,
@@ -1278,12 +1367,16 @@ func (p *pdfImporter) compositeIsolatedGroupRaster(node pdfCompositeNode) (bool,
 		alpha:         int(math.Round(g.Alpha * 255)),
 		knockout:      g.Knockout,
 		space:         spaceName,
-		contentDigest: isolatedGroupContentDigest(strippedChildren, formToLocal, space),
+		contentDigest: digest,
 	}
 	if !p.hasReferenceDocuments() && g.Ref != (pdfgo.Reference{}) {
 		cacheKey.stream = nil
 	}
-	cached, found := p.isolatedGroupImages[cacheKey]
+	var cached pdfIsolatedGroupImage
+	found := false
+	if cacheable {
+		cached, found = p.isolatedGroupImages[cacheKey]
+	}
 	if !found {
 		localGroup := *g
 		localNode := pdfCompositeNode{group: &localGroup, children: strippedChildren}
@@ -1321,10 +1414,12 @@ func (p *pdfImporter) compositeIsolatedGroupRaster(node pdfCompositeNode) (bool,
 			return false, nil
 		}
 		cached = pdfIsolatedGroupImage{id: objs[0].ImageObject.ResourceID, localBox: localBox}
-		if p.isolatedGroupImages == nil {
-			p.isolatedGroupImages = make(map[pdfIsolatedGroupKey]pdfIsolatedGroupImage)
+		if cacheable {
+			if p.isolatedGroupImages == nil {
+				p.isolatedGroupImages = make(map[pdfIsolatedGroupKey]pdfIsolatedGroupImage)
+			}
+			p.isolatedGroupImages[cacheKey] = cached
 		}
-		p.isolatedGroupImages[cacheKey] = cached
 	}
 	boxMatrix := localToPage.Mul(pdfgo.Matrix{cached.localBox.W, 0, 0, cached.localBox.H, cached.localBox.X, cached.localBox.Y})
 	instBox := pdfBounds([]pdfgo.Point{

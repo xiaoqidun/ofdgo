@@ -24,7 +24,6 @@ import (
 	"image/jpeg"
 	"io"
 	"math"
-	"reflect"
 	"sync"
 
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
@@ -212,7 +211,7 @@ func (c *pdfSharedImageCache) acquire(key pdfImageKey, space pdfgo.Object) (*pdf
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, entry := range c.entries[key] {
-		if reflect.DeepEqual(entry.space, space) {
+		if pdfgo.EqualObject(entry.space, space) {
 			return entry, false
 		}
 	}
@@ -311,7 +310,7 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	}
 	id := ""
 	for _, resource := range p.imageIDs[key] {
-		if reflect.DeepEqual(resource.space, source.ColorSpace) {
+		if pdfgo.EqualObject(resource.space, source.ColorSpace) {
 			id = resource.id
 			break
 		}

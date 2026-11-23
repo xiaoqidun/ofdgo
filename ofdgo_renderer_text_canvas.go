@@ -105,9 +105,8 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		sizeMM *= scale
 	}
 	sizePt := sizeMM * ptPerMM
-	compiler, isCompiler := ctx.Renderer.(*canvasPageCompiler)
 	objAlpha := fillAlphaByte(obj.Alpha)
-	useGroup := isCompiler && !r.textOnly && shouldFill && shouldStroke && objAlpha < 255
+	useGroup := canCanvasTransparencyGroup(ctx.Renderer) && !r.textOnly && shouldFill && shouldStroke && objAlpha < 255
 	styleAlpha := obj.Alpha
 	if useGroup {
 		styleAlpha = nil
@@ -227,6 +226,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if face.FauxBold != 0 && sfntTablesBold(face.Font.Tables) {
 		face.FauxBold = 0
 	}
+	if face.FauxItalic != 0 && sfntTablesItalic(face.Font.Tables) {
+		face.FauxItalic = 0
+	}
 	recoverBaseline := len(obj.TextCode) > 0 && obj.TextCode[0].Y == ""
 	var metrics canvas.FontMetrics
 	if textRun != nil || recoverBaseline {
@@ -291,10 +293,9 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 		}
 	}
 	if useGroup {
-		compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupBegin, GroupAlpha: objAlpha})
-		defer func() {
-			compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupEnd})
-		}()
+		if endGroup, ok := beginCanvasTransparencyGroup(ctx.Renderer, objAlpha); ok {
+			defer endGroup()
+		}
 	}
 	nonUniformStroke := shouldStroke && !matrixIsSimilarity(ctm)
 	codePos := 0
@@ -387,7 +388,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			drawAsGlyphPath := drawAsPath || glyph.GlyphID >= 0
 			if !drawAsGlyphPath {
 				for _, char := range str {
-					if face.Font.GlyphIndex(char) == 0 {
+					if r.canvasGlyphIndex(face.Font, char) == 0 {
 						drawAsGlyphPath = true
 						break
 					}
@@ -492,7 +493,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			}
 			if fillPaint != nil || fillPattern != nil {
 				if pdfText && obj.CharDirection == 0 && face.MmPerEm > 0 && hScale != 0 {
-					if gid, ok := pdfSingleGlyphID(face, glyph); ok {
+					if gid, ok := r.pdfSingleGlyphID(face, glyph); ok {
 						canJoin := len(batch) == 0
 						if !canJoin && math.Abs(cy-batchY) <= 1e-9 {
 							unitScale := hScale * face.MmPerEm
@@ -541,7 +542,7 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 						if rect.Contains(glyphPath.Copy().Transform(transform.Scale(hScale, 1)).Bounds()) {
 							available := true
 							for _, char := range str {
-								available = available && face.Font.GlyphIndex(char) != 0
+								available = available && r.canvasGlyphIndex(face.Font, char) != 0
 							}
 							if available {
 								glyphClip, drawAsGlyphPath = nil, false

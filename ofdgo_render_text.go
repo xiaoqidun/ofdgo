@@ -74,6 +74,19 @@ func sfntTablesBold(tables map[string][]byte) bool {
 	return false
 }
 
+// sfntTablesItalic 检查字体OS/2与head表是否声明字库本身为斜体
+// 入参: tables OpenType原始表数据
+// 返回: bool 字体本身是否为斜体
+func sfntTablesItalic(tables map[string][]byte) bool {
+	if os2 := tables["OS/2"]; len(os2) >= 64 && binary.BigEndian.Uint16(os2[62:64])&1 != 0 {
+		return true
+	}
+	if head := tables["head"]; len(head) >= 46 && binary.BigEndian.Uint16(head[44:46])&2 != 0 {
+		return true
+	}
+	return false
+}
+
 // preparedFontBold 读取已准备字体的OpenType表以判定字库本身是否为粗体
 // 入参: prepared 已准备字体, metrics 字体度量
 // 返回: bool 字体本身是否为粗体
@@ -89,6 +102,23 @@ func preparedFontBold(prepared *PreparedFont, metrics FontMetrics) bool {
 		return false
 	}
 	return sfntTablesBold(tables)
+}
+
+// preparedFontItalic 读取已准备字体的OpenType表以判定字库本身是否为斜体
+// 入参: prepared 已准备字体, metrics 字体度量
+// 返回: bool 字体本身是否为斜体
+func preparedFontItalic(prepared *PreparedFont, metrics FontMetrics) bool {
+	if sfnt, ok := metrics.(*sfntFontMetrics); ok && sfnt != nil && sfnt.SFNT != nil {
+		return sfntTablesItalic(sfnt.Tables)
+	}
+	if prepared == nil || len(prepared.Data) == 0 {
+		return false
+	}
+	tables, err := basefont.FileTables(prepared.Data, 0)
+	if err != nil {
+		return false
+	}
+	return sfntTablesItalic(tables)
 }
 
 // PositionText 定位文字、字形与搜索范围，不依赖页面输出后端
@@ -179,14 +209,21 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 	}
 	bold := weight >= 700
 	if definition := r.fontDefinition(id); definition != nil {
-		bold = bold && !definition.Bold
+		if definition.Bold {
+			bold = true
+		}
 		if basefont.NoSyntheticBold(definition.FontName, definition.FamilyName) {
 			bold = false
 		}
-		italic = italic && !definition.Italic
+		if definition.Italic {
+			italic = true
+		}
 	}
 	if bold && preparedFontBold(prepared, metrics) {
 		bold = false
+	}
+	if italic && preparedFontItalic(prepared, metrics) {
+		italic = false
 	}
 	ascent, descent, _ := metrics.VerticalMetrics()
 	unit := size / float64(metrics.UnitsPerEm())

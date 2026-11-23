@@ -141,23 +141,21 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		return
 	}
 	box, _ := ParseBox(obj.Boundary)
-	compiler, isCompiler := ctx.Renderer.(*canvasPageCompiler)
 	hasBorder := obj.Border != nil
 	if hasBorder {
 		if border := imageBorderObject(obj, box); border.LineWidth == 0 {
 			hasBorder = false
 		}
 	}
-	useGroup := isCompiler && hasBorder && obj.Alpha != nil && clampColor(*obj.Alpha) < 255
+	useGroup := canCanvasTransparencyGroup(ctx.Renderer) && hasBorder && obj.Alpha != nil && clampColor(*obj.Alpha) < 255
 	imgAlpha := obj.Alpha
 	borderObj := obj
 	if useGroup {
-		compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupBegin, GroupAlpha: uint8(clampColor(*obj.Alpha))})
-		defer func() {
-			compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupEnd})
-		}()
-		imgAlpha = nil
-		borderObj.Alpha = nil
+		if endGroup, ok := beginCanvasTransparencyGroup(ctx.Renderer, uint8(clampColor(*obj.Alpha))); ok {
+			defer endGroup()
+			imgAlpha = nil
+			borderObj.Alpha = nil
+		}
 	}
 	var img image.Image
 	pdfOutput, isPDF := ctx.Renderer.(*pdfRenderer)

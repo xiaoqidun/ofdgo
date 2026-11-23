@@ -1636,10 +1636,15 @@ func (e *NativeEngine) renderSession(ctx context.Context) (*session, error) {
 			}
 			doc, err := reader.DocStructureContext(ctx)
 			if err != nil {
+				_ = reader.Close()
 				return nil, err
 			}
+			oldReader := worker.Reader
 			worker.Reader = reader
 			worker.Renderer.RebindReader(reader)
+			if oldReader != nil && oldReader != reader {
+				_ = oldReader.Close()
+			}
 			worker.doc = doc
 			worker.boxCache = nil
 			worker.openActionCache = make([]int8, len(doc.Pages.Page))

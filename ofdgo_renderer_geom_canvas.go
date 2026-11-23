@@ -28,7 +28,7 @@ import (
 // canvasGeometryMu 保护开启路径求交调试开关时的全局状态
 var canvasGeometryMu sync.Mutex
 
-// settleCanvasPath 归整路径并在开启调试模式时加锁保护全局调试状态
+// settleCanvasPath 归整路径并在病态几何异常时折线降级保护
 // 入参: path 路径, rule 填充规则
 // 返回: *canvas.Path 归整路径
 func settleCanvasPath(path *canvas.Path, rule canvas.FillRule) *canvas.Path {
@@ -36,10 +36,28 @@ func settleCanvasPath(path *canvas.Path, rule canvas.FillRule) *canvas.Path {
 		canvasGeometryMu.Lock()
 		defer canvasGeometryMu.Unlock()
 	}
-	return path.Settle(rule)
+	if result, ok := trySettleCanvasPath(path, rule); ok {
+		return result
+	}
+	if result, ok := trySettleCanvasPath(path.Copy().Flatten(canvas.Tolerance), rule); ok {
+		return result
+	}
+	return path.Copy()
 }
 
-// combineCanvasPaths 计算路径布尔运算并在开启调试模式时加锁保护全局调试状态
+// trySettleCanvasPath 尝试执行路径归整并捕获底层扫描线异常
+// 入参: path 路径, rule 填充规则
+// 返回: *canvas.Path 归整路径, bool 是否成功
+func trySettleCanvasPath(path *canvas.Path, rule canvas.FillRule) (result *canvas.Path, ok bool) {
+	defer func() {
+		if recover() != nil {
+			result, ok = nil, false
+		}
+	}()
+	return path.Settle(rule), true
+}
+
+// combineCanvasPaths 计算路径布尔运算并在病态几何异常时折线降级保护
 // 入参: left 左路径, right 右路径, operation 运算名称
 // 返回: *canvas.Path 运算结果
 func combineCanvasPaths(left, right *canvas.Path, operation string) *canvas.Path {
@@ -47,15 +65,46 @@ func combineCanvasPaths(left, right *canvas.Path, operation string) *canvas.Path
 		canvasGeometryMu.Lock()
 		defer canvasGeometryMu.Unlock()
 	}
+	if result, ok := tryCombineCanvasPaths(left, right, operation); ok {
+		return result
+	}
+	if result, ok := tryCombineCanvasPaths(left.Copy().Flatten(canvas.Tolerance), right.Copy().Flatten(canvas.Tolerance), operation); ok {
+		return result
+	}
+	switch operation {
+	case "or", "xor":
+		return left.Copy().Append(right)
+	case "not":
+		return left.Copy()
+	default:
+		if result, ok := intersectCanvasContours(left, right); ok {
+			return result
+		}
+		if result, ok := intersectCanvasContours(right, left); ok {
+			return result
+		}
+		return left.Copy()
+	}
+}
+
+// tryCombineCanvasPaths 尝试执行路径布尔运算并捕获底层扫描线异常
+// 入参: left 左路径, right 右路径, operation 运算名称
+// 返回: *canvas.Path 运算结果, bool 是否成功
+func tryCombineCanvasPaths(left, right *canvas.Path, operation string) (result *canvas.Path, ok bool) {
+	defer func() {
+		if recover() != nil {
+			result, ok = nil, false
+		}
+	}()
 	switch operation {
 	case "or":
-		return left.Or(right)
+		return left.Or(right), true
 	case "not":
-		return left.Not(right)
+		return left.Not(right), true
 	case "xor":
-		return left.Xor(right)
+		return left.Xor(right), true
 	default:
-		return left.And(right)
+		return left.And(right), true
 	}
 }
 

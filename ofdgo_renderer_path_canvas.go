@@ -144,7 +144,7 @@ func (s *pathStyle) applyPathObject(r *Renderer, obj PathObject, bx, by, pageH f
 		s.applyStrokeColor(r, obj.StrokeColor, bx, by, pageH, obj.Alpha)
 	}
 	if obj.Cap != "" {
-		s.lineCap = pathLineCap(obj.Cap, canvas.ButtCap)
+		s.lineCap = pathLineCap(obj.Cap, s.lineCap)
 	}
 	s.applyLineJoin(obj.Join, obj.MiterLimit, obj.MiterLimitSet)
 	if obj.DashPattern != "" || obj.DashPatternSet {
@@ -226,8 +226,7 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		ctx.Pop()
 		return
 	}
-	compiler, isCompiler := ctx.Renderer.(*canvasPageCompiler)
-	useGroup := isCompiler && shouldFill && shouldStroke && objAlpha < 255
+	useGroup := canCanvasTransparencyGroup(ctx.Renderer) && shouldFill && shouldStroke && objAlpha < 255
 	styleObj := obj
 	if useGroup {
 		styleObj.Alpha = nil
@@ -281,10 +280,9 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		style.fillPaint = style.fillColor
 	}
 	if useGroup {
-		compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupBegin, GroupAlpha: objAlpha})
-		defer func() {
-			compiler.page.Commands = append(compiler.page.Commands, RasterCommand{Group: RasterGroupEnd})
-		}()
+		if endGroup, ok := beginCanvasTransparencyGroup(ctx.Renderer, objAlpha); ok {
+			defer endGroup()
+		}
 	}
 	if shouldFill {
 		fillPaint, shadingClip, fillView := resolveShdPaint(ctx, style.fillPaint)

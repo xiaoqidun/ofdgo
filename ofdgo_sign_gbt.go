@@ -1001,12 +1001,15 @@ func parseGBTAuthAttrs(raw asn1.RawValue, innerContentType string) ([]byte, []by
 		}
 		seen[oid] = true
 		values, ok := asn1Children(items[1].Bytes)
-		if !ok || len(values) != 1 {
+		if !ok || len(values) == 0 {
 			return nil, nil, time.Time{}, fmt.Errorf("invalid authenticated attribute value")
 		}
 		rawAttrs = append(rawAttrs, attr.FullBytes)
 		switch oid {
 		case signAttrContentType:
+			if len(values) != 1 {
+				return nil, nil, time.Time{}, fmt.Errorf("invalid authenticated attribute value")
+			}
 			ct, err := asn1OIDString(values[0])
 			if err != nil {
 				return nil, nil, time.Time{}, err
@@ -1022,12 +1025,18 @@ func parseGBTAuthAttrs(raw asn1.RawValue, innerContentType string) ([]byte, []by
 			}
 			hasContentType = true
 		case signAttrMessageDigest:
+			if len(values) != 1 {
+				return nil, nil, time.Time{}, fmt.Errorf("invalid authenticated attribute value")
+			}
 			digest, err = asn1OctetString(values[0])
 			if err != nil {
 				return nil, nil, time.Time{}, err
 			}
 			hasDigest = true
 		case signAttrSigningTime:
+			if len(values) != 1 {
+				return nil, nil, time.Time{}, fmt.Errorf("invalid authenticated attribute value")
+			}
 			signingTime, err = asn1Time(values[0])
 			if err != nil {
 				return nil, nil, time.Time{}, err

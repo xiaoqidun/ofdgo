@@ -152,7 +152,7 @@ func compileFontEntry(entry *FontEntry, doSubset, compress bool, level int, zw *
 	} else {
 		wArr = buildFontWidthsArray(widths, dw)
 	}
-	toUnicodeRaw := buildToUnicodeCMap(font, glyphIDs)
+	toUnicodeRaw := buildToUnicodeCMap(font, parsed, glyphIDs)
 	toUnicodeData := toUnicodeRaw
 	var err error
 	if compress {
@@ -354,9 +354,9 @@ func buildFontWidthsArray(widths []int, dw int) pdfgo.Array {
 }
 
 // buildToUnicodeCMap 生成遵循ISO 32000-1每百条分块限制的ToUnicode CMap字节流
-// 入参: font 源画布字体, glyphIDs 子集字形列表
+// 入参: font 源画布字体, parsed 已解析标准SFNT字体(可为nil), glyphIDs 子集字形列表
 // 返回: []byte ToUnicode CMap流
-func buildToUnicodeCMap(font *canvas.Font, glyphIDs []uint16) []byte {
+func buildToUnicodeCMap(font *canvas.Font, parsed *basefont.SFNT, glyphIDs []uint16) []byte {
 	type bfRangeItem struct {
 		start, end uint16
 		unicode    uint32
@@ -379,7 +379,12 @@ func buildToUnicodeCMap(font *canvas.Font, glyphIDs []uint16) []byte {
 	}
 	if len(glyphIDs) > 1 {
 		for subsetIdx, gid := range glyphIDs[1:] {
-			rs := font.SFNT.GlyphToUnicode(gid)
+			var rs []rune
+			if parsed != nil {
+				rs = parsed.GlyphToUnicode(gid)
+			} else {
+				rs = font.SFNT.GlyphToUnicode(gid)
+			}
 			if len(rs) == 0 {
 				continue
 			}
