@@ -19,6 +19,7 @@ import (
 	"image"
 	"math"
 	"strconv"
+	"sync"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
@@ -589,39 +590,68 @@ func (c *pdfCompositor) gradient(paint pdfgo.Paint, space *pdfgo.ColorSpace, nod
 		}
 	}
 	const samples = 4
-	var coverage image.Image
+	var baseCoverage image.Image
+	var hiCoverage image.Image
+	var domainGeometry pdfCompositeGeometry
 	domainClipped := node != nil && paint.Function != nil && background == nil
 	if node != nil {
-		local, importer := *c, *c.importer
-		importer.rasterDPI *= samples
-		local.importer = &importer
 		var err error
 		if domainClipped {
-			geometry, ok := c.cache.shadings[key]
+			var ok bool
+			domainGeometry, ok = c.cache.shadings[key]
 			if !ok {
 				g := paint.Function
 				n := pdfShadingClippedNode(*node, g.Domain, g.Matrix)
-				geometry.scene, geometry.box, err = c.importer.compileGroup(func(p *pdfImporter) error { return n.coverage(p, outline) })
+				domainGeometry.scene, domainGeometry.box, err = c.importer.compileGroup(func(p *pdfImporter) error { return n.coverage(p, outline) })
 				if err != nil {
 					return nil, err
 				}
 				if c.cache.shadings == nil {
 					c.cache.shadings = map[pdfGradientKey]pdfCompositeGeometry{}
 				}
-				c.cache.shadings[key] = geometry
+				c.cache.shadings[key] = domainGeometry
 			}
-			if geometry.scene != nil {
-				coverage, err = importer.renderGroupScene(geometry.scene, c.box)
+			b := domainGeometry.box
+			if domainGeometry.scene != nil && !(b.X >= c.box.X+c.box.W || b.Y >= c.box.Y+c.box.H || b.X+b.W <= c.box.X || b.Y+b.H <= c.box.Y) {
+				target, targetErr := c.acquireCoverage()
+				if targetErr != nil {
+					return nil, targetErr
+				}
+				baseCoverage, err = c.importer.renderGroupSceneInto(domainGeometry.scene, c.box, target)
+				if err != nil {
+					c.releaseCoverage(target)
+				}
 			}
 		} else {
-			coverage, err = local.coverage(*node, outline)
+			baseCoverage, err = c.coverage(*node, outline)
 		}
 		if err != nil {
 			return nil, err
 		}
-		if coverage == nil {
+		if baseCoverage == nil {
 			return make([]pdfShadingPixel, c.width*c.height), nil
 		}
+		defer c.releaseCoverage(baseCoverage)
+	}
+	ensureHiCoverage := func() (image.Image, error) {
+		if node == nil || hiCoverage != nil {
+			return hiCoverage, nil
+		}
+		local, importer := *c, *c.importer
+		importer.rasterDPI *= samples
+		local.importer = &importer
+		local.masks = nil
+		local.clipMasks = nil
+		var err error
+		if domainClipped {
+			if domainGeometry.scene != nil {
+				hiCoverage, err = importer.renderGroupScene(domainGeometry.scene, c.box)
+			}
+		} else {
+			hiCoverage, err = local.coverage(*node, outline)
+			local.releaseMasks()
+		}
+		return hiCoverage, err
 	}
 	var position pdfgo.GradientPosition
 	if paint.Axial != nil || paint.Radial != nil {
@@ -635,103 +665,263 @@ func (c *pdfCompositor) gradient(paint pdfgo.Paint, space *pdfgo.ColorSpace, nod
 			return nil, err
 		}
 	}
-	converter, err := space.PrepareConversion(source, intent, conversion)
-	if err != nil {
-		return nil, err
-	}
 	colorants := codecpdf.PrepareShadingColorants(paint, space, c.softMask)
-	step := 25.4 / c.importer.rasterDPI
-	pixels := make([]pdfShadingPixel, c.width*c.height)
-	for y := range c.height {
-		if err := c.importer.ctx.Err(); err != nil {
+	sameSpace := colorants == nil && source.Equal(space)
+	var converter pdfgo.ColorConverter
+	if !sameSpace && colorants == nil {
+		var err error
+		converter, err = space.PrepareConversion(source, intent, conversion)
+		if err != nil {
 			return nil, err
 		}
-		for x := range c.width {
-			pixel := &pixels[y*c.width+x]
-			for sy := range samples {
-				for sx := range samples {
-					weight := 1.0
-					if coverage != nil {
-						a := baseimage.AlphaAt(coverage, x*samples+sx, y*samples+sy)
-						weight = float64(a) / 65535
-						if weight == 0 {
-							continue
-						}
+	}
+	components := source.Components()
+	step := 25.4 / c.importer.rasterDPI
+	var boundsMat, domainMat pdfgo.Matrix
+	var boundsMarginX, boundsMarginY, domainMarginX, domainMarginY float64
+	if bounds != nil {
+		boundsMat = inverse.Mul(c.inverse)
+		boundsMarginX = (math.Abs(boundsMat[0]) + math.Abs(boundsMat[2])) * step * 0.55
+		boundsMarginY = (math.Abs(boundsMat[1]) + math.Abs(boundsMat[3])) * step * 0.55
+	}
+	if paint.Function != nil && !domainClipped {
+		domainMat = functionInverse.Mul(c.inverse)
+		domainMarginX = (math.Abs(domainMat[0]) + math.Abs(domainMat[2])) * step * 0.55
+		domainMarginY = (math.Abs(domainMat[1]) + math.Abs(domainMat[3])) * step * 0.55
+	}
+	evalSample := func(pagePoint pdfgo.Point) ([4]float64, bool, bool, error) {
+		point := pagePoint
+		local := point
+		if bounds != nil || paint.Radial != nil {
+			local = inverse.Apply(point)
+		}
+		if bounds != nil {
+			if local.X < bounds.XMin || local.X > bounds.XMax || local.Y < bounds.YMin || local.Y > bounds.YMax {
+				return [4]float64{}, false, true, nil
+			}
+		}
+		if paint.Radial != nil {
+			point = local
+		}
+		var values [4]float64
+		var visible bool
+		var err error
+		if g := paint.Function; g != nil {
+			local = functionInverse.Apply(point)
+			visible = domainClipped || local.X >= g.Domain.XMin && local.X <= g.Domain.XMax && local.Y >= g.Domain.YMin && local.Y <= g.Domain.YMax
+			if visible {
+				if colorants != nil {
+					values, err = colorants.PointAt(local)
+				} else {
+					values, err = g.ValuesAt(local)
+					if err == nil && !sameSpace {
+						values, err = converter.Convert(values[:components])
 					}
-					pagePoint := c.inverse.Apply(pdfgo.Point{X: c.box.X + (float64(x)+(float64(sx)+.5)/samples)*step, Y: c.box.Y + (float64(y)+(float64(sy)+.5)/samples)*step})
-					point := pagePoint
-					local := point
-					if bounds != nil || paint.Radial != nil {
-						local = inverse.Apply(point)
+				}
+			}
+		} else {
+			var parameter float64
+			parameter, visible = position.PositionAt(point)
+			if visible {
+				if colorants != nil {
+					values, err = colorants.At(parameter)
+				} else if paint.Axial != nil {
+					values, err = paint.Axial.ValuesAt(parameter)
+				} else {
+					values, err = paint.Radial.ValuesAt(parameter)
+				}
+				if err == nil && colorants == nil && !sameSpace {
+					values, err = converter.Convert(values[:components])
+				}
+			}
+		}
+		if err != nil {
+			return [4]float64{}, false, false, err
+		}
+		if !visible {
+			if background == nil {
+				return [4]float64{}, false, false, nil
+			}
+			return backgroundValues, true, false, nil
+		}
+		return values, true, false, nil
+	}
+	isImageNode := node != nil && node.image != nil
+	extendBoth := paint.Axial != nil && paint.Axial.Extend == [2]bool{true, true}
+	pixels := make([]pdfShadingPixel, c.width*c.height)
+	evalSupersample := func(x, y int, pixel *pdfShadingPixel) error {
+		hi, err := ensureHiCoverage()
+		if err != nil {
+			return err
+		}
+		for sy := range samples {
+			for sx := range samples {
+				weight := 1.0
+				if hi != nil {
+					a := baseimage.AlphaAt(hi, x*samples+sx, y*samples+sy)
+					weight = float64(a) / 65535
+					if weight == 0 {
+						continue
 					}
-					if bounds != nil {
-						if local.X < bounds.XMin || local.X > bounds.XMax || local.Y < bounds.YMin || local.Y > bounds.YMax {
-							continue
-						}
-					}
-					if paint.Radial != nil {
-						point = local
-					}
-					var values [4]float64
-					var visible bool
-					var err error
-					if g := paint.Function; g != nil {
-						local = functionInverse.Apply(point)
-						visible = domainClipped || local.X >= g.Domain.XMin && local.X <= g.Domain.XMax && local.Y >= g.Domain.YMin && local.Y <= g.Domain.YMax
-						if visible {
-							if colorants != nil {
-								values, err = colorants.PointAt(local)
-							} else {
-								values, err = g.ValuesAt(local)
-								if err == nil {
-									values, err = converter.Convert(values[:source.Components()])
-								}
-							}
-						}
-					} else {
-						var parameter float64
-						parameter, visible = position.PositionAt(point)
-						if visible {
-							if colorants != nil {
-								values, err = colorants.At(parameter)
-							} else if paint.Axial != nil {
-								values, err = paint.Axial.ValuesAt(parameter)
-							} else {
-								values, err = paint.Radial.ValuesAt(parameter)
-							}
-							if err == nil && colorants == nil {
-								values, err = converter.Convert(values[:source.Components()])
-							}
-						}
-					}
+				}
+				pagePoint := c.inverse.Apply(pdfgo.Point{X: c.box.X + (float64(x)+(float64(sx)+.5)/samples)*step, Y: c.box.Y + (float64(y)+(float64(sy)+.5)/samples)*step})
+				values, ok, outBounds, err := evalSample(pagePoint)
+				if err != nil {
+					return err
+				}
+				if outBounds || !ok {
+					continue
+				}
+				if isImageNode {
+					_, alpha, err := c.imageColor(node.image, pagePoint, space)
 					if err != nil {
-						return nil, err
+						return err
 					}
-					if !visible {
+					weight *= alpha
+				}
+				for i, value := range values {
+					pixel.Values[i] += value * weight
+				}
+				pixel.Shape += weight
+			}
+		}
+		if pixel.Shape != 0 {
+			for i := range pixel.Values {
+				pixel.Values[i] /= pixel.Shape
+			}
+			pixel.Shape /= samples * samples
+		}
+		return nil
+	}
+	evalRowRange := func(y0, y1 int, deferSupersample bool) error {
+		for y := y0; y < y1; y++ {
+			if err := c.importer.ctx.Err(); err != nil {
+				return err
+			}
+			var covRow []byte
+			if baseCoverage != nil {
+				covRow = codecpdf.CoverageRow(baseCoverage, y, 0, c.width)
+			}
+			centerOFDY := c.box.Y + (float64(y)+.5)*step
+			for x := range c.width {
+				baseA := uint32(65535)
+				if baseCoverage != nil {
+					if covRow != nil {
+						baseA = uint32(covRow[4*x+3]) * 257
+					} else {
+						baseA = baseimage.AlphaAt(baseCoverage, x, y)
+					}
+					if baseA == 0 {
+						continue
+					}
+				}
+				pixel := &pixels[y*c.width+x]
+				centerOFD := pdfgo.Point{X: c.box.X + (float64(x)+.5)*step, Y: centerOFDY}
+				supersample := isImageNode || baseA < 65535
+				if !supersample && bounds != nil {
+					bp := boundsMat.Apply(centerOFD)
+					if bp.X+boundsMarginX < bounds.XMin || bp.X-boundsMarginX > bounds.XMax || bp.Y+boundsMarginY < bounds.YMin || bp.Y-boundsMarginY > bounds.YMax {
+						continue
+					}
+					if bp.X-boundsMarginX < bounds.XMin || bp.X+boundsMarginX > bounds.XMax || bp.Y-boundsMarginY < bounds.YMin || bp.Y+boundsMarginY > bounds.YMax {
+						supersample = true
+					}
+				}
+				if !supersample && paint.Function != nil && !domainClipped {
+					g := paint.Function
+					dp := domainMat.Apply(centerOFD)
+					if dp.X+domainMarginX < g.Domain.XMin || dp.X-domainMarginX > g.Domain.XMax || dp.Y+domainMarginY < g.Domain.YMin || dp.Y-domainMarginY > g.Domain.YMax {
 						if background == nil {
 							continue
 						}
-						values = backgroundValues
+						pixel.Values, pixel.Shape = backgroundValues, 1
+						continue
 					}
-					if node != nil && node.image != nil {
-						_, alpha, err := c.imageColor(node.image, pagePoint, space)
-						if err != nil {
-							return nil, err
+					if dp.X-domainMarginX < g.Domain.XMin || dp.X+domainMarginX > g.Domain.XMax || dp.Y-domainMarginY < g.Domain.YMin || dp.Y+domainMarginY > g.Domain.YMax {
+						supersample = true
+					}
+				}
+				if !supersample && (paint.Axial != nil && !extendBoth || paint.Radial != nil) {
+					half := 0.5 * step
+					visCount := 0
+					for _, delta := range [4]pdfgo.Point{{X: -half, Y: -half}, {X: half, Y: -half}, {X: half, Y: half}, {X: -half, Y: half}} {
+						pt := c.inverse.Apply(pdfgo.Point{X: centerOFD.X + delta.X, Y: centerOFD.Y + delta.Y})
+						if paint.Radial != nil {
+							pt = inverse.Apply(pt)
 						}
-						weight *= alpha
+						if _, vis := position.PositionAt(pt); vis {
+							visCount++
+						}
 					}
-					for i, value := range values {
-						pixel.Values[i] += value * weight
+					if visCount != 0 && visCount != 4 {
+						supersample = true
+					} else if visCount == 0 {
+						if background == nil {
+							continue
+						}
+						pixel.Values, pixel.Shape = backgroundValues, 1
+						continue
 					}
-					pixel.Shape += weight
+				}
+				if !supersample {
+					values, ok, _, err := evalSample(c.inverse.Apply(centerOFD))
+					if err != nil {
+						return err
+					}
+					if ok {
+						pixel.Values, pixel.Shape = values, 1
+					}
+					continue
+				}
+				if deferSupersample {
+					pixel.Shape = -1
+					continue
+				}
+				if err := evalSupersample(x, y, pixel); err != nil {
+					return err
 				}
 			}
-			if pixel.Shape != 0 {
-				for i := range pixel.Values {
-					pixel.Values[i] /= pixel.Shape
-				}
-				pixel.Shape /= samples * samples
+		}
+		return nil
+	}
+	workers := conversionWorkers(c.importer.ctx)
+	if workers > 1 && colorants == nil && !isImageNode && c.height >= 32 && c.width*c.height >= 4096 {
+		if workers > c.height/8 {
+			workers = max(1, c.height/8)
+		}
+		errs := make([]error, workers)
+		var wg sync.WaitGroup
+		for w := range workers {
+			y0 := w * c.height / workers
+			y1 := (w + 1) * c.height / workers
+			wg.Add(1)
+			go func(idx, startY, endY int) {
+				defer wg.Done()
+				errs[idx] = evalRowRange(startY, endY, true)
+			}(w, y0, y1)
+		}
+		wg.Wait()
+		for _, err := range errs {
+			if err != nil {
+				return nil, err
 			}
+		}
+		for y := range c.height {
+			rowOff := y * c.width
+			for x := range c.width {
+				pixel := &pixels[rowOff+x]
+				if pixel.Shape >= 0 {
+					continue
+				}
+				pixel.Shape = 0
+				if err := evalSupersample(x, y, pixel); err != nil {
+					return nil, err
+				}
+			}
+		}
+	} else {
+		if err := evalRowRange(0, c.height, false); err != nil {
+			return nil, err
 		}
 	}
 	if c.gradients == nil {

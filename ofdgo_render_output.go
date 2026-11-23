@@ -201,8 +201,13 @@ func (r *Renderer) RenderToTextContext(ctx context.Context, page *PageContent, w
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	var canvasCompiler bool
+	switch r.backends.Compiler.(type) {
+	case CanvasBackend, *CanvasBackend:
+		canvasCompiler = true
+	}
 	prevContentOnly := r.textContentOnly
-	r.textContentOnly = true
+	r.textContentOnly = canvasCompiler
 	defer func() { r.textContentOnly = prevContentOnly }()
 	text, err := r.PageTextContext(ctx, page)
 	if err != nil {
@@ -234,8 +239,13 @@ func (r *Renderer) RenderToMultiPageTextContext(ctx context.Context, writer io.W
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	var canvasCompiler bool
+	switch r.backends.Compiler.(type) {
+	case CanvasBackend, *CanvasBackend:
+		canvasCompiler = true
+	}
 	prevCtx, prevContentOnly := r.pageContext, r.textContentOnly
-	r.pageContext, r.textContentOnly = ctx, true
+	r.pageContext, r.textContentOnly = ctx, canvasCompiler
 	defer func() { r.pageContext, r.textContentOnly = prevCtx, prevContentOnly }()
 	doc, err := r.reader.DocContext(ctx)
 	if err != nil {

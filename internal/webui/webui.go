@@ -111,6 +111,8 @@ type session struct {
 	signatures          []signatureInfo
 	signatureError      error
 	signaturesRead      bool
+	ofdProtected        bool
+	ofdProtectedRead    bool
 	editing             bool
 	editor              *ofdgo.Editor
 	ownedEditor         *ofdgo.Editor
@@ -141,32 +143,33 @@ type documentMeta struct {
 // documentInfo 文档信息
 type documentInfo struct {
 	documentMeta
-	DocumentIndex   int                 `json:"documentIndex"`
-	DocumentVersion string              `json:"documentVersion"`
-	VersionCount    int                 `json:"versionCount"`
-	Documents       []documentEntry     `json:"documents,omitempty"`
-	Encryption      encryptionInfo      `json:"encryption"`
-	Version         string              `json:"version"`
-	DocType         string              `json:"docType"`
-	PageCount       int                 `json:"pageCount"`
-	FontCount       int                 `json:"fontCount"`
-	SignatureCount  int                 `json:"signatureCount"`
-	SignatureError  string              `json:"signatureError,omitempty"`
-	AttachmentError string              `json:"attachmentError,omitempty"`
-	Attachments     []attachmentInfo    `json:"attachments,omitempty"`
-	Fonts           []ofdgo.FontInfo    `json:"fonts"`
-	Signatures      []signatureInfo     `json:"signatures"`
-	Pages           []pageInfo          `json:"pages"`
-	PageIDs         []string            `json:"pageIds,omitempty"`
-	HasOpenAction   bool                `json:"hasOpenAction"`
-	DefaultPageSize *pageSize           `json:"defaultPageSize,omitempty"`
-	PageOverrides   []pageInfo          `json:"pageOverrides,omitempty"`
-	Outlines        []ofdgo.OutlineInfo `json:"outlines,omitempty"`
-	Structures      []ofdgo.Structure   `json:"structures,omitempty"`
-	StructureError  string              `json:"structureError,omitempty"`
-	Permissions     permissionsInfo     `json:"permissions"`
-	VPreferences    *ofdgo.VPreferences `json:"vPreferences,omitempty"`
-	DetailsPending  bool                `json:"detailsPending,omitempty"`
+	DocumentIndex         int                 `json:"documentIndex"`
+	DocumentVersion       string              `json:"documentVersion"`
+	VersionCount          int                 `json:"versionCount"`
+	Documents             []documentEntry     `json:"documents,omitempty"`
+	Encryption            encryptionInfo      `json:"encryption"`
+	Version               string              `json:"version"`
+	DocType               string              `json:"docType"`
+	PageCount             int                 `json:"pageCount"`
+	FontCount             int                 `json:"fontCount"`
+	SignatureCount        int                 `json:"signatureCount"`
+	OFDSignatureProtected bool                `json:"ofdSignatureProtected"`
+	SignatureError        string              `json:"signatureError,omitempty"`
+	AttachmentError       string              `json:"attachmentError,omitempty"`
+	Attachments           []attachmentInfo    `json:"attachments,omitempty"`
+	Fonts                 []ofdgo.FontInfo    `json:"fonts"`
+	Signatures            []signatureInfo     `json:"signatures"`
+	Pages                 []pageInfo          `json:"pages"`
+	PageIDs               []string            `json:"pageIds,omitempty"`
+	HasOpenAction         bool                `json:"hasOpenAction"`
+	DefaultPageSize       *pageSize           `json:"defaultPageSize,omitempty"`
+	PageOverrides         []pageInfo          `json:"pageOverrides,omitempty"`
+	Outlines              []ofdgo.OutlineInfo `json:"outlines,omitempty"`
+	Structures            []ofdgo.Structure   `json:"structures,omitempty"`
+	StructureError        string              `json:"structureError,omitempty"`
+	Permissions           permissionsInfo     `json:"permissions"`
+	VPreferences          *ofdgo.VPreferences `json:"vPreferences,omitempty"`
+	DetailsPending        bool                `json:"detailsPending,omitempty"`
 }
 
 // permissionsInfo 文档权限声明及是否显式存在Permissions节点
@@ -204,17 +207,18 @@ type documentEntry struct {
 
 // documentDetails 不含页面数组的文档补充信息
 type documentDetails struct {
-	Structures      []ofdgo.Structure   `json:"structures,omitempty"`
-	StructureError  string              `json:"structureError,omitempty"`
-	Permissions     permissionsInfo     `json:"permissions"`
-	VPreferences    *ofdgo.VPreferences `json:"vPreferences,omitempty"`
-	FontCount       int                 `json:"fontCount"`
-	SignatureCount  int                 `json:"signatureCount"`
-	SignatureError  string              `json:"signatureError,omitempty"`
-	AttachmentError string              `json:"attachmentError,omitempty"`
-	Attachments     []attachmentInfo    `json:"attachments,omitempty"`
-	Fonts           []ofdgo.FontInfo    `json:"fonts"`
-	Signatures      []signatureInfo     `json:"signatures"`
+	Structures            []ofdgo.Structure   `json:"structures,omitempty"`
+	StructureError        string              `json:"structureError,omitempty"`
+	Permissions           permissionsInfo     `json:"permissions"`
+	VPreferences          *ofdgo.VPreferences `json:"vPreferences,omitempty"`
+	FontCount             int                 `json:"fontCount"`
+	SignatureCount        int                 `json:"signatureCount"`
+	OFDSignatureProtected bool                `json:"ofdSignatureProtected"`
+	SignatureError        string              `json:"signatureError,omitempty"`
+	AttachmentError       string              `json:"attachmentError,omitempty"`
+	Attachments           []attachmentInfo    `json:"attachments,omitempty"`
+	Fonts                 []ofdgo.FontInfo    `json:"fonts"`
+	Signatures            []signatureInfo     `json:"signatures"`
 }
 
 // attachmentInfo 附件信息，Size单位为KB
@@ -876,8 +880,10 @@ func signatureBoxText(box ofdgo.Box) string {
 func failureResult(err error) apiResult {
 	result := apiResult{Error: err.Error()}
 	switch {
+	case errors.Is(err, ofdgo.ErrOFDEntryProtected):
+		result.Code, result.Error = "ofdEntryProtected", "OFD.xml 入口受现有签名保护，无法直接修改入口或共享签名列表"
 	case errors.Is(err, ofdgo.ErrSignatureDependency):
-		result.Code, result.Error = "signatureDependency", "存在签名或版本依赖，无法移除"
+		result.Code, result.Error = "signatureDependency", "存在签名或版本依赖冲突，无法执行当前操作"
 	case errors.Is(err, ofdgo.ErrIncompleteDocument):
 		result.Code, result.Error = "documentPending", "文档尚未准备完成"
 	case errors.Is(err, ofdgo.ErrPDFPassword):
@@ -10300,6 +10306,7 @@ func (s *session) summary(indexes []int) documentInfo {
 	}
 	info.DocumentVersion, _ = s.Reader.DocumentVersionID()
 	info.VersionCount, _ = s.Reader.DocumentVersionCount()
+	info.OFDSignatureProtected = s.ofdSignatureProtectedContext(s.outputContext())
 	for index, body := range s.Reader.OFD().DocBody {
 		info.Documents = append(info.Documents, documentEntry{Index: index, documentMeta: documentMeta{Title: body.DocInfo.Title}, Root: body.DocRoot, ID: body.DocInfo.DocID})
 	}
@@ -10386,8 +10393,10 @@ func (s *session) renderPage(index int, backend string, dpi float64, raster, pre
 		}
 	}
 	idPrefix, precision := fmt.Sprintf("p%d-", index), 3
+	var pathMerge *ofdgo.SVGPathMergeOptions
 	if preview {
 		idPrefix, precision = fmt.Sprintf("t%d-", index), 2
+		pathMerge = &ofdgo.SVGPathMergeOptions{Mode: ofdgo.SVGPathMergeFull}
 	}
 	resources, err := renderer.RenderPreviewContext(ctx, page, &buf, ofdgo.PreviewOptions{
 		Raster:         raster,
@@ -10395,6 +10404,7 @@ func (s *session) renderPage(index int, backend string, dpi float64, raster, pre
 		KnownResources: known,
 		IDPrefix:       idPrefix,
 		Precision:      precision,
+		PathMerge:      pathMerge,
 	})
 	if err != nil {
 		return pageSVG{}, err
@@ -10936,6 +10946,7 @@ func (s *session) detailsContext(ctx context.Context) (documentDetails, error) {
 		info.SignatureError = err.Error()
 	}
 	info.SignatureCount = len(info.Signatures)
+	info.OFDSignatureProtected = s.ofdSignatureProtectedContext(ctx)
 	if err := ctx.Err(); err != nil {
 		return documentDetails{}, err
 	}
@@ -10945,6 +10956,21 @@ func (s *session) detailsContext(ctx context.Context) (documentDetails, error) {
 		info.FontCount = len(fonts)
 	}
 	return info, ctx.Err()
+}
+
+// ofdSignatureProtectedContext 探测并缓存当前会话的OFD.xml入口是否受签名保护
+// 入参: ctx 取消上下文
+// 返回: bool 是否受签名保护
+func (s *session) ofdSignatureProtectedContext(ctx context.Context) bool {
+	if s.ofdProtectedRead {
+		return s.ofdProtected
+	}
+	protected, err := s.Reader.OFDEntrySignatureProtected(ctx)
+	if err == nil || ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		s.ofdProtected = protected
+		s.ofdProtectedRead = true
+	}
+	return s.ofdProtected
 }
 
 // signatureInfosContext 在可取消上下文中执行当前文档验签，取消时不缓存未完成状态

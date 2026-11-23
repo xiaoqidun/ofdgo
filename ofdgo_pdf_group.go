@@ -55,6 +55,7 @@ func pdfOpaqueVisitor(visitor pdfgo.Visitor) pdfgo.Visitor {
 		Reference:       visitor.Reference,
 		OptionalContent: visitor.OptionalContent,
 		Halftones:       visitor.Halftones,
+		PostScript:      visitor.PostScript,
 		Path:            func(m pdfgo.PathMark) error { return check(m.Style, m.Fill, m.Stroke) },
 		Text: func(m pdfgo.TextMark) error {
 			return check(m.Style, m.Mode%4 == 0 || m.Mode%4 == 2, m.Mode%4 == 1 || m.Mode%4 == 2)
@@ -228,6 +229,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 		Reference:       visitor.Reference,
 		OptionalContent: visitor.OptionalContent,
 		Halftones:       visitor.Halftones,
+		PostScript:      visitor.PostScript,
 		Warning:         visitor.Warning,
 		Text:            func(pdfgo.TextMark) error { return errPDFGroupRaster },
 		Image:           func(pdfgo.ImageMark) error { return errPDFGroupRaster },
@@ -436,7 +438,8 @@ func (p *pdfImporter) rasterGroup(mark pdfgo.GroupMark, walk func(pdfgo.Visitor)
 // visitor 绑定当前导入器的图元与透明组访问函数
 // 返回: pdfgo.Visitor 页面访问器
 func (p *pdfImporter) visitor() pdfgo.Visitor {
-	v := pdfgo.Visitor{Path: p.path, Text: p.text, Image: p.image, Warning: p.warning, Reference: p.referencePage, Halftones: p.halftones}
+	v := p.newBaseVisitor()
+	v.Path, v.Text, v.Image = p.path, p.text, p.image
 	v.Group = func(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) error) error { return p.group(mark, walk, v) }
 	return v
 }
@@ -723,7 +726,10 @@ func (p *pdfImporter) maskClip(mask *pdfgo.SoftMask) (pdfgo.Path, error) {
 		}
 	}
 	identity := pdfImporter{matrix: pdfgo.Identity()}
-	var visitor pdfgo.Visitor
+	visitor := p.newBaseVisitor()
+	visitor.PostScript = func(pdfgo.PostScriptMark) error {
+		return &pdfgo.UnsupportedError{Feature: "PostScript mask graphic"}
+	}
 	visitor.Text = func(pdfgo.TextMark) error {
 		return &pdfgo.UnsupportedError{Feature: "text mask graphic"}
 	}

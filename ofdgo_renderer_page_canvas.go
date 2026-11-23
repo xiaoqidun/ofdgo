@@ -222,6 +222,7 @@ func (v *canvasPageVisitor) renderTemplatePage(template *PageContent, offsetX, o
 			offsetY:        offsetY,
 			dpi:            r.dpi,
 			precision:      prec,
+			pathMerge:      svgOut.pathMerge,
 			printing:       r.printing,
 			printContents:  r.printContents,
 			externalImages: svgOut.imageNames != nil,
@@ -245,7 +246,7 @@ func (v *canvasPageVisitor) renderTemplatePage(template *PageContent, offsetX, o
 			writer:       &buf,
 			seen:         make(map[string]bool),
 			collectClips: true,
-			mergePaths:   true,
+			pathMerge:    svgOut.pathMerge,
 			precision:    prec,
 		}
 		if svgOut.imageNames != nil {

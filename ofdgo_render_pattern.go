@@ -195,10 +195,14 @@ func (c *semanticCompiler) patternCell(pattern *PatternPaint, matrix Matrix) ([]
 		x, y = matrix.e, matrix.f
 		matrix.e, matrix.f = 0, 0
 	}
-	key := patternCellKey{pattern: pattern.Pattern, alpha: 255, matrix: matrix.Values()}
+	patternAlpha := 255
 	if pattern.Alpha != nil {
-		key.alpha = *pattern.Alpha
+		patternAlpha = max(0, min(255, *pattern.Alpha))
 	}
+	if patternAlpha == 0 {
+		return nil, nil
+	}
+	key := patternCellKey{pattern: pattern.Pattern, alpha: patternAlpha, matrix: matrix.Values()}
 	if commands, ok := c.patterns.get(key); ok {
 		return translatePatternCommands(commands, x, y), nil
 	}
@@ -211,12 +215,28 @@ func (c *semanticCompiler) patternCell(pattern *PatternPaint, matrix Matrix) ([]
 	if err != nil {
 		return nil, err
 	}
+	count := 0
+	for range pattern.CellContent.objects() {
+		count++
+		if count > 1 {
+			break
+		}
+	}
+	useGroup := patternAlpha < 255 && count > 1
 	child := &semanticCompiler{renderer: c.renderer, geometry: c.geometry, page: &RasterPage{Width: c.page.Width, Height: c.page.Height, DPI: c.page.DPI}, pattern: true, patterns: c.patterns, patternReferences: c.patternReferences, patternPage: &matrix}
+	if useGroup {
+		child.page.Commands = append(child.page.Commands, RasterCommand{Group: RasterGroupBegin, GroupAlpha: uint8(patternAlpha)})
+	}
 	for object := range pattern.CellContent.objects() {
-		object = mergeGraphicObjectAlpha(object, pattern.Alpha)
+		if !useGroup {
+			object = mergeGraphicObjectAlpha(object, pattern.Alpha)
+		}
 		if err := c.renderer.WalkObject(&object, RenderState{Defaults: nil, Parent: &matrix, BoundaryInCTM: true, Clip: cellClip}, child); err != nil {
 			return nil, err
 		}
+	}
+	if useGroup {
+		child.page.Commands = append(child.page.Commands, RasterCommand{Group: RasterGroupEnd})
 	}
 	cost := rasterCommandsCost(child.page.Commands, c.patterns.limit)
 	c.patterns.put(key, child.page.Commands, cost)

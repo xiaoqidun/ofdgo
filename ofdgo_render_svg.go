@@ -27,6 +27,57 @@ import (
 // svgNamespace 表示SVG预览文档命名空间
 const svgNamespace = "http://www.w3.org/2000/svg"
 
+// SVGPathMergeMode 定义SVG纯色填充路径合并策略
+type SVGPathMergeMode uint8
+
+const (
+	// SVGPathMergeAuto 仅同行紧邻合并并在安全小窗口内封顶
+	SVGPathMergeAuto SVGPathMergeMode = iota
+	// SVGPathMergeOff 完全禁用路径合并
+	SVGPathMergeOff
+	// SVGPathMergeFull 无窗口上限全量跨行合并
+	SVGPathMergeFull
+)
+
+// SVGPathMergeOptions 配置SVG纯色填充路径合并策略及安全窗口上限
+// MaxExtent、MaxOps、MaxBytes仅在SVGPathMergeAuto下生效，非正数或非有限值自动取默认值
+type SVGPathMergeOptions struct {
+	// Mode 指定路径合并策略，默认为SVGPathMergeAuto
+	Mode SVGPathMergeMode
+	// MaxExtent 指定合并后联合包围盒单轴上限，单位毫米，默认16
+	MaxExtent float64
+	// MaxOps 指定单条合并路径最大绘图命令数，默认160
+	MaxOps int
+	// MaxBytes 指定单条合并路径追加前最大字节长度，默认2048
+	MaxBytes int
+}
+
+// normalize 规范化路径合并参数并保证同模式缓存键唯一
+// 返回: SVGPathMergeOptions 归一化后的合并选项
+func (o SVGPathMergeOptions) normalize() SVGPathMergeOptions {
+	switch o.Mode {
+	case SVGPathMergeOff, SVGPathMergeFull:
+		return SVGPathMergeOptions{Mode: o.Mode}
+	default:
+		out := SVGPathMergeOptions{
+			Mode:      SVGPathMergeAuto,
+			MaxExtent: o.MaxExtent,
+			MaxOps:    o.MaxOps,
+			MaxBytes:  o.MaxBytes,
+		}
+		if !finite(out.MaxExtent) || out.MaxExtent <= 0 {
+			out.MaxExtent = 16
+		}
+		if out.MaxOps <= 0 {
+			out.MaxOps = 160
+		}
+		if out.MaxBytes <= 0 {
+			out.MaxBytes = 2048
+		}
+		return out
+	}
+}
+
 // SVGFont SVG引用的字体资源，Name为CSS字体族标识，Data为只读字体数据
 type SVGFont struct {
 	Name   string
@@ -58,6 +109,8 @@ type PreviewOptions struct {
 	IDPrefix string
 	// Precision 指定纯矢量路径毫米坐标小数位数，非正数默认3位
 	Precision int
+	// PathMerge 覆盖单次渲染的路径合并策略，为空时继承Renderer配置
+	PathMerge *SVGPathMergeOptions
 }
 
 // RenderStampToSVG 构造独立透明背景单页视图并将印章渲染为SVG
@@ -156,10 +209,13 @@ func (r *Renderer) RenderPreviewContext(ctx context.Context, page *PageContent, 
 	if err := ctx.Err(); err != nil {
 		return SVGResources{}, err
 	}
-	prevCtx, prevKnown, prevPrefix, prevPrecision := r.pageContext, r.knownSVGResources, r.svgIDPrefix, r.svgPrecision
+	prevCtx, prevKnown, prevPrefix, prevPrecision, prevPathMerge := r.pageContext, r.knownSVGResources, r.svgIDPrefix, r.svgPrecision, r.svgPathMerge
 	r.pageContext, r.knownSVGResources, r.svgIDPrefix, r.svgPrecision = ctx, options.KnownResources, options.IDPrefix, options.Precision
+	if options.PathMerge != nil {
+		r.svgPathMerge = options.PathMerge.normalize()
+	}
 	defer func() {
-		r.pageContext, r.knownSVGResources, r.svgIDPrefix, r.svgPrecision = prevCtx, prevKnown, prevPrefix, prevPrecision
+		r.pageContext, r.knownSVGResources, r.svgIDPrefix, r.svgPrecision, r.svgPathMerge = prevCtx, prevKnown, prevPrefix, prevPrecision, prevPathMerge
 		for i := range resources.Fonts {
 			if options.KnownResources[resources.Fonts[i].Name] {
 				resources.Fonts[i].Data = nil

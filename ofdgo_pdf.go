@@ -36,8 +36,30 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// pdfObjectChunkLimit 限制导入暂存片段的容量，不限制页面对象数量
-const pdfObjectChunkLimit = 256
+// pdfObjectChunkLimit 限制导入暂存片段容量，pdfWarningPageLimit 限制同类告警的页级展开条数
+const (
+	pdfObjectChunkLimit = 256
+	pdfWarningPageLimit = 8
+)
+
+// pdfWarningKey 按页码和原始消息聚合重复告警
+type pdfWarningKey struct {
+	page    int
+	message string
+}
+
+// pdfWarningEntry 保存带重复计数的原始告警，供并发与注解合并使用
+type pdfWarningEntry struct {
+	diagnostic pdfgo.Diagnostic
+	count      int
+}
+
+// pdfWarningState 保存告警聚合快照，支持页面取消或收尾失败时完整回滚
+type pdfWarningState struct {
+	length int
+	total  int
+	counts []int
+}
 
 // ErrPDFPassword 表示PDF需要正确的用户或所有者密码
 var ErrPDFPassword = pdfgo.ErrPassword
@@ -164,6 +186,11 @@ type pdfImporter struct {
 	pageWidth               float64
 	pageHeight              float64
 	warning                 func(pdfgo.Diagnostic)
+	warningIndex            map[pdfWarningKey]int
+	warningMsgPages         map[string]int
+	warningCounts           []int
+	warningBases            []string
+	warningTotal            int
 	rasterDPI               float64
 	rasterWarned            bool
 	compositeCache          *pdfCompositeCache
@@ -252,6 +279,7 @@ type pdfPageWorkResult struct {
 	transferModel    pdfgo.Name
 	transferBackdrop bool
 	report           PDFImportReport
+	warnings         []pdfWarningEntry
 	needsSerial      bool
 	err              error
 }
@@ -342,7 +370,7 @@ func NewPDFImport(ctx context.Context, input *Input, options PDFImportOptions) (
 	if !options.Strict {
 		importer.warning = func(warning pdfgo.Diagnostic) {
 			warning.Page = importer.page + 1
-			importer.report.Warnings = append(importer.report.Warnings, warning)
+			importer.addWarning(warning)
 		}
 		readOptions.Warning = importer.warning
 	}
@@ -378,7 +406,7 @@ func NewPDFImport(ctx context.Context, input *Input, options PDFImportOptions) (
 			if options.Strict {
 				return nil, &pdfgo.UnsupportedError{Feature: "PDF output intent conversion"}
 			}
-			importer.report.Warnings = append(importer.report.Warnings, pdfgo.Diagnostic{Message: "PDF output intents preserved as metadata; not applied to rendering"})
+			importer.addWarning(pdfgo.Diagnostic{Message: "PDF output intents preserved as metadata; not applied to rendering"})
 		}
 	}
 	importer.pageIndexes = make(map[pdfgo.Reference]int)
@@ -612,6 +640,143 @@ func colorSpaceResourceDigest(space ColorSpace, profileData []byte) [32]byte {
 func isPDFFontDedupWarning(message string) bool {
 	return strings.HasPrefix(message, "PDF font ") && strings.HasSuffix(message, " has invalid hinting instructions; design outlines and original font retained") ||
 		strings.HasPrefix(message, "PDF embedded font ") && strings.HasSuffix(message, " uses glyph with reconstructed side bearing")
+}
+
+// formatPDFWarningMessage 按重复次数格式化告警消息
+// 入参: base 原始告警文本, count 累计次数
+// 返回: string 展示文本
+func formatPDFWarningMessage(base string, count int) string {
+	if count > 1 {
+		return fmt.Sprintf("%s (repeated %d times)", base, count)
+	}
+	return base
+}
+
+// newBaseVisitor 创建统一携带告警、引用解析、网屏与PostScript策略的基础访问器
+// 返回: pdfgo.Visitor 基础访问器
+func (p *pdfImporter) newBaseVisitor() pdfgo.Visitor {
+	v := pdfgo.Visitor{Warning: p.warning, Reference: p.referencePage, Halftones: p.halftones}
+	if p.warning != nil {
+		v.PostScript = func(pdfgo.PostScriptMark) error {
+			p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PostScript XObject skipped in OFD conversion"})
+			return nil
+		}
+	}
+	return v
+}
+
+// addWarning 记录单次告警并自动聚合同类重复条目
+// 入参: warning 诊断条目
+func (p *pdfImporter) addWarning(warning pdfgo.Diagnostic) {
+	p.addWarningCount(warning, 1)
+}
+
+// addWarningCount 按指定次数累计同类告警，超页阈值时折叠至文档级汇总条目
+// 入参: warning 原始诊断条目, count 出现次数
+func (p *pdfImporter) addWarningCount(warning pdfgo.Diagnostic, count int) {
+	if count <= 0 {
+		count = 1
+	}
+	base := warning.Message
+	p.warningTotal += count
+	key := pdfWarningKey{page: warning.Page, message: base}
+	if idx, ok := p.warningIndex[key]; ok {
+		p.warningCounts[idx] += count
+		p.report.Warnings[idx].Message = formatPDFWarningMessage(p.warningBases[idx], p.warningCounts[idx])
+		return
+	}
+	if warning.Page > 0 && p.warningMsgPages[base] >= pdfWarningPageLimit {
+		summaryKey := pdfWarningKey{page: 0, message: base}
+		if idx, ok := p.warningIndex[summaryKey]; ok {
+			p.warningCounts[idx] += count
+			p.report.Warnings[idx].Message = formatPDFWarningMessage(p.warningBases[idx], p.warningCounts[idx])
+			return
+		}
+		warning.Page = 0
+		key = summaryKey
+	}
+	if p.warningIndex == nil {
+		p.warningIndex = make(map[pdfWarningKey]int)
+	}
+	if warning.Page > 0 {
+		if p.warningMsgPages == nil {
+			p.warningMsgPages = make(map[string]int)
+		}
+		p.warningMsgPages[base]++
+	}
+	idx := len(p.report.Warnings)
+	p.warningIndex[key] = idx
+	p.warningBases = append(p.warningBases, base)
+	p.warningCounts = append(p.warningCounts, count)
+	warning.Message = formatPDFWarningMessage(base, count)
+	p.report.Warnings = append(p.report.Warnings, warning)
+}
+
+// warningEntries 导出带原始消息及计数的告警切片，供并发或注解合并复用
+// 返回: []pdfWarningEntry 告警条目
+func (p *pdfImporter) warningEntries() []pdfWarningEntry {
+	if len(p.report.Warnings) == 0 {
+		return nil
+	}
+	entries := make([]pdfWarningEntry, len(p.report.Warnings))
+	for i, w := range p.report.Warnings {
+		count := 1
+		if i < len(p.warningCounts) {
+			count = p.warningCounts[i]
+		}
+		if i < len(p.warningBases) {
+			w.Message = p.warningBases[i]
+		}
+		entries[i] = pdfWarningEntry{diagnostic: w, count: count}
+	}
+	return entries
+}
+
+// resetWarnings 清空局部或工作Goroutine的告警聚合状态
+func (p *pdfImporter) resetWarnings() {
+	p.report.Warnings = nil
+	p.warningIndex = nil
+	p.warningMsgPages = nil
+	p.warningCounts = nil
+	p.warningBases = nil
+	p.warningTotal = 0
+}
+
+// saveWarningState 保存当前告警列表及计数快照
+// 返回: pdfWarningState 快照状态
+func (p *pdfImporter) saveWarningState() pdfWarningState {
+	return pdfWarningState{
+		length: len(p.report.Warnings),
+		total:  p.warningTotal,
+		counts: slices.Clone(p.warningCounts),
+	}
+}
+
+// restoreWarningState 按快照还原告警列表、计数及索引
+// 入参: state 快照状态
+func (p *pdfImporter) restoreWarningState(state pdfWarningState) {
+	p.report.Warnings = p.report.Warnings[:state.length:state.length]
+	if state.length <= len(p.warningBases) {
+		p.warningBases = p.warningBases[:state.length:state.length]
+	}
+	p.warningCounts = state.counts
+	p.warningTotal = state.total
+	if state.length == 0 {
+		p.warningIndex = nil
+		p.warningMsgPages = nil
+		return
+	}
+	p.warningIndex = make(map[pdfWarningKey]int, state.length)
+	p.warningMsgPages = make(map[string]int)
+	for i := range state.length {
+		base := p.warningBases[i]
+		count := p.warningCounts[i]
+		p.report.Warnings[i].Message = formatPDFWarningMessage(base, count)
+		p.warningIndex[pdfWarningKey{page: p.report.Warnings[i].Page, message: base}] = i
+		if p.report.Warnings[i].Page > 0 {
+			p.warningMsgPages[base]++
+		}
+	}
 }
 
 // remapGraphicObjects 递归重映射图形对象中的字体、图像、颜色空间及复合图形资源标识
@@ -874,7 +1039,7 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 		savedRenditionMedia = maps.Clone(importer.renditions.media)
 	}
 	savedReport := importer.report
-	savedWarningsLen := len(importer.report.Warnings)
+	savedWarnings := importer.saveWarningState()
 	_, hadBodyCounts := importer.pageBodyCounts[index]
 	savedStructure := importer.structureBindings.snapshot()
 	defer func() {
@@ -906,7 +1071,7 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 			}
 			importer.clearPageState()
 			importer.report = savedReport
-			importer.report.Warnings = savedReport.Warnings[:savedWarningsLen:savedWarningsLen]
+			importer.restoreWarningState(savedWarnings)
 			if !hadBodyCounts {
 				delete(importer.pageBodyCounts, index)
 			}
@@ -1152,7 +1317,7 @@ func (p *PDFImport) Finish(ctx context.Context) (*Editor, PDFImportReport, error
 		savedOwnedTx := editor.ownedTx
 		savedOrigins := maps.Clone(editor.origins)
 		savedReport := importer.report
-		savedWarningsLen := len(importer.report.Warnings)
+		savedWarnings := importer.saveWarningState()
 		savedStructure := importer.structureBindings.snapshotFinish()
 		if savedSource != nil {
 			editor.ownedOwner = nil
@@ -1169,7 +1334,7 @@ func (p *PDFImport) Finish(ctx context.Context) (*Editor, PDFImportReport, error
 			editor.previewPages = nil
 			editor.nameCache = nil
 			importer.report = savedReport
-			importer.report.Warnings = savedReport.Warnings[:savedWarningsLen:savedWarningsLen]
+			importer.restoreWarningState(savedWarnings)
 			if importer.structureBindings != nil {
 				importer.structureBindings.rollbackFinish(savedStructure)
 			}
@@ -2668,7 +2833,7 @@ func (p *PDFImport) runPageWorker(ctx context.Context, slot int, jobs <-chan int
 	if !p.options.Strict {
 		workerWarning = func(warning pdfgo.Diagnostic) {
 			warning.Page = workerImporter.page + 1
-			workerImporter.report.Warnings = append(workerImporter.report.Warnings, warning)
+			workerImporter.addWarning(warning)
 		}
 		workerImporter.warning = workerWarning
 	}
@@ -2696,6 +2861,7 @@ func (p *PDFImport) runPageWorker(ctx context.Context, slot int, jobs <-chan int
 		page := workerReader.BindPage(mainPage)
 		workerImporter.beginPage(ctx, pageIndex, page)
 		workerImporter.report = PDFImportReport{}
+		workerImporter.resetWarnings()
 		if mainImporter.structureBindings != nil {
 			wb := &pdfStructureBindings{prepared: map[*pdfgo.Reader]bool{workerReader: true}}
 			if list := pageMarked[mainPage.Reference]; len(list) != 0 {
@@ -2801,6 +2967,7 @@ func (p *PDFImport) runPageWorker(ctx context.Context, slot int, jobs <-chan int
 		res.transferModel = workerImporter.transferModel
 		res.transferBackdrop = workerImporter.transferBackdrop
 		res.report = workerImporter.report
+		res.warnings = workerImporter.warningEntries()
 		results <- res
 	}
 }
@@ -2832,7 +2999,7 @@ func (p *PDFImport) commitParallelPageResult(ctx context.Context, index int, res
 		savedRenditionMedia = maps.Clone(importer.renditions.media)
 	}
 	savedReport := importer.report
-	savedWarningsLen := len(importer.report.Warnings)
+	savedWarnings := importer.saveWarningState()
 	_, hadBodyCounts := importer.pageBodyCounts[index]
 	savedStructure := importer.structureBindings.snapshot()
 	defer func() {
@@ -2864,7 +3031,7 @@ func (p *PDFImport) commitParallelPageResult(ctx context.Context, index int, res
 			}
 			importer.clearPageState()
 			importer.report = savedReport
-			importer.report.Warnings = savedReport.Warnings[:savedWarningsLen:savedWarningsLen]
+			importer.restoreWarningState(savedWarnings)
 			if !hadBodyCounts {
 				delete(importer.pageBodyCounts, index)
 			}
@@ -2973,7 +3140,8 @@ func (p *PDFImport) commitParallelPageResult(ctx context.Context, index int, res
 	importer.report.TextObjects += res.report.TextObjects
 	importer.report.PathObjects += res.report.PathObjects
 	importer.report.ImageObjects += res.report.ImageObjects
-	for _, w := range res.report.Warnings {
+	for _, entry := range res.warnings {
+		w := entry.diagnostic
 		if isPDFFontDedupWarning(w.Message) {
 			if importer.fontWarnings == nil {
 				importer.fontWarnings = make(map[string]bool)
@@ -2983,7 +3151,7 @@ func (p *PDFImport) commitParallelPageResult(ctx context.Context, index int, res
 			}
 			importer.fontWarnings[w.Message] = true
 		}
-		importer.report.Warnings = append(importer.report.Warnings, w)
+		importer.addWarningCount(w, entry.count)
 	}
 	importer.report.Pages++
 	if err := editorProgress(p.options.OnProgress).withContext(ctx).report("convert", importer.report.Pages, len(p.pages)); err != nil {
@@ -3069,7 +3237,7 @@ func (p *PDFImport) convertDuplicatePage(ctx context.Context, index, leader int)
 		savedRenditionMedia = maps.Clone(importer.renditions.media)
 	}
 	savedReport := importer.report
-	savedWarningsLen := len(importer.report.Warnings)
+	savedWarnings := importer.saveWarningState()
 	savedStructure := importer.structureBindings.snapshot()
 	defer func() {
 		if err == nil {
@@ -3100,7 +3268,7 @@ func (p *PDFImport) convertDuplicatePage(ctx context.Context, index, leader int)
 			}
 			importer.clearPageState()
 			importer.report = savedReport
-			importer.report.Warnings = savedReport.Warnings[:savedWarningsLen:savedWarningsLen]
+			importer.restoreWarningState(savedWarnings)
 			if importer.structureBindings != nil {
 				importer.structureBindings.rollbackPage(savedPage.ID, importer.pageOrder[index].Reference, savedStructure)
 			}

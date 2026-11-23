@@ -59,6 +59,7 @@ type Renderer struct {
 	knownSVGResources     map[string]bool
 	svgIDPrefix           string
 	svgPrecision          int
+	svgPathMerge          SVGPathMergeOptions
 	backends              RenderBackends
 	rasterDisabled        bool
 	backendStates         map[any]any
@@ -251,6 +252,23 @@ func (r *Renderer) SetCompression(options CompressionOptions) {
 	}
 }
 
+// SVGPathMerge 返回当前SVG路径合并选项
+// 返回: SVGPathMergeOptions 路径合并选项
+func (r *Renderer) SVGPathMerge() SVGPathMergeOptions {
+	if r == nil {
+		return SVGPathMergeOptions{}.normalize()
+	}
+	return r.svgPathMerge.normalize()
+}
+
+// SetSVGPathMerge 设置SVG路径合并选项
+// 入参: options 路径合并选项
+func (r *Renderer) SetSVGPathMerge(options SVGPathMergeOptions) {
+	if r != nil {
+		r.svgPathMerge = options.normalize()
+	}
+}
+
 // Fork 创建独立渲染实例，复用只读资源及线程安全的派生数据缓存
 // 创建过程需与原实例串行，输入生命周期遵循Reader.Fork，外部后端及字体文件系统需支持并行读取
 // 页面文字及导出进度回调不继承
@@ -272,7 +290,7 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	}
 	maps.Copy(reader.drawParamCache, drawParams)
 	maps.Copy(reader.compositeGraphicUnitCache, composites)
-	next := NewRenderer(reader, WithDPI(r.dpi), WithAnnotations(r.renderAnnotations), WithCompression(r.compression), WithTransparentBackground(r.transparentBackground), WithRenderBackends(r.backends), WithFontDirs(r.fontDirs...), WithFontFS(r.fontFS...))
+	next := NewRenderer(reader, WithDPI(r.dpi), WithAnnotations(r.renderAnnotations), WithCompression(r.compression), WithTransparentBackground(r.transparentBackground), WithSVGPathMerge(r.svgPathMerge), WithRenderBackends(r.backends), WithFontDirs(r.fontDirs...), WithFontFS(r.fontFS...))
 	next.rasterDisabled = r.rasterDisabled
 	next.decodeImages = r.decodeImages
 	next.printing = r.printing
@@ -534,16 +552,12 @@ func (r *Renderer) compositeDefinition(id string) *CompositeGraphicUnit {
 	return unit
 }
 
-// deviceLineWidth 按设备分辨率计算描边宽度，零线宽为一像素，正线宽至少为两像素
+// deviceLineWidth 按设备分辨率计算描边宽度，零线宽为一像素，正线宽保留物理宽度
 // 入参: width 页面空间线宽，单位为毫米
 // 返回: float64 设备描边宽度，单位为毫米
 func (r *Renderer) deviceLineWidth(width float64) float64 {
-	pixel := 25.4 / r.dpi
 	if width == 0 {
-		return pixel
-	}
-	if width > 0 {
-		return max(width, 2*pixel)
+		return 25.4 / r.dpi
 	}
 	return width
 }
@@ -555,6 +569,7 @@ func (r *Renderer) childRenderer(reader *Reader) *Renderer {
 	opts := []RendererOption{
 		WithDPI(r.dpi),
 		WithAnnotations(r.renderAnnotations),
+		WithSVGPathMerge(r.svgPathMerge),
 		WithRenderBackends(r.backends),
 	}
 	if len(r.fontDirs) > 0 {

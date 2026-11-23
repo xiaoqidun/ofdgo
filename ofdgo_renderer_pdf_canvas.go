@@ -55,10 +55,11 @@ type pdfRawCacheKey struct {
 	path      string
 }
 
-// pdfImageCacheKey 按图像来源键与降采样目标尺寸复用PDF图像XObject
+// pdfImageCacheKey 按图像来源键、降采样目标尺寸与插值模式复用PDF图像XObject
 type pdfImageCacheKey struct {
-	key    any
-	target image.Point
+	key         any
+	target      image.Point
+	interpolate int8
 }
 
 // pdfTemplateFormKey 按模板页、页面尺寸、视口偏移、打印模式与高清替代策略复用PDF模板Form
@@ -164,25 +165,26 @@ type pdfStreamSession struct {
 
 // pdfRenderer PDF单遍流式渲染器，实现canvas.Renderer并支持原生Form复用与文字裁剪
 type pdfRenderer struct {
-	session       *pdfStreamSession
-	ctx           context.Context
-	activeComp    *pdfFormEntry
-	width         float64
-	height        float64
-	content       *codecpdf.ContentBuilder
-	contentStack  []*codecpdf.ContentBuilder
-	sizeStack     [][2]float64
-	groupAlphas   []uint8
-	glyphPaths    renderCache[*canvas.Path, *canvas.Path]
-	glyphUnicode  map[*canvas.Font]map[uint16]rune
-	imageKey      any
-	imageClip     *canvas.Path
-	imageScale    float64
-	imageError    error
-	text          []codecpdf.TextPage
-	textClip      *canvas.Path
-	textClipFirst int
-	textClipEmpty bool
+	session          *pdfStreamSession
+	ctx              context.Context
+	activeComp       *pdfFormEntry
+	width            float64
+	height           float64
+	content          *codecpdf.ContentBuilder
+	contentStack     []*codecpdf.ContentBuilder
+	sizeStack        [][2]float64
+	groupAlphas      []uint8
+	glyphPaths       renderCache[*canvas.Path, *canvas.Path]
+	glyphUnicode     map[*canvas.Font]map[uint16]rune
+	imageKey         any
+	imageClip        *canvas.Path
+	imageInterpolate *bool
+	imageScale       float64
+	imageError       error
+	text             []codecpdf.TextPage
+	textClip         *canvas.Path
+	textClipFirst    int
+	textClipEmpty    bool
 }
 
 // pdfRawImage 封装可直通写入PDF的JPEG、JPX或JBIG2原始图像流
@@ -737,6 +739,20 @@ func (s *pdfStreamSession) OpacityGS(alpha uint8) (pdfgo.Name, pdfgo.Reference) 
 	return s.graphics.OpacityGS(alpha)
 }
 
+// OpacityPairGS 实现ContentResourceSink，登记或复用独立填充与描边透明度ExtGState资源
+// 入参: fillAlpha 填充透明度, strokeAlpha 描边透明度
+// 返回: pdfgo.Name 状态名, pdfgo.Reference 对象引用
+func (s *pdfStreamSession) OpacityPairGS(fillAlpha, strokeAlpha uint8) (pdfgo.Name, pdfgo.Reference) {
+	return s.graphics.OpacityPairGS(fillAlpha, strokeAlpha)
+}
+
+// StandardType1Font 实现ContentResourceSink，登记或复用标准Type1字体资源
+// 入参: baseFont 标准字体名
+// 返回: pdfgo.Name 字体资源名, pdfgo.Reference 对象引用
+func (s *pdfStreamSession) StandardType1Font(baseFont string) (pdfgo.Name, pdfgo.Reference) {
+	return s.graphics.StandardType1Font(baseFont)
+}
+
 // ShadingPattern 实现ContentResourceSink，登记或复用渐变Pattern资源
 // 入参: gradient 画布渐变, m 变换矩阵
 // 返回: pdfgo.Name Pattern名, pdfgo.Reference 对象引用
@@ -782,9 +798,9 @@ func (s *pdfStreamSession) canonicalFont(font *canvas.Font) *canvas.Font {
 }
 
 // registerImage 线程安全地按去重键并发编码单张PDF图像，首次编码完成后进入待写出队列
-// 入参: ctx 取消上下文, img 图像, rawPass 可选直通原始流, imageKey 可选外部去重键, target 目标降采样尺寸
+// 入参: ctx 取消上下文, img 图像, rawPass 可选直通原始流, imageKey 可选外部去重键, target 目标降采样尺寸, interpolate 可选插值开关
 // 返回: pdfgo.Name XObject资源名, pdfgo.Reference 对象引用, error 编码错误
-func (s *pdfStreamSession) registerImage(ctx context.Context, img image.Image, rawPass *codecpdf.RawImage, imageKey any, target image.Point) (pdfgo.Name, pdfgo.Reference, error) {
+func (s *pdfStreamSession) registerImage(ctx context.Context, img image.Image, rawPass *codecpdf.RawImage, imageKey any, target image.Point, interpolate *bool) (pdfgo.Name, pdfgo.Reference, error) {
 	unwrapped := unwrapEncodedImage(img)
 	var dedupKey any
 	if rawPass != nil && rawPass.Key != nil {
@@ -796,7 +812,15 @@ func (s *pdfStreamSession) registerImage(ctx context.Context, img image.Image, r
 	} else {
 		dedupKey = s.imgUniqueSeq.Add(1)
 	}
-	cacheKey := pdfImageCacheKey{key: dedupKey, target: target}
+	var interpKey int8
+	if interpolate != nil {
+		if *interpolate {
+			interpKey = 1
+		} else {
+			interpKey = -1
+		}
+	}
+	cacheKey := pdfImageCacheKey{key: dedupKey, target: target, interpolate: interpKey}
 	s.imgMu.Lock()
 	if existing, ok := s.imgEntries[cacheKey]; ok {
 		s.imgMu.Unlock()
@@ -832,9 +856,11 @@ func (s *pdfStreamSession) registerImage(ctx context.Context, img image.Image, r
 	}()
 	var encoded codecpdf.EncodedImageStream
 	if rawPass != nil {
-		encoded, err = codecpdf.EncodeRawImageStream(ctx, rawPass, s.compression, target)
+		rawCopy := *rawPass
+		rawCopy.Interpolate = interpolate
+		encoded, err = codecpdf.EncodeRawImageStream(ctx, &rawCopy, s.compression, target)
 	} else {
-		encoded, err = codecpdf.EncodePDFImageStream(ctx, unwrapped, s.compression, target, s.compressLevel)
+		encoded, err = codecpdf.EncodePDFImageStreamInterpolate(ctx, unwrapped, s.compression, target, s.compressLevel, interpolate)
 	}
 	if err == nil && len(encoded.SMaskData) > 0 {
 		entry.smaskRef = s.writer.AllocRef()
@@ -978,7 +1004,16 @@ func (r *pdfRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 			target = image.Point{}
 		}
 	}
-	name, ref, err := r.session.registerImage(r.ctx, img, rawPass, r.imageKey, target)
+	interpolate := r.imageInterpolate
+	if interpolate == nil && w <= 8 && h <= 8 {
+		sx := math.Hypot(matrix[0][0], matrix[1][0]) * codecpdf.PtPerMM
+		sy := math.Hypot(matrix[0][1], matrix[1][1]) * codecpdf.PtPerMM
+		if sx >= 4 && sy >= 4 {
+			disabled := false
+			interpolate = &disabled
+		}
+	}
+	name, ref, err := r.session.registerImage(r.ctx, img, rawPass, r.imageKey, target, interpolate)
 	if err != nil {
 		r.imageError = err
 		return

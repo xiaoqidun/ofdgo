@@ -159,22 +159,30 @@ func (e *Editor) AnnotationTexts(index int, id string) ([]string, error) {
 // 入参: index 页面索引, annotation 注解内容
 // 返回: string 注解标识, []byte 标准XML, error 校验错误
 func (e *Editor) prepareAnnotation(index int, annotation Annotation) (string, []byte, error) {
+	id, _, data, err := e.prepareAnnotationWithIDs(index, annotation)
+	return id, data, err
+}
+
+// prepareAnnotationWithIDs 校验注解、分配并返回外观子对象标识列表，避免调用方重解析XML
+// 入参: index 页面索引, annotation 注解内容
+// 返回: string 注解标识, []string 外观子对象标识列表, []byte 标准XML, error 校验错误
+func (e *Editor) prepareAnnotationWithIDs(index int, annotation Annotation) (string, []string, []byte, error) {
 	if index < 0 || index >= len(e.pages) {
-		return "", nil, fmt.Errorf("page index %d out of range", index)
+		return "", nil, nil, fmt.Errorf("page index %d out of range", index)
 	}
 	defer e.bindPageIndex(index)()
 	if !slices.Contains([]string{"Link", "Path", "Highlight", "Stamp", "Watermark"}, annotation.Type) {
-		return "", nil, fmt.Errorf("invalid annotation type %q", annotation.Type)
+		return "", nil, nil, fmt.Errorf("invalid annotation type %q", annotation.Type)
 	}
 	if _, err := creationBox(annotation.Appearance.Boundary); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	if err := e.prepareSourceIDs(); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	id, err := e.nextID()
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	objects := annotation.Appearance.Objects
 	if len(objects) == 0 {
@@ -189,37 +197,42 @@ func (e *Editor) prepareAnnotation(index int, annotation Annotation) (string, []
 			objects = append(objects, GraphicObject{Type: "ImageObject", ImageObject: object})
 		}
 		if len(annotation.Appearance.CompositeGraphicUnit) != 0 {
-			return "", nil, fmt.Errorf("use composite copy to insert existing complex content")
+			return "", nil, nil, fmt.Errorf("use composite copy to insert existing complex content")
 		}
 	}
 	if uint64(len(objects)) > maxUnitID-e.maxID {
-		return "", nil, fmt.Errorf("MaxUnitID exceeds uint32 range")
+		return "", nil, nil, fmt.Errorf("MaxUnitID exceeds uint32 range")
 	}
 	var content []byte
+	var objectIDs []string
+	if len(objects) != 0 {
+		objectIDs = make([]string, 0, len(objects))
+	}
 	for _, object := range objects {
 		objID, err := e.nextID()
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		prepared, err := e.prepareObject(objID, cloneEditorData(object))
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		data, err := editorObjectXML(prepared)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
+		objectIDs = append(objectIDs, objID)
 		content = append(content, bytes.TrimPrefix(data, []byte(xml.Header))...)
 	}
 	appearance, err := editorXMLContainer("Appearance", ofdAttrs{{Name: xml.Name{Local: "Boundary"}, Value: annotation.Appearance.Boundary}}, content)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	date := annotation.LastModDate
 	if date == "" {
 		date = time.Now().Format("2006-01-02")
 	} else if _, err := time.Parse("2006-01-02", date); err != nil {
-		return "", nil, fmt.Errorf("invalid annotation date %q: %w", date, err)
+		return "", nil, nil, fmt.Errorf("invalid annotation date %q: %w", date, err)
 	}
 	attrs := ofdAttrs{{Name: xml.Name{Local: "ID"}, Value: id}, {Name: xml.Name{Local: "Type"}, Value: annotation.Type},
 		{Name: xml.Name{Local: "Creator"}, Value: annotation.Creator}, {Name: xml.Name{Local: "LastModDate"}, Value: date}}
@@ -241,27 +254,27 @@ func (e *Editor) prepareAnnotation(index int, annotation Annotation) (string, []
 		var parameters []byte
 		for _, parameter := range annotation.Parameters.Parameter {
 			if parameter.Name == "" {
-				return "", nil, fmt.Errorf("empty annotation parameter name")
+				return "", nil, nil, fmt.Errorf("empty annotation parameter name")
 			}
 			var value bytes.Buffer
 			if err := xml.EscapeText(&value, []byte(parameter.Value)); err != nil {
-				return "", nil, err
+				return "", nil, nil, err
 			}
 			data, err := editorXMLContainer("Parameter", ofdAttrs{{Name: xml.Name{Local: "Name"}, Value: parameter.Name}}, value.Bytes())
 			if err != nil {
-				return "", nil, err
+				return "", nil, nil, err
 			}
 			parameters = append(parameters, bytes.TrimPrefix(data, []byte(xml.Header))...)
 		}
 		data, err := editorXMLContainer("Parameters", nil, parameters)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		content = append(content, bytes.TrimPrefix(data, []byte(xml.Header))...)
 	}
 	content = append(content, bytes.TrimPrefix(appearance, []byte(xml.Header))...)
 	data, err := editorXMLContainer("Annot", attrs, content)
-	return id, data, err
+	return id, objectIDs, data, err
 }
 
 // annotationXML 按ST_ID数值读取唯一注解的原文，不以类型、大小或可见性筛选

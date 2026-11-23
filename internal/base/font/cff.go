@@ -209,25 +209,36 @@ func SanitizeCFF(data []byte) ([]byte, error) {
 		return nil, err
 	}
 	if _, isCID := topDict[1230]; !isCID {
+		result := data
 		if kind == 1 {
-			return normalizeCFFType1(data, topDict)
-		}
-		private, err := readType2Private(data, topDict[18], &type2Font{})
-		if err != nil {
-			return nil, err
-		}
-		count := len(private)
-		if err := normalizeCFFPrivate(private); err != nil {
-			return nil, err
-		}
-		if len(private) != count {
-			font, err := readType2Font(data)
+			result, err = normalizeCFFType1(data, topDict)
 			if err != nil {
 				return nil, err
 			}
-			return rebuildNamedCFF(data, font, font.chars, nil, false)
+		} else {
+			private, err := readType2Private(data, topDict[18], &type2Font{})
+			if err != nil {
+				return nil, err
+			}
+			count := len(private)
+			if err := normalizeCFFPrivate(private); err != nil {
+				return nil, err
+			}
+			if len(private) != count {
+				font, err := readType2Font(data)
+				if err != nil {
+					return nil, err
+				}
+				result, err = rebuildNamedCFF(data, font, font.chars, nil, false)
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
-		return data, nil
+		if int(result[2]) != 4 {
+			return normalizeCFFHeader(result)
+		}
+		return result, nil
 	}
 	fdArrOff, err := cffDictOffset(data, topDict, 1236)
 	if err != nil {
@@ -306,7 +317,7 @@ func SanitizeCFF(data []byte) ([]byte, error) {
 		finalPrivData = encodeCFFDict(pDict)
 	}
 	stringIndexData, charsetData := sanitizedCFFCharset(stringIndexData, len(chars))
-	return encodeSanitizedCFF(data[:hdrSize], nameIndexData, topDict, stringIndexData, globalSubrIndexData, charsetData, charStringsData, finalPrivData, localSubrData), nil
+	return encodeSanitizedCFF([]byte{1, 0, 4, 4}, nameIndexData, topDict, stringIndexData, globalSubrIndexData, charsetData, charStringsData, finalPrivData, localSubrData), nil
 }
 
 // GetCFFCIDRuneMap 获取CID到包装字体字符的映射
@@ -610,7 +621,67 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 	finalPrivData := encodeCFFDict(privateDict)
 	charStringsData := encodeCFFIndex(inlined)
 	stringIndexData, charsetData := sanitizedCFFCharset(stringIndexData, len(inlined))
-	return encodeSanitizedCFF(data[:hdrSize], nameIndexData, topDict, stringIndexData, encodeCFFIndex(nil), charsetData, charStringsData, finalPrivData, nil), nil
+	return encodeSanitizedCFF([]byte{1, 0, 4, 4}, nameIndexData, topDict, stringIndexData, encodeCFFIndex(nil), charsetData, charStringsData, finalPrivData, nil), nil
+}
+
+// normalizeCFFHeader 将带扩展字节的合法非CID CFF头部规范化为标准4字节头并重算顶层偏移
+// 入参: data 原始非CID CFF数据
+// 返回: []byte 规范化后的CFF数据, error 错误信息
+func normalizeCFFHeader(data []byte) ([]byte, error) {
+	if !isBareCFFData(data) {
+		return nil, fmt.Errorf("invalid CFF header")
+	}
+	hdrSize := int(data[2])
+	_, nameSize := getCFFIndexCount(data, hdrSize)
+	if nameSize <= 0 {
+		return nil, fmt.Errorf("invalid CFF name index")
+	}
+	topStart := hdrSize + nameSize
+	topData, topSize := getCFFIndexData(data, topStart)
+	if topData == nil || topStart+topSize > len(data) {
+		return nil, fmt.Errorf("invalid CFF top dictionary")
+	}
+	originalDict, err := readCFFDict(topData)
+	if err != nil {
+		return nil, err
+	}
+	dict := make(cffDict, len(originalDict))
+	for op, vals := range originalDict {
+		dict[op] = append([]float64(nil), vals...)
+	}
+	topEnd := topStart + topSize
+	newTop := encodeCFFIndex([][]byte{encodeCFFDict(dict)})
+	for range 6 {
+		shift := (4 - hdrSize) + (len(newTop) - topSize)
+		for _, op := range []int{15, 16, 17} {
+			values := originalDict[op]
+			if len(values) != 1 || op == 15 && values[0] <= 2 || op == 16 && values[0] <= 1 {
+				continue
+			}
+			offset := int(values[0])
+			if offset >= topEnd {
+				dict[op] = []float64{float64(offset + shift)}
+			}
+		}
+		if values := originalDict[18]; len(values) == 2 && values[0] != 0 {
+			offset := int(values[1])
+			if offset >= topEnd {
+				dict[18] = []float64{values[0], float64(offset + shift)}
+			}
+		}
+		updated := encodeCFFIndex([][]byte{encodeCFFDict(dict)})
+		if len(updated) == len(newTop) {
+			newTop = updated
+			break
+		}
+		newTop = updated
+	}
+	result := make([]byte, 0, 4+nameSize+len(newTop)+len(data)-topEnd)
+	result = append(result, 1, 0, 4, 4)
+	result = append(result, data[hdrSize:topStart]...)
+	result = append(result, newTop...)
+	result = append(result, data[topEnd:]...)
+	return result, nil
 }
 
 // sanitizedCFFCharset 为转换后的非CID字体生成显式字符集并按需补充字符串索引

@@ -156,9 +156,18 @@ func (p *pdfImporter) threeDPainter(ctx context.Context, page *pdfgo.Page, sourc
 		}
 		widthMM := width * math.Hypot(p.matrix[0], p.matrix[1])
 		heightMM := height * math.Hypot(p.matrix[2], p.matrix[3])
+		const pdfMaxThreeDPixels = 64 << 20
 		w, h := math.Ceil(widthMM*p.rasterDPI/25.4), math.Ceil(heightMM*p.rasterDPI/25.4)
 		if !finite(w) || !finite(h) || w <= 0 || h <= 0 || w > 1<<30 || h > 1<<30 {
 			return nil, fmt.Errorf("invalid PDF 3D raster dimensions")
+		}
+		if w*h > pdfMaxThreeDPixels {
+			if p.warning == nil {
+				return nil, fmt.Errorf("PDF 3D raster pixels exceed limit")
+			}
+			scale := math.Sqrt(pdfMaxThreeDPixels / (w * h))
+			w, h = math.Max(1, math.Floor(w*scale)), math.Max(1, math.Floor(h*scale))
+			p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: fmt.Sprintf("oversized PDF 3D raster scaled to %dx%d", int(w), int(h))})
 		}
 		options := codecpdf.ThreeDRenderOptions{Width: int(w), Height: int(h)}
 		if p.resolveFile != nil {

@@ -163,14 +163,14 @@ func (p *pdfImporter) eventActions(ctx context.Context, object pdfgo.Object, eve
 		annotation := source
 		annotation.Dictionary = pdfgo.Dictionary{"A": info.Dictionary}
 		warned = false
-		warnings := len(p.report.Warnings)
+		warnings := p.warningTotal
 		converted, err := p.convertLinkActions(annotation, p.warning == nil, currentPage)
 		if err != nil {
 			conversionErr = retain(err)
 			*currentPage = -1
 			return conversionErr
 		}
-		if p.warning != nil && (converted == nil || warned || len(p.report.Warnings) != warnings) {
+		if p.warning != nil && (converted == nil || warned || p.warningTotal != warnings) {
 			if err := retain(nil); err != nil {
 				conversionErr = err
 				return err

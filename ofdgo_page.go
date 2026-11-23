@@ -277,6 +277,8 @@ type ImageObject struct {
 	LineWidthSet   bool         `xml:"-"`
 	MiterLimitSet  bool         `xml:"-"`
 	DashPatternSet bool         `xml:"-"`
+	// Interpolate 仅限内存态图像缩放插值提示，不序列化至OFD XML
+	Interpolate *bool `xml:"-"`
 }
 
 // ImageBorder 图像边框

@@ -26,9 +26,10 @@ import (
 
 // canvasPageCompiler 将已解释的页面绘制转换为自有数据，不保存第三方绘图对象
 type canvasPageCompiler struct {
-	page     *RasterPage
-	geometry GeometryBackend
-	err      error
+	page             *RasterPage
+	geometry         GeometryBackend
+	imageInterpolate *bool
+	err              error
 }
 
 // rasterPaddedImage 为旋转采样提供透明边距，共享原图而不复制整幅像素
@@ -174,7 +175,7 @@ func (c *canvasPageCompiler) RenderImage(img image.Image, m canvas.Matrix) {
 	t := RasterMatrix{m[0][0], -m[1][0], -m[0][1], m[1][1], m[0][2] + m[0][1]*h, c.page.Height - m[1][2] - m[1][1]*h}
 	t[4] -= t[0]*float64(bounds.Min.X) + t[2]*float64(bounds.Min.Y)
 	t[5] -= t[1]*float64(bounds.Min.X) + t[3]*float64(bounds.Min.Y)
-	c.page.Commands = append(c.page.Commands, RasterCommand{Image: img, Transform: t})
+	c.page.Commands = append(c.page.Commands, RasterCommand{Image: img, Interpolate: c.imageInterpolate, Transform: t})
 }
 
 // fill 转换路径和画刷，未知类型返回错误而非丢弃内容

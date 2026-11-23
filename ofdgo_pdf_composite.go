@@ -15,13 +15,18 @@
 package ofdgo
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"image/color"
 	"math"
+	"reflect"
 	"runtime"
+	"slices"
+	"sync"
 
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
+	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
 )
@@ -66,6 +71,7 @@ type pdfCompositor struct {
 	scratch         *pdfCompositeScratch
 	origins         *pdfOriginSet
 	masks           map[*pdfgo.SoftMask][]float64
+	clipMasks       map[pdfClipMaskKey]image.Image
 	meshes          map[pdfMeshKey][]pdfShadingPixel
 	gradients       map[pdfGradientKey][]pdfShadingPixel
 	transfers       []*pdfgo.TransferFunction
@@ -90,10 +96,38 @@ type pdfCompositeSceneKey struct {
 	mark  pdfCompositeKey
 }
 
+// pdfClipPathRefKey 按原始切片指针缓存单条无文字裁剪路径的哈希键
+type pdfClipPathRefKey struct {
+	segments *pdfgo.Segment
+	length   int
+	evenOdd  bool
+	matrix   pdfgo.Matrix
+}
+
+// pdfClipMaskKey 区分块区域与分辨率下的复杂裁剪光栅蒙版
+type pdfClipMaskKey struct {
+	key    [32]byte
+	box    Box
+	width  int
+	height int
+	dpi    float64
+}
+
+// pdfCompositeClip 缓存规范化裁剪轮廓及其外接框与延迟光栅场景
+type pdfCompositeClip struct {
+	path   GeometryPath
+	box    Box
+	rect   Box
+	isRect bool
+	key    [32]byte
+	scene  *RasterPage
+}
+
 // pdfCompositeGeometry 保存后端中立的绘制命令及其页面边界
 type pdfCompositeGeometry struct {
 	scene *RasterPage
 	box   Box
+	clip  *pdfCompositeClip
 }
 
 // pdfCompositeColorSampler 复用渐变几何和相同轴向参数的颜色，不近似函数
@@ -134,7 +168,8 @@ type pdfCompositeImageColor struct {
 type pdfCompositeCache struct {
 	resources       *Resources
 	geometry        *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry]
-	clips           *renderCache[[32]byte, GeometryPath]
+	clips           *renderCache[[32]byte, *pdfCompositeClip]
+	clipPathKeys    map[pdfClipPathRefKey][32]byte
 	bounds          map[pdfCompositeKey]Box
 	images          map[*pdfgo.Image]*pdfgo.ImageComponents
 	imageMatrix     map[*pdfgo.ImageMark]pdfgo.Matrix
@@ -154,10 +189,10 @@ type pdfCompositeCache struct {
 
 // pdfCompositeScratch 复用像素及蒙版缓冲，不跨页持有活动内容
 type pdfCompositeScratch struct {
-	pixels   codecpdf.CompositeBuffers[pdfCompositePixel]
-	masks    codecpdf.CompositeBuffers[float64]
-	channels codecpdf.CompositeBuffers[uint8]
-	rasters  codecpdf.RasterBuffers
+	pixels     codecpdf.CompositeBuffers[pdfCompositePixel]
+	masks      codecpdf.CompositeBuffers[float64]
+	channels   codecpdf.CompositeBuffers[uint8]
+	subRasters [8][]byte
 }
 
 // direct 检查sRGB图元能否使用标准OFD透明度而无需背景合成
@@ -165,7 +200,7 @@ type pdfCompositeScratch struct {
 func (n pdfCompositeNode) direct() bool {
 	if g := n.group; g != nil {
 		single := n.textObject != nil && len(n.children) == 1 && (n.children[0].glyph != nil || n.children[0].text != nil && len(n.children[0].text.Glyphs) == 1)
-		if g.Knockout && !single || !codecpdf.NormalBlend(g.BlendMode) || g.ColorSpace != nil && !g.ColorSpace.SRGBEquivalent() {
+		if g.Knockout && !single || !g.Isolated && g.SoftMask != nil || !codecpdf.NormalBlend(g.BlendMode) || g.ColorSpace != nil && !g.ColorSpace.SRGBEquivalent() {
 			return false
 		}
 		for _, child := range n.children {
@@ -185,8 +220,11 @@ func (n pdfCompositeNode) direct() bool {
 	if (n.image == nil || n.image.Image.ImageMask) && (fill && s.Fill.Shading != nil || stroke && s.Stroke.Shading != nil) {
 		return false
 	}
-	if fill && stroke && (s.Fill.Alpha != 1 || s.Stroke.Alpha != 1 || s.SoftMask != nil) {
-		return false
+	if fill && stroke {
+		sameAlpha := n.path != nil && s.Fill.Alpha == s.Stroke.Alpha && !s.AlphaIsShape && !s.FillOverprint && !s.StrokeOverprint
+		if s.SoftMask != nil || !sameAlpha && (s.Fill.Alpha != 1 || s.Stroke.Alpha != 1) {
+			return false
+		}
 	}
 	if n.image != nil && s.FillOverprint {
 		return false
@@ -318,6 +356,13 @@ func (c *pdfCompositor) coverage(node pdfCompositeNode, stroke bool) (image.Imag
 	if geometry.scene == nil || b.X >= c.box.X+c.box.W || b.Y >= c.box.Y+c.box.H || b.X+b.W <= c.box.X || b.Y+b.H <= c.box.Y {
 		return nil, nil
 	}
+	var mask image.Image
+	if geometry.clip != nil {
+		mask, err = c.clipMask(geometry.clip)
+		if err != nil || mask == nil {
+			return nil, err
+		}
+	}
 	target, err := c.acquireCoverage()
 	if err != nil {
 		return nil, err
@@ -325,8 +370,206 @@ func (c *pdfCompositor) coverage(node pdfCompositeNode, stroke bool) (image.Imag
 	coverage, err := c.importer.renderGroupSceneInto(geometry.scene, c.box, target)
 	if err != nil {
 		c.releaseCoverage(target)
+		return nil, err
 	}
-	return coverage, err
+	if mask != nil {
+		applied, any := applyClipMask(coverage, mask, image.Point{})
+		if !any {
+			c.releaseCoverage(coverage)
+			return nil, nil
+		}
+		if applied != coverage {
+			c.releaseCoverage(coverage)
+			coverage = applied
+		}
+	}
+	return coverage, nil
+}
+
+// coverageRect 按图元边界与当前块的交集紧致像素框渲染覆盖缓冲，避免微小图元清空整块画布
+// 入参: node 图元, stroke 是否描边
+// 返回: image.Image 紧致覆盖图像, image.Rectangle 当前块内像素范围, error 编译或渲染错误
+func (c *pdfCompositor) coverageRect(node pdfCompositeNode, stroke bool) (image.Image, image.Rectangle, error) {
+	key := pdfCompositeKey{path: node.path, text: node.text, image: node.image, stroke: stroke}
+	if b, ok := c.cache.bounds[key]; ok && (b.X >= c.box.X+c.box.W || b.Y >= c.box.Y+c.box.H || b.X+b.W <= c.box.X || b.Y+b.H <= c.box.Y) {
+		return nil, image.Rectangle{}, nil
+	}
+	if node.text != nil && len(node.text.Font.Program) == 0 && node.text.Font.BoundingBox != nil {
+		b := c.importer.compositeTextBounds(*node.text, stroke)
+		if b.X >= c.box.X+c.box.W || b.Y >= c.box.Y+c.box.H || b.X+b.W <= c.box.X || b.Y+b.H <= c.box.Y {
+			return nil, image.Rectangle{}, nil
+		}
+	}
+	geometry, err := c.geometry(node, stroke)
+	if err != nil {
+		return nil, image.Rectangle{}, err
+	}
+	b := geometry.box
+	if geometry.scene == nil || b.X >= c.box.X+c.box.W || b.Y >= c.box.Y+c.box.H || b.X+b.W <= c.box.X || b.Y+b.H <= c.box.Y {
+		return nil, image.Rectangle{}, nil
+	}
+	region := c.pixelBounds(b)
+	if region.Empty() {
+		return nil, image.Rectangle{}, nil
+	}
+	var mask image.Image
+	if geometry.clip != nil {
+		mask, err = c.clipMask(geometry.clip)
+		if err != nil || mask == nil {
+			return nil, image.Rectangle{}, err
+		}
+	}
+	step := 25.4 / c.importer.rasterDPI
+	subBox := Box{X: c.box.X + float64(region.Min.X)*step, Y: c.box.Y + float64(region.Min.Y)*step, W: float64(region.Dx()) * step, H: float64(region.Dy()) * step}
+	target, err := c.acquireCoverageBox(subBox)
+	if err != nil {
+		return nil, image.Rectangle{}, err
+	}
+	coverage, err := c.importer.renderGroupSceneInto(geometry.scene, subBox, target)
+	if err != nil {
+		c.releaseCoverage(target)
+		return nil, image.Rectangle{}, err
+	}
+	if mask != nil {
+		applied, any := applyClipMask(coverage, mask, region.Min)
+		if !any {
+			c.releaseCoverage(coverage)
+			return nil, image.Rectangle{}, nil
+		}
+		if applied != coverage {
+			c.releaseCoverage(coverage)
+			coverage = applied
+		}
+	}
+	return coverage, region, nil
+}
+
+// clipMask 在当前合成块按共享裁剪键缓存一次复杂非矩形裁剪的光栅蒙版
+// 入参: clip 规范化裁剪
+// 返回: image.Image 当前块裁剪蒙版或空值, error 编译或渲染错误
+func (c *pdfCompositor) clipMask(clip *pdfCompositeClip) (image.Image, error) {
+	if clip == nil || len(clip.path) == 0 {
+		return nil, nil
+	}
+	b := clip.box
+	if b.X >= c.box.X+c.box.W || b.Y >= c.box.Y+c.box.H || b.X+b.W <= c.box.X || b.Y+b.H <= c.box.Y {
+		return nil, nil
+	}
+	key := pdfClipMaskKey{key: clip.key, box: c.box, width: c.width, height: c.height, dpi: c.importer.rasterDPI}
+	if c.clipMasks != nil {
+		if cached, ok := c.clipMasks[key]; ok {
+			return cached, nil
+		}
+	}
+	if clip.scene == nil {
+		geometry, err := c.importer.renderer.Geometry()
+		if err != nil {
+			return nil, err
+		}
+		compiler := semanticCompiler{geometry: geometry, page: &RasterPage{Width: c.importer.pageWidth, Height: c.importer.pageHeight, DPI: c.importer.rasterDPI}}
+		if err := compiler.command(clip.path, Paint{Color: color.RGBA{255, 255, 255, 255}}, false, nil, IdentityMatrix(), nil); err != nil {
+			return nil, err
+		}
+		clip.scene = compiler.page
+	}
+	target, err := c.acquireCoverage()
+	if err != nil {
+		return nil, err
+	}
+	rendered, err := c.importer.renderGroupSceneInto(clip.scene, c.box, target)
+	if err != nil {
+		c.releaseCoverage(target)
+		return nil, err
+	}
+	if rgba, ok := rendered.(*image.RGBA); ok {
+		any := false
+		for i := 3; i < len(rgba.Pix); i += 4 {
+			if rgba.Pix[i] != 0 {
+				any = true
+				break
+			}
+		}
+		if !any {
+			c.releaseCoverage(rendered)
+			rendered = nil
+		}
+	}
+	if c.clipMasks == nil {
+		c.clipMasks = map[pdfClipMaskKey]image.Image{}
+	}
+	c.clipMasks[key] = rendered
+	return rendered, nil
+}
+
+// applyClipMask 将局部覆盖图像与当前块裁剪蒙版逐像素相乘并返回是否存在非零覆盖
+// 入参: coverage 局部覆盖图像, mask 块裁剪蒙版, offset 局部区域在块内左上偏移
+// 返回: image.Image 相乘后的覆盖图像, bool 是否存在非零覆盖
+func applyClipMask(coverage, mask image.Image, offset image.Point) (image.Image, bool) {
+	if dst, ok := coverage.(*image.RGBA); ok {
+		if src, ok2 := mask.(*image.RGBA); ok2 {
+			any := false
+			tw, th := dst.Rect.Dx(), dst.Rect.Dy()
+			sw, sh := src.Rect.Dx(), src.Rect.Dy()
+			for y := range th {
+				sy := offset.Y + y
+				dRow := dst.Pix[y*dst.Stride : y*dst.Stride+tw*4]
+				if sy < 0 || sy >= sh {
+					clear(dRow)
+					continue
+				}
+				sRow := src.Pix[sy*src.Stride:]
+				for x := range tw {
+					dOff := x * 4
+					a := dRow[dOff+3]
+					if a == 0 {
+						continue
+					}
+					sx := offset.X + x
+					if sx < 0 || sx >= sw {
+						dRow[dOff], dRow[dOff+1], dRow[dOff+2], dRow[dOff+3] = 0, 0, 0, 0
+						continue
+					}
+					m := sRow[sx*4+3]
+					if m == 255 {
+						any = true
+						continue
+					}
+					if m == 0 {
+						dRow[dOff], dRow[dOff+1], dRow[dOff+2], dRow[dOff+3] = 0, 0, 0, 0
+						continue
+					}
+					v := uint8((uint32(a)*uint32(m) + 127) / 255)
+					dRow[dOff], dRow[dOff+1], dRow[dOff+2], dRow[dOff+3] = v, v, v, v
+					if v != 0 {
+						any = true
+					}
+				}
+			}
+			return dst, any
+		}
+	}
+	bounds := coverage.Bounds()
+	out := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
+	any := false
+	for y := range bounds.Dy() {
+		for x := range bounds.Dx() {
+			a := baseimage.AlphaAt(coverage, x, y)
+			if a == 0 {
+				continue
+			}
+			m := baseimage.AlphaAt(mask, offset.X+x, offset.Y+y)
+			if m == 0 {
+				continue
+			}
+			v := uint8((uint64(a)*uint64(m)/65535 + 128) >> 8)
+			if v != 0 {
+				any = true
+				off := y*out.Stride + x*4
+				out.Pix[off], out.Pix[off+1], out.Pix[off+2], out.Pix[off+3] = v, v, v, v
+			}
+		}
+	}
+	return out, any
 }
 
 // geometry 缓存图元或组的实际覆盖场景与像素对齐边界
@@ -340,7 +583,7 @@ func (c *pdfCompositor) geometry(node pdfCompositeNode, stroke bool) (pdfComposi
 	if !ok {
 		runtime.Gosched()
 		var err error
-		geometry.scene, geometry.box, err = c.importer.compileCoverage(node, stroke)
+		geometry, err = c.importer.compileCoverage(node, stroke)
 		if err != nil {
 			return geometry, err
 		}
@@ -475,10 +718,17 @@ func (c *pdfCompositor) pixelBounds(box Box) image.Rectangle {
 // acquireCoverage 借用当前块的独占画布，保留活动画布供嵌套合成读取
 // 返回: *image.RGBA 未清空画布，不支持缓冲绘制的后端返回nil, error 无效绘制区域
 func (c *pdfCompositor) acquireCoverage() (*image.RGBA, error) {
+	return c.acquireCoverageBox(c.box)
+}
+
+// acquireCoverageBox 按目标页面范围借用紧致尺寸的独占覆盖画布，复用底层字节缓冲
+// 入参: box 页面绘制范围
+// 返回: *image.RGBA 未清空画布，不支持缓冲绘制的后端返回nil, error 无效绘制区域
+func (c *pdfCompositor) acquireCoverageBox(box Box) (*image.RGBA, error) {
 	if _, ok := c.importer.editor.Backends().Raster.(RasterBufferBackend); !ok {
 		return nil, nil
 	}
-	page := RasterPage{Width: c.box.W, Height: c.box.H, DPI: c.importer.rasterDPI}
+	page := RasterPage{Width: box.W, Height: box.H, DPI: c.importer.rasterDPI}
 	w, h, err := page.PixelSize()
 	if err != nil {
 		return nil, err
@@ -486,7 +736,21 @@ func (c *pdfCompositor) acquireCoverage() (*image.RGBA, error) {
 	if c.scratch == nil {
 		c.scratch = &pdfCompositeScratch{}
 	}
-	return c.scratch.rasters.Acquire(image.Rect(0, 0, w, h)), nil
+	need := 4 * w * h
+	selected := -1
+	for i, pix := range c.scratch.subRasters {
+		if cap(pix) >= need && (selected < 0 || cap(pix) < cap(c.scratch.subRasters[selected])) {
+			selected = i
+		}
+	}
+	var pix []byte
+	if selected >= 0 {
+		pix = c.scratch.subRasters[selected][:need]
+		c.scratch.subRasters[selected] = nil
+	} else {
+		pix = make([]byte, need)
+	}
+	return &image.RGBA{Pix: pix, Stride: 4 * w, Rect: image.Rect(0, 0, w, h)}, nil
 }
 
 // releaseCoverage 归还当前调用不再读取的画布，限制单次合成保留的内存
@@ -495,8 +759,13 @@ func (c *pdfCompositor) releaseCoverage(coverage image.Image) {
 	if _, ok := c.importer.editor.Backends().Raster.(RasterBufferBackend); !ok || c.scratch == nil {
 		return
 	}
-	if buffer, ok := coverage.(*image.RGBA); ok {
-		c.scratch.rasters.Release(buffer)
+	if buffer, ok := coverage.(*image.RGBA); ok && buffer != nil && cap(buffer.Pix) <= 4*pdfCompositeTileSize*pdfCompositeTileSize {
+		for i, stored := range c.scratch.subRasters {
+			if stored == nil {
+				c.scratch.subRasters[i] = buffer.Pix
+				return
+			}
+		}
 	}
 }
 
@@ -536,7 +805,7 @@ func (c *pdfCompositor) releaseChannels(channels []uint8) {
 	}
 }
 
-// releaseMasks 在当前块绘制结束后归还蒙版结果，不复用其他块的坐标缓存
+// releaseMasks 在当前块绘制结束后归还蒙版与复杂裁剪掩码，不复用其他块的坐标缓存
 func (c *pdfCompositor) releaseMasks() {
 	if c.scratch != nil {
 		for _, mask := range c.masks {
@@ -544,22 +813,28 @@ func (c *pdfCompositor) releaseMasks() {
 		}
 	}
 	clear(c.masks)
+	for _, mask := range c.clipMasks {
+		if mask != nil {
+			c.releaseCoverage(mask)
+		}
+	}
+	clear(c.clipMasks)
 }
 
 // geometryCache 限制完整覆盖场景的保留量，边界独立保存以便排除无交集图元
 // 返回: *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry] 单页场景缓存
 func (c *pdfCompositeCache) geometryCache() *renderCache[pdfCompositeSceneKey, pdfCompositeGeometry] {
 	if c.geometry == nil {
-		c.geometry = resourceCache[pdfCompositeSceneKey, pdfCompositeGeometry](c.resources, 64<<20)
+		c.geometry = resourceCache[pdfCompositeSceneKey, pdfCompositeGeometry](c.resources, 128<<20)
 	}
 	return c.geometry
 }
 
 // clipCache 限制页面及嵌套图案共享的只读裁剪轮廓
-// 返回: *renderCache[[32]byte, GeometryPath] 裁剪缓存
-func (c *pdfCompositeCache) clipCache() *renderCache[[32]byte, GeometryPath] {
+// 返回: *renderCache[[32]byte, *pdfCompositeClip] 裁剪缓存
+func (c *pdfCompositeCache) clipCache() *renderCache[[32]byte, *pdfCompositeClip] {
 	if c.clips == nil {
-		c.clips = resourceCache[[32]byte, GeometryPath](c.resources, 8<<20)
+		c.clips = resourceCache[[32]byte, *pdfCompositeClip](c.resources, 32<<20)
 	}
 	return c.clips
 }
@@ -639,7 +914,11 @@ func (p *pdfImporter) collectNodes(walk func(pdfgo.Visitor) error, widget, backd
 	var collect func(func(pdfgo.Visitor) error, *pdfgo.ReplacementText) ([]pdfCompositeNode, error)
 	collect = func(walk func(pdfgo.Visitor) error, replacement *pdfgo.ReplacementText) ([]pdfCompositeNode, error) {
 		var nodes []pdfCompositeNode
-		v := pdfgo.Visitor{Warning: warning, Reference: p.referencePage, Halftones: p.halftones}
+		v := p.newBaseVisitor()
+		if backdrop {
+			v.Warning = warning
+			v.PostScript = nil
+		}
 		if !backdrop {
 			v.MarkedContent = func(mark pdfgo.MarkedContentMark) error {
 				if mark.Replacement != nil {
@@ -707,7 +986,7 @@ func (p *pdfImporter) collectNodes(walk func(pdfgo.Visitor) error, widget, backd
 						return err
 					}
 				}
-				if len(mark.Glyphs) > 1 && (mark.Object != nil && !mark.Object.Knockout || mark.Style.AlphaIsShape || mark.Style.Fill.Alpha != 1 || mark.Style.Stroke.Alpha != 1 || mark.Style.SoftMask != nil || !codecpdf.NormalBlend(mark.Style.BlendMode) || mark.Mode%4 == 1 || mark.Mode%4 == 2) {
+				if len(mark.Glyphs) > 1 && (mark.Style.AlphaIsShape || mark.Style.Fill.Alpha != 1 || mark.Style.Stroke.Alpha != 1 || mark.Style.SoftMask != nil || !codecpdf.NormalBlend(mark.Style.BlendMode) || mark.Mode%4 == 1 || mark.Mode%4 == 2) {
 					for i := range mark.Glyphs {
 						glyph := mark
 						glyph.Glyphs, glyph.Positions, glyph.Clip = mark.Glyphs[i:i+1], mark.Positions[i:i+1], nil
@@ -812,6 +1091,7 @@ func (p *pdfImporter) ensureCompositeBackdrop() error {
 	collector.structureBindings = nil
 	collector.objects = nil
 	collector.report = PDFImportReport{}
+	collector.resetWarnings()
 	defer func() {
 		if collector.references != nil && collector.references != p.references {
 			if p.references == nil {
@@ -892,6 +1172,234 @@ func (p *pdfImporter) compositePage(space *pdfgo.ColorSpace, walk func(pdfgo.Vis
 	return p.compositeObjects(nodes)
 }
 
+// directTextMark 提取可参与同行合并的直通文本图元，兼容逐字文本对象隐式组
+// 入参: node 合成节点
+// 返回: *pdfgo.TextMark 文本图元, bool 是否可提取
+func directTextMark(node pdfCompositeNode) (*pdfgo.TextMark, bool) {
+	if len(node.forms) != 0 {
+		return nil, false
+	}
+	if node.text != nil && node.group == nil {
+		return node.text, true
+	}
+	if node.textObject != nil && node.group != nil && node.group.Alpha == 1 && node.group.SoftMask == nil && node.group.ColorSpace == nil && codecpdf.NormalBlend(node.group.BlendMode) && len(node.children) == 1 {
+		child := node.children[0]
+		if child.text != nil && child.group == nil && len(child.forms) == 0 && (!node.group.Knockout || len(child.text.Glyphs) == 1 || canMergeDirectTextMark(child.text)) {
+			return child.text, true
+		}
+	}
+	return nil, false
+}
+
+// pdfSameColorSpace 判断两个颜色空间指针是否等价
+// 入参: a 首空间, b 次空间
+// 返回: bool 是否等价
+func pdfSameColorSpace(a, b *pdfgo.ColorSpace) bool {
+	return a == b || a != nil && b != nil && a.Equal(b)
+}
+
+// pdfSameTextStyle 判断两个直通纯色文本图元的绘制样式是否完全等价
+// 入参: a 首样式, b 后续样式, mode 文本渲染模式
+// 返回: bool 是否完全等价
+func pdfSameTextStyle(a, b pdfgo.Style, mode int) bool {
+	if a.BlendMode != b.BlendMode || a.AlphaIsShape != b.AlphaIsShape || a.FillOverprint != b.FillOverprint || a.StrokeOverprint != b.StrokeOverprint || a.RenderingIntent != b.RenderingIntent || a.ColorConversion != b.ColorConversion || a.SoftMask != b.SoftMask || a.Transfer != b.Transfer || a.Halftone != b.Halftone || a.Fill.RGB != b.Fill.RGB || a.Fill.Alpha != b.Fill.Alpha || !pdfSameColorSpace(a.Fill.Space, b.Fill.Space) || a.Fill.Values != b.Fill.Values || a.Fill.None != b.Fill.None || len(a.Clips) != len(b.Clips) {
+		return false
+	}
+	if mode == 2 {
+		if a.LineWidth != b.LineWidth || a.Cap != b.Cap || a.Join != b.Join || a.MiterLimit != b.MiterLimit || a.DashPhase != b.DashPhase || a.StrokeAdjust != b.StrokeAdjust || !slices.Equal(a.Dash, b.Dash) || a.Stroke.RGB != b.Stroke.RGB || a.Stroke.Alpha != b.Stroke.Alpha || !pdfSameColorSpace(a.Stroke.Space, b.Stroke.Space) || a.Stroke.Values != b.Stroke.Values || a.Stroke.None != b.Stroke.None || a.Stroke.CMYK != b.Stroke.CMYK || a.Stroke.Colorant != b.Stroke.Colorant || a.Stroke.Process != b.Stroke.Process || a.Stroke.Tiling != nil || b.Stroke.Tiling != nil || a.Stroke.Axial != nil || b.Stroke.Axial != nil || a.Stroke.Radial != nil || b.Stroke.Radial != nil || a.Stroke.Mesh != nil || b.Stroke.Mesh != nil || a.Stroke.Function != nil || b.Stroke.Function != nil || a.Stroke.Shading != nil || b.Stroke.Shading != nil {
+			return false
+		}
+	}
+	if len(a.Clips) == 0 && a.Fill.CMYK == b.Fill.CMYK && a.Fill.Colorant == b.Fill.Colorant && a.Fill.Process == b.Fill.Process && a.Fill.Tiling == nil && b.Fill.Tiling == nil && a.Fill.Axial == nil && b.Fill.Axial == nil && a.Fill.Radial == nil && b.Fill.Radial == nil && a.Fill.Mesh == nil && b.Fill.Mesh == nil && a.Fill.Function == nil && b.Fill.Function == nil && a.Fill.Shading == nil && b.Fill.Shading == nil {
+		return true
+	}
+	return reflect.DeepEqual(a, b)
+}
+
+// pdfGlyphAdvance 估算字形在文本坐标系中的水平前进宽
+// 入参: glyph 字形, size 字号, hscale 水平缩放
+// 返回: float64 文本坐标系前进宽
+func pdfGlyphAdvance(glyph pdfgo.Glyph, size, hscale float64) float64 {
+	if finite(glyph.Width) && glyph.Width > 0 {
+		return glyph.Width / 1000 * size * hscale
+	}
+	return 0.5 * size * hscale
+}
+
+// canMergeDirectTextMark 检查单个直通文本图元是否具备同行合并前提
+// 入参: mark 文本图元
+// 返回: bool 是否允许参与同行合并
+func canMergeDirectTextMark(mark *pdfgo.TextMark) bool {
+	if mark == nil || mark.Font == nil || mark.Font.Subtype == "Type3" || mark.Size <= 0 || mark.HorizontalScale <= 0 || mark.Clip != nil || mark.Replacement != nil || (mark.Mode != 0 && mark.Mode != 2 && mark.Mode != 3) || len(mark.Glyphs) == 0 || len(mark.Glyphs) != len(mark.Positions) {
+		return false
+	}
+	s := mark.Style
+	if s.SoftMask != nil || s.Transfer != nil || s.Halftone != nil || s.AlphaIsShape || s.FillOverprint || !codecpdf.NormalBlend(s.BlendMode) {
+		return false
+	}
+	f := s.Fill
+	if mark.Mode != 3 && f.Alpha != 1 {
+		return false
+	}
+	if f.Tiling != nil || f.Axial != nil || f.Radial != nil || f.Mesh != nil || f.Function != nil || f.Shading != nil {
+		return false
+	}
+	if mark.Mode == 2 {
+		st := s.Stroke
+		if s.StrokeOverprint || st.Alpha != 1 || st.Tiling != nil || st.Axial != nil || st.Radial != nil || st.Mesh != nil || st.Function != nil || st.Shading != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// mergeDirectTextNodes 将严格相邻、同样式且同行紧邻的直通文本图元合并为单个TextMark
+// 入参: nodes 待转换图元列表, start 起始索引, first 起始直通文本图元, hasStructure 是否启用逻辑结构绑定, allow 可选后续节点直通校验
+// 返回: pdfgo.TextMark 合并结果, int 消费到的结束索引, bool 是否发生合并
+func mergeDirectTextNodes(nodes []pdfCompositeNode, start int, first *pdfgo.TextMark, hasStructure bool, allow func(pdfCompositeNode) bool) (pdfgo.TextMark, int, bool) {
+	if !canMergeDirectTextMark(first) || start+1 >= len(nodes) {
+		return pdfgo.TextMark{}, start + 1, false
+	}
+	inv0, ok := first.Matrix.Inverse()
+	if !ok {
+		return pdfgo.TextMark{}, start + 1, false
+	}
+	lastPos := first.Positions[len(first.Positions)-1]
+	prevX, prevY := lastPos.X, lastPos.Y
+	baseY := first.Positions[0].Y
+	prevGlyph := first.Glyphs[len(first.Glyphs)-1]
+	yTol := 0.05 * first.Size
+	ySnap := 1e-4 * first.Size
+	minGap, maxGap := -0.25*first.Size, 3*first.Size
+	end := start + 1
+	totalGlyphs := len(first.Glyphs)
+	for end < len(nodes) {
+		if allow != nil && !allow(nodes[end]) {
+			break
+		}
+		m, ok := directTextMark(nodes[end])
+		if !ok {
+			break
+		}
+		if m.Font != first.Font || m.Size != first.Size || m.HorizontalScale != first.HorizontalScale || m.Mode != first.Mode || m.Clip != nil || m.Replacement != nil || len(m.Glyphs) == 0 || len(m.Glyphs) != len(m.Positions) {
+			break
+		}
+		if m.Mode == 2 && m.StrokeMatrix != first.StrokeMatrix {
+			break
+		}
+		if hasStructure && m.Sequence != first.Sequence {
+			break
+		}
+		if m.Matrix[0] != first.Matrix[0] || m.Matrix[1] != first.Matrix[1] || m.Matrix[2] != first.Matrix[2] || m.Matrix[3] != first.Matrix[3] {
+			break
+		}
+		if !pdfSameTextStyle(first.Style, m.Style, first.Mode) {
+			break
+		}
+		dx, dy := m.Matrix[4]-first.Matrix[4], m.Matrix[5]-first.Matrix[5]
+		ox, oy := inv0[0]*dx+inv0[2]*dy, inv0[1]*dx+inv0[3]*dy
+		if !finite(ox) || !finite(oy) {
+			break
+		}
+		firstPt := pdfgo.Point{X: m.Positions[0].X + ox, Y: m.Positions[0].Y + oy}
+		if !finite(firstPt.X) || !finite(firstPt.Y) || math.Abs(firstPt.Y-prevY) > yTol || math.Abs(firstPt.Y-baseY) > yTol {
+			break
+		}
+		gap := firstPt.X - (prevX + pdfGlyphAdvance(prevGlyph, first.Size, first.HorizontalScale))
+		if gap < minGap || gap > maxGap {
+			break
+		}
+		valid := true
+		for _, pt := range m.Positions {
+			if !finite(pt.X+ox) || !finite(pt.Y+oy) {
+				valid = false
+				break
+			}
+		}
+		if !valid {
+			break
+		}
+		tail := m.Positions[len(m.Positions)-1]
+		prevX, prevY = tail.X+ox, tail.Y+oy
+		prevGlyph = m.Glyphs[len(m.Glyphs)-1]
+		totalGlyphs += len(m.Glyphs)
+		end++
+	}
+	if end == start+1 {
+		return pdfgo.TextMark{}, end, false
+	}
+	merged := *first
+	merged.Glyphs = make([]pdfgo.Glyph, 0, totalGlyphs)
+	merged.Positions = make([]pdfgo.Point, 0, totalGlyphs)
+	merged.Glyphs = append(merged.Glyphs, first.Glyphs...)
+	merged.Positions = append(merged.Positions, first.Positions...)
+	for k := start + 1; k < end; k++ {
+		m, _ := directTextMark(nodes[k])
+		dx, dy := m.Matrix[4]-first.Matrix[4], m.Matrix[5]-first.Matrix[5]
+		ox, oy := inv0[0]*dx+inv0[2]*dy, inv0[1]*dx+inv0[3]*dy
+		for _, pt := range m.Positions {
+			mapped := pdfgo.Point{X: pt.X + ox, Y: pt.Y + oy}
+			if math.Abs(mapped.Y-baseY) <= ySnap {
+				mapped.Y = baseY
+			}
+			merged.Positions = append(merged.Positions, mapped)
+		}
+		merged.Glyphs = append(merged.Glyphs, m.Glyphs...)
+	}
+	return merged, end, true
+}
+
+// emitDirectNodes 输出已确认直通的节点列表，并合并同层相邻同行同样式文本图元
+// 入参: nodes 同层直通节点, visitor 目标访问器
+// 返回: error 转换错误
+func (p *pdfImporter) emitDirectNodes(nodes []pdfCompositeNode, visitor pdfgo.Visitor) error {
+	hasStructure := p.structureBindings != nil
+	for i := 0; i < len(nodes); i++ {
+		node := nodes[i]
+		if first, ok := directTextMark(node); ok {
+			if merged, end, ok := mergeDirectTextNodes(nodes, i, first, hasStructure, nil); ok {
+				if err := visitor.Text(merged); err != nil {
+					return err
+				}
+				i = end - 1
+				continue
+			}
+		}
+		if node.textObject != nil || node.glyph != nil {
+			if err := p.emitDirectNodes(node.children, visitor); err != nil {
+				return err
+			}
+			continue
+		}
+		if node.group != nil {
+			if err := visitor.Group(*node.group, func(v pdfgo.Visitor) error {
+				return p.emitDirectNodes(node.children, v)
+			}); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := node.emit(visitor); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// independentFromBackdrop 判断单个非直通图元能否在透明底上独立合成，无需重绘前序背景
+// 入参: node 当前图元, space 页面混合空间
+// 返回: bool 是否与前序背景无关
+func (p *pdfImporter) independentFromBackdrop(node pdfCompositeNode, space *pdfgo.ColorSpace) bool {
+	if !space.SRGBEquivalent() || node.group != nil || node.image != nil {
+		return false
+	}
+	s, fill, stroke := node.style()
+	if !fill || !stroke || s.SoftMask != nil || s.AlphaIsShape || s.FillOverprint || s.StrokeOverprint || s.Transfer != nil || s.Halftone != nil || !codecpdf.NormalBlend(s.BlendMode) {
+		return false
+	}
+	return s.Fill.Tiling == nil && s.Stroke.Tiling == nil && s.Fill.Shading == nil && s.Stroke.Shading == nil
+}
+
 // compositeObjects 按绘制顺序转换图元并保留后续混合所需的背景
 // 入参: nodes 待转换图元
 // 返回: error 转换或合成错误
@@ -960,18 +1468,43 @@ func (p *pdfImporter) compositeObjects(nodes []pdfCompositeNode) error {
 			direct = false
 		}
 		if direct {
-			if err := node.emit(p.visitor()); err != nil {
+			if first, ok := directTextMark(node); ok {
+				allowNext := func(next pdfCompositeNode) bool {
+					nextDirect, err := p.directCompositeNode(next, space)
+					if err != nil || !nextDirect {
+						return false
+					}
+					nextTransfer, err := p.compositeHasTransfer([]pdfCompositeNode{next}, device)
+					return err == nil && !nextTransfer
+				}
+				if merged, end, ok := mergeDirectTextNodes(nodes, i, first, p.structureBindings != nil, allowNext); ok {
+					if err := p.visitor().Text(merged); err != nil {
+						return fmt.Errorf("convert graphic %d: %w", i+1, err)
+					}
+					stored := merged
+					p.compositeNodes = append(p.compositeNodes, pdfCompositeNode{text: &stored})
+					i = end - 1
+					continue
+				}
+			}
+			if err := p.emitDirectNodes([]pdfCompositeNode{node}, p.visitor()); err != nil {
 				return fmt.Errorf("convert graphic %d: %w", i+1, err)
 			}
 		} else {
 			if p.warning == nil {
 				return &pdfgo.UnsupportedError{Feature: "page color-space compositing"}
 			}
-			if err := p.ensureCompositeBackdrop(); err != nil {
-				return fmt.Errorf("composite graphic %d: %w", i+1, err)
-			}
-			if err := p.compositeRegion(p.compositeNodes, node, space, true); err != nil {
-				return fmt.Errorf("composite graphic %d: %w", i+1, err)
+			if !p.transferBackdrop && !transfer && p.independentFromBackdrop(node, space) {
+				if err := p.compositeRegion(nil, node, space, false); err != nil {
+					return fmt.Errorf("composite graphic %d: %w", i+1, err)
+				}
+			} else {
+				if err := p.ensureCompositeBackdrop(); err != nil {
+					return fmt.Errorf("composite graphic %d: %w", i+1, err)
+				}
+				if err := p.compositeRegion(p.compositeNodes, node, space, true); err != nil {
+					return fmt.Errorf("composite graphic %d: %w", i+1, err)
+				}
 			}
 		}
 		p.compositeNodes = append(p.compositeNodes, node)
@@ -1081,6 +1614,48 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 	output := image.NewNRGBA(image.Rect(0, 0, w, h))
 	cache := p.compositingCache()
 	step := 25.4 / p.rasterDPI
+	tilesX := (w + pdfCompositeTileSize - 1) / pdfCompositeTileSize
+	tilesY := (h + pdfCompositeTileSize - 1) / pdfCompositeTileSize
+	var filteredBackdrop []pdfCompositeNode
+	var tileBuckets [][]pdfCompositeNode
+	if len(backdrop) != 0 {
+		boundsCalc := pdfCompositor{importer: p, cache: cache}
+		useBuckets := tilesX*tilesY > 1
+		if useBuckets {
+			tileBuckets = make([][]pdfCompositeNode, tilesX*tilesY)
+		}
+		tileMM := float64(pdfCompositeTileSize) * step
+		for _, prev := range backdrop {
+			if err := p.ctx.Err(); err != nil {
+				return err
+			}
+			var prevBox Box
+			if prev.group != nil {
+				prevBox, err = boundsCalc.groupBounds(prev)
+			} else {
+				prevBox, err = boundsCalc.markBounds(prev)
+			}
+			if err != nil {
+				return err
+			}
+			if prevBox.W <= 0 || prevBox.H <= 0 || prevBox.X >= box.X+box.W || prevBox.Y >= box.Y+box.H || prevBox.X+prevBox.W <= box.X || prevBox.Y+prevBox.H <= box.Y {
+				continue
+			}
+			filteredBackdrop = append(filteredBackdrop, prev)
+			if useBuckets {
+				tx0 := max(0, min(tilesX-1, int(math.Floor((prevBox.X-box.X-step)/tileMM))))
+				ty0 := max(0, min(tilesY-1, int(math.Floor((prevBox.Y-box.Y-step)/tileMM))))
+				tx1 := max(0, min(tilesX-1, int(math.Floor((prevBox.X+prevBox.W-box.X+step)/tileMM))))
+				ty1 := max(0, min(tilesY-1, int(math.Floor((prevBox.Y+prevBox.H-box.Y+step)/tileMM))))
+				for ty := ty0; ty <= ty1; ty++ {
+					rowOff := ty * tilesX
+					for tx := tx0; tx <= tx1; tx++ {
+						tileBuckets[rowOff+tx] = append(tileBuckets[rowOff+tx], prev)
+					}
+				}
+			}
+		}
+	}
 	buffer := make([]pdfCompositePixel, min(pdfCompositeTileSize, w)*min(pdfCompositeTileSize, h))
 	scratch := &pdfCompositeScratch{}
 	var transfers []*pdfgo.TransferFunction
@@ -1090,7 +1665,7 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 		device = "DeviceRGB"
 	}
 	hasTransfer := false
-	for _, nodes := range [][]pdfCompositeNode{backdrop, {node}} {
+	for _, nodes := range [][]pdfCompositeNode{filteredBackdrop, {node}} {
 		found, err := p.compositeHasTransfer(nodes, device)
 		if err != nil {
 			return err
@@ -1101,12 +1676,9 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 		transfers = make([]*pdfgo.TransferFunction, len(buffer))
 		previousTransfers = make([]*pdfgo.TransferFunction, len(buffer))
 	}
-	var colorValues [4]float64
-	var colorRGB [3]float64
-	colorReady := false
 	var origins pdfOriginSet
-	for y := 0; y < h; y += pdfCompositeTileSize {
-		for x := 0; x < w; x += pdfCompositeTileSize {
+	for ty, y := 0, 0; y < h; ty, y = ty+1, y+pdfCompositeTileSize {
+		for tx, x := 0, 0; x < w; tx, x = tx+1, x+pdfCompositeTileSize {
 			if err := p.ctx.Err(); err != nil {
 				return err
 			}
@@ -1120,39 +1692,68 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 			}
 			pixels := buffer[:width*height]
 			clear(pixels)
-			if err := c.draw(backdrop, pixels, space); err != nil {
-				return err
+			tileBackdrop := filteredBackdrop
+			if tileBuckets != nil {
+				tileBackdrop = tileBuckets[ty*tilesX+tx]
 			}
-			for i := range pixels {
-				pixels[i].Effect = 0
+			if len(tileBackdrop) != 0 {
+				if err := c.draw(tileBackdrop, pixels, space); err != nil {
+					c.releaseMasks()
+					return err
+				}
+				for i := range pixels {
+					pixels[i].Effect = 0
+				}
 			}
 			copy(previousTransfers, c.transfers)
 			if err := c.draw([]pdfCompositeNode{node}, pixels, space); err != nil {
+				c.releaseMasks()
 				return err
 			}
-			for i, pixel := range pixels {
-				if i%pdfCompositeTileSize == 0 {
-					if err := p.ctx.Err(); err != nil {
-						return err
-					}
-				}
-				if pixel.Effect == 0 && (c.transfers == nil || c.transfers[i] == previousTransfers[i]) {
+			if err := compositeWriteTileOutput(p.ctx, pixels, output, x, y, width, height, space, flatten, c.transfers, previousTransfers, device); err != nil {
+				c.releaseMasks()
+				return err
+			}
+			c.releaseMasks()
+		}
+	}
+	return p.appendRasterGroup(output, box, 1, origins.origin)
+}
+
+// compositeWriteTileOutput 将合成块像素转换到sRGB并写入输出图像，对非sRGB大块启用多行并行
+// 入参: ctx 上下文, pixels 合成像素, output 输出图像, x 块左偏移, y 块上偏移, width 块宽, height 块高, space 混合空间, flatten 是否平铺白底, transfers 传递函数表, previousTransfers 背景传递函数表, device 设备空间名
+// 返回: error 转换或取消错误
+func compositeWriteTileOutput(ctx context.Context, pixels []pdfCompositePixel, output *image.NRGBA, x, y, width, height int, space *pdfgo.ColorSpace, flatten bool, transfers, previousTransfers []*pdfgo.TransferFunction, device pdfgo.Name) error {
+	writeRows := func(y0, y1 int) error {
+		var colorValues [4]float64
+		var colorRGB [3]float64
+		colorReady := false
+		for ry := y0; ry < y1; ry++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			rowStart := ry * width
+			pixRow := output.Pix[(y+ry)*output.Stride+x*4:]
+			for rx := range width {
+				i := rowStart + rx
+				pixel := pixels[i]
+				if pixel.Effect == 0 && (transfers == nil || transfers[i] == previousTransfers[i]) {
 					continue
 				}
 				var rgb [3]float64
 				var err error
-				if c.transfers != nil && device == "DeviceCMYK" {
+				if transfers != nil && device == "DeviceCMYK" {
 					values := pixel.Values
 					if flatten {
 						for j := range values {
 							values[j] *= pixel.Alpha
 						}
 					}
-					values, err = c.transfers[i].Apply(values[:], device, "")
+					values, err = transfers[i].Apply(values[:], device, "")
 					if err == nil {
 						rgb, err = codecpdf.OutputColor(space, values)
 					}
-				} else if c.transfers != nil {
+				} else if transfers != nil {
 					rgb, err = space.SRGB(pixel.Values[:space.Components()], "RelativeColorimetric")
 				} else {
 					if colorReady && pixel.Values == colorValues {
@@ -1169,24 +1770,52 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 				}
 				alpha := pixel.Alpha
 				if flatten {
-					if c.transfers == nil || device != "DeviceCMYK" {
+					if transfers == nil || device != "DeviceCMYK" {
 						for j := range rgb {
 							rgb[j] = pixel.Alpha*rgb[j] + 1 - pixel.Alpha
 						}
 					}
 					alpha = 1
 				}
-				if c.transfers != nil && device != "DeviceCMYK" && c.transfers[i] != nil {
-					values, err := c.transfers[i].Apply(rgb[:], "DeviceRGB", "")
+				if transfers != nil && device != "DeviceCMYK" && transfers[i] != nil {
+					values, err := transfers[i].Apply(rgb[:], "DeviceRGB", "")
 					if err != nil {
 						return err
 					}
 					copy(rgb[:], values[:3])
 				}
-				output.SetNRGBA(x+i%width, y+i/width, color.NRGBA{R: uint8(math.Round(rgb[0] * 255)), G: uint8(math.Round(rgb[1] * 255)), B: uint8(math.Round(rgb[2] * 255)), A: uint8(math.Round(alpha * 255))})
+				off := rx * 4
+				pixRow[off] = uint8(math.Round(rgb[0] * 255))
+				pixRow[off+1] = uint8(math.Round(rgb[1] * 255))
+				pixRow[off+2] = uint8(math.Round(rgb[2] * 255))
+				pixRow[off+3] = uint8(math.Round(alpha * 255))
 			}
-			c.releaseMasks()
 		}
+		return nil
 	}
-	return p.appendRasterGroup(output, box, 1, origins.origin)
+	workers := conversionWorkers(ctx)
+	if workers > 1 && transfers == nil && !space.SRGBEquivalent() && height >= 32 && width*height >= 4096 {
+		if workers > height/8 {
+			workers = max(1, height/8)
+		}
+		errs := make([]error, workers)
+		var wg sync.WaitGroup
+		for w := range workers {
+			y0 := w * height / workers
+			y1 := (w + 1) * height / workers
+			wg.Add(1)
+			go func(idx, startY, endY int) {
+				defer wg.Done()
+				errs[idx] = writeRows(startY, endY)
+			}(w, y0, y1)
+		}
+		wg.Wait()
+		for _, err := range errs {
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return writeRows(0, height)
 }

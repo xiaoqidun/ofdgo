@@ -645,9 +645,13 @@ func (c *semanticCompiler) pathObject(object PathObject, state RenderState) erro
 // 入参: object 文字对象, state 继承状态
 // 返回: error 字体或几何错误
 func (c *semanticCompiler) textObject(object TextObject, state RenderState) error {
+	if object.Visible != nil && !*object.Visible {
+		return nil
+	}
 	shouldFill := object.Fill == nil || *object.Fill
 	shouldStroke := object.Stroke != nil && *object.Stroke
-	if object.Visible != nil && !*object.Visible || !shouldFill && !shouldStroke {
+	needText := !c.pattern && (c.textOnly || c.renderer.OnPageText != nil)
+	if !shouldFill && !shouldStroke && !needText {
 		return nil
 	}
 	positioned, err := c.renderer.positionText(object, state, c.textOnly && c.renderer.textContentOnly)
@@ -657,7 +661,7 @@ func (c *semanticCompiler) textObject(object TextObject, state RenderState) erro
 	if !c.pattern && positioned.Run.Text != "" {
 		c.text.Runs = append(c.text.Runs, positioned.Run)
 	}
-	if c.textOnly {
+	if c.textOnly || !shouldFill && !shouldStroke {
 		return nil
 	}
 	if c.measure && !c.contours {

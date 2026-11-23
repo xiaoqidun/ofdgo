@@ -51,7 +51,17 @@ type rasterImageSource struct{ image.Image }
 // DrawPixels 对轴向缩放使用可分离采样，其余变换保留通用路径
 // 入参: dst 目标图像, src 源图像, m 按a、b、c、d、e、f排列的像素变换, op 合成操作
 func DrawPixels(dst draw.Image, src image.Image, m [6]float64, op draw.Op) {
+	DrawPixelsInterpolate(dst, src, m, op, nil)
+}
+
+// DrawPixelsInterpolate 按插值开关绘制图像，禁用插值放大或极小色块高倍放大时使用最近邻采样
+// 入参: dst 目标图像, src 源图像, m 按a、b、c、d、e、f排列的像素变换, op 合成操作, interpolate 可选插值开关
+func DrawPixelsInterpolate(dst draw.Image, src image.Image, m [6]float64, op draw.Op, interpolate *bool) {
 	b := src.Bounds()
+	if UseNearestNeighbor(b, m, interpolate) {
+		drawNearestPixels(dst, src, b, m, op)
+		return
+	}
 	if dr, ok := rasterScaleBounds(b, m); ok {
 		if dr.Intersect(dst.Bounds()).Empty() {
 			return
@@ -64,6 +74,43 @@ func DrawPixels(dst draw.Image, src image.Image, m [6]float64, op draw.Op) {
 	}
 	src = rasterTransformSource(src, TransformBounds(b, m, dst.Bounds()))
 	draw.CatmullRom.Transform(dst, f64.Aff3{m[0], m[2], m[4], m[1], m[3], m[5]}, src, b, op, nil)
+}
+
+// UseNearestNeighbor 判断当前图像绘制是否应采用最近邻放大采样
+// 入参: b 源图像边界, m 像素变换矩阵, interpolate 可选插值开关
+// 返回: bool 是否使用最近邻采样
+func UseNearestNeighbor(b image.Rectangle, m [6]float64, interpolate *bool) bool {
+	if b.Empty() || interpolate != nil && *interpolate {
+		return false
+	}
+	sx, sy := math.Hypot(m[0], m[1]), math.Hypot(m[2], m[3])
+	if math.IsNaN(sx) || math.IsInf(sx, 0) || math.IsNaN(sy) || math.IsInf(sy, 0) {
+		return false
+	}
+	if interpolate != nil && !*interpolate {
+		return sx >= 1 && sy >= 1 && (sx > 1 || sy > 1)
+	}
+	return b.Dx() <= 8 && b.Dy() <= 8 && sx >= 4 && sy >= 4
+}
+
+// drawNearestPixels 使用最近邻采样完成整数轴向缩放或通用仿射图像绘制
+// 入参: dst 目标图像, src 源图像, b 源边界, m 像素变换矩阵, op 合成操作
+func drawNearestPixels(dst draw.Image, src image.Image, b image.Rectangle, m [6]float64, op draw.Op) {
+	if TransformBounds(b, m, dst.Bounds()).Empty() {
+		return
+	}
+	if m[1] == 0 && m[2] == 0 && m[0] > 0 && m[3] > 0 {
+		x0, y0 := float64(b.Min.X)*m[0]+m[4], float64(b.Min.Y)*m[3]+m[5]
+		x1, y1 := float64(b.Max.X)*m[0]+m[4], float64(b.Max.Y)*m[3]+m[5]
+		if x0 == math.Floor(x0) && y0 == math.Floor(y0) && x1 == math.Floor(x1) && y1 == math.Floor(y1) && x0 >= math.MinInt32 && y0 >= math.MinInt32 && x1 <= math.MaxInt32 && y1 <= math.MaxInt32 && x1 > x0 && y1 > y0 {
+			dr := image.Rect(int(x0), int(y0), int(x1), int(y1))
+			if !dr.Intersect(dst.Bounds()).Empty() {
+				draw.NearestNeighbor.Scale(dst, dr, src, b, op, nil)
+			}
+			return
+		}
+	}
+	draw.NearestNeighbor.Transform(dst, f64.Aff3{m[0], m[2], m[4], m[1], m[3], m[5]}, src, b, op, nil)
 }
 
 // TransformBounds 计算采样器可能写入的像素范围，并在整数转换前裁至目标边界

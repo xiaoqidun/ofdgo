@@ -462,7 +462,7 @@ func (p *pdfImporter) convertAnnotation(ctx context.Context, page *pdfgo.Page, a
 		if err := p.appearanceAnnotation(ctx, page, annotation); err != nil {
 			return err
 		}
-		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF pending redaction appearance imported; content removal not applied; overlay data not transferred"})
+		p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF pending redaction appearance imported; content removal not applied; overlay data not transferred"})
 		return nil
 	}
 	if annotation.Subtype == "Projection" && strict {
@@ -587,7 +587,7 @@ func (p *pdfImporter) linkActions(annotation pdfgo.Annotation, strict bool, curr
 			object[key] = value
 		}
 	}
-	warnings := len(p.report.Warnings)
+	warnings := p.warningTotal
 	defer func() {
 		if err != nil && pdfAuxiliaryError(err) {
 			err = p.recoverPDFObject(p.ctx, "Link", object, err)
@@ -595,7 +595,7 @@ func (p *pdfImporter) linkActions(annotation pdfgo.Annotation, strict bool, curr
 				actions = nil
 				*currentPage = -1
 			}
-		} else if err == nil && (actions == nil || len(p.report.Warnings) != warnings) && len(object) != 0 && p.warning != nil {
+		} else if err == nil && (actions == nil || p.warningTotal != warnings) && len(object) != 0 && p.warning != nil {
 			err = p.preservePDFObject(p.ctx, "Link", object)
 		}
 	}()
@@ -707,7 +707,7 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 				return nil, err
 			}
 			if value == nil && !strict {
-				p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF URI target missing; action omitted"})
+				p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF URI target missing; action omitted"})
 				return nil, nil
 			}
 			uri, ok := value.(pdfgo.String)
@@ -737,7 +737,7 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 		destination, err := p.reader.ReadDestination(target)
 		if err != nil {
 			if !strict && errors.Is(err, pdfgo.ErrDestinationNotFound) {
-				p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: fmt.Sprintf("%v; link omitted", err)})
+				p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: fmt.Sprintf("%v; link omitted", err)})
 				return nil, nil
 			}
 			return nil, err
@@ -745,7 +745,7 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 		targetPage := p.pages[destination.Page]
 		if targetPage == nil {
 			if !strict {
-				p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF link targets a page outside the document page tree; link omitted"})
+				p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF link targets a page outside the document page tree; link omitted"})
 				return nil, nil
 			}
 			return nil, fmt.Errorf("PDF destination page missing")
@@ -773,7 +773,7 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 				if strict {
 					return nil, err
 				}
-				p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: fmt.Sprintf("PDF FitB destination bounds unavailable: %v; link omitted", err)})
+				p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: fmt.Sprintf("PDF FitB destination bounds unavailable: %v; link omitted", err)})
 				return nil, nil
 			}
 			target.Mode = "FitR"

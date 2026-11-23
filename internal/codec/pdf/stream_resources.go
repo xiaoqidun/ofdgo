@@ -26,11 +26,12 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// GraphicResourceRegistry 管理文档级去重ExtGState、ShadingPattern与Resources字典对象
+// GraphicResourceRegistry 管理文档级去重ExtGState、ShadingPattern、内置Type1字体与Resources字典对象
 type GraphicResourceRegistry struct {
 	mu           sync.Mutex
 	allocRef     func() pdfgo.Reference
-	extGStates   map[uint8]pdfgo.Reference
+	extGStates   map[uint16]pdfgo.Reference
+	stdFonts     map[string]patternItem
 	patterns     map[string]patternItem
 	patternSeq   int
 	pendingObjs  []pendingDictObj
@@ -55,7 +56,8 @@ type patternItem struct {
 func NewGraphicResourceRegistry(allocRef func() pdfgo.Reference) *GraphicResourceRegistry {
 	return &GraphicResourceRegistry{
 		allocRef:     allocRef,
-		extGStates:   make(map[uint8]pdfgo.Reference),
+		extGStates:   make(map[uint16]pdfgo.Reference),
+		stdFonts:     make(map[string]patternItem),
 		patterns:     make(map[string]patternItem),
 		resourceRefs: make(map[string]pdfgo.Reference),
 	}
@@ -196,16 +198,52 @@ func unpremultiplyGradientStop(c color.RGBA) pdfgo.Array {
 // 入参: alpha 八位透明度值
 // 返回: pdfgo.Name 状态名, pdfgo.Reference 对象引用
 func (r *GraphicResourceRegistry) OpacityGS(alpha uint8) (pdfgo.Name, pdfgo.Reference) {
-	name := pdfgo.Name("GS" + strconv.Itoa(int(alpha)))
+	return r.OpacityPairGS(alpha, alpha)
+}
+
+// OpacityPairGS 获取或创建独立填充与描边透明度对应的共享ExtGState对象
+// 入参: fillAlpha 非描边填充八位透明度, strokeAlpha 描边八位透明度
+// 返回: pdfgo.Name 状态名, pdfgo.Reference 对象引用
+func (r *GraphicResourceRegistry) OpacityPairGS(fillAlpha, strokeAlpha uint8) (pdfgo.Name, pdfgo.Reference) {
+	name := pdfgo.Name("GS" + strconv.Itoa(int(fillAlpha)))
+	if fillAlpha != strokeAlpha {
+		name = pdfgo.Name("GS" + strconv.Itoa(int(fillAlpha)) + "_" + strconv.Itoa(int(strokeAlpha)))
+	}
+	key := uint16(fillAlpha)<<8 | uint16(strokeAlpha)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if ref, ok := r.extGStates[alpha]; ok {
+	if ref, ok := r.extGStates[key]; ok {
 		return name, ref
 	}
 	ref := r.allocRef()
-	a := pdfgo.Real(float64(alpha) / 255.0)
-	dict := pdfgo.Dictionary{"Type": pdfgo.Name("ExtGState"), "CA": a, "ca": a}
-	r.extGStates[alpha] = ref
+	dict := pdfgo.Dictionary{
+		"Type": pdfgo.Name("ExtGState"),
+		"ca":   pdfgo.Real(float64(fillAlpha) / 255.0),
+		"CA":   pdfgo.Real(float64(strokeAlpha) / 255.0),
+	}
+	r.extGStates[key] = ref
+	r.pendingObjs = append(r.pendingObjs, pendingDictObj{ref: ref, dict: dict})
+	return name, ref
+}
+
+// StandardType1Font 获取或创建内置标准Type1字体资源对象
+// 入参: baseFont 标准字体名
+// 返回: pdfgo.Name 字体资源名, pdfgo.Reference 对象引用
+func (r *GraphicResourceRegistry) StandardType1Font(baseFont string) (pdfgo.Name, pdfgo.Reference) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if item, ok := r.stdFonts[baseFont]; ok {
+		return item.name, item.ref
+	}
+	ref := r.allocRef()
+	name := pdfgo.Name("FS" + baseFont)
+	dict := pdfgo.Dictionary{
+		"Type":     pdfgo.Name("Font"),
+		"Subtype":  pdfgo.Name("Type1"),
+		"BaseFont": pdfgo.Name(baseFont),
+		"Encoding": pdfgo.Name("WinAnsiEncoding"),
+	}
+	r.stdFonts[baseFont] = patternItem{name: name, ref: ref}
 	r.pendingObjs = append(r.pendingObjs, pendingDictObj{ref: ref, dict: dict})
 	return name, ref
 }

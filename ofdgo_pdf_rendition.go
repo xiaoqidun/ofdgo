@@ -177,7 +177,7 @@ func (p *pdfImporter) renditionLinkActions(object pdfgo.Object, source pdfgo.Ann
 		converted.Movie.ResourceID = id
 	}
 	if len(selected.Play) != 0 || len(selected.Screen) != 0 || len(selected.Clip.BestEffort) != 0 {
-		p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF media rendition converted; best-effort presentation preferences may differ in OFD"})
+		p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF media rendition converted; best-effort presentation preferences may differ in OFD"})
 	}
 	return append(controls, converted), nil
 }

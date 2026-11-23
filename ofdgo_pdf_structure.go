@@ -55,21 +55,29 @@ const (
 	pdfInformationNamespace = "https://ofdgo.aite.me/ns/pdf/information/1"
 )
 
+// pdfStructureContentCacheKey 隔离单次结构投影中重复解析的内容容器标识
+type pdfStructureContentCacheKey struct {
+	itemType pdfgo.Name
+	ref      pdfgo.Reference
+	isStream bool
+}
+
 // pdfStructureBindings 保存来源区段与最终页面图元的关联，不记录临时渲染对象
 type pdfStructureBindings struct {
-	parents     map[*pdfgo.Reader]map[[2]int64]pdfgo.Reference
-	elements    map[*pdfgo.Reader]map[pdfgo.Reference]bool
-	prepared    map[*pdfgo.Reader]bool
-	invalid     map[*pdfgo.Reader]bool
-	lazyChecked map[*pdfgo.Reader]bool
-	lazyTrees   map[*pdfgo.Reader]*pdfgo.StructureTree
-	lazyParents map[*pdfgo.Reader]map[int64]pdfgo.Array
-	readers     []*pdfgo.Reader
-	marked      map[pdfStructureContent]bool
-	sequences   map[*pdfgo.ContentSequence][]StructureReference
-	order       []*pdfgo.ContentSequence
-	contents    []*pdfgo.ContentSequence
-	objects     map[pdfStructureObject][]StructureReference
+	parents       map[*pdfgo.Reader]map[[2]int64]pdfgo.Reference
+	elements      map[*pdfgo.Reader]map[pdfgo.Reference]bool
+	contentsCache map[*pdfgo.Reader]map[pdfStructureContentCacheKey]pdfgo.StructureContent
+	prepared      map[*pdfgo.Reader]bool
+	invalid       map[*pdfgo.Reader]bool
+	lazyChecked   map[*pdfgo.Reader]bool
+	lazyTrees     map[*pdfgo.Reader]*pdfgo.StructureTree
+	lazyParents   map[*pdfgo.Reader]map[int64]pdfgo.Array
+	readers       []*pdfgo.Reader
+	marked        map[pdfStructureContent]bool
+	sequences     map[*pdfgo.ContentSequence][]StructureReference
+	order         []*pdfgo.ContentSequence
+	contents      []*pdfgo.ContentSequence
+	objects       map[pdfStructureObject][]StructureReference
 }
 
 // pdfStructureSnapshot 保存单页转换前结构绑定的元状态快照，供取消回滚精确还原
@@ -358,9 +366,29 @@ func pdfMetadataText(node StructureNode) (string, bool) {
 // 入参: ctx 取消上下文, mainReader 主文档阅读器, pageIndexes 主文档页引用顺序, pageOrder OFD页面标识顺序
 // 返回: map[pdfStructureObject][]StructureReference 对象引用索引, error 来源或取消错误
 func (b *pdfStructureBindings) objectReferences(ctx context.Context, mainReader *pdfgo.Reader, pageIndexes map[pdfgo.Reference]int, pageOrder map[string]int) (map[pdfStructureObject][]StructureReference, error) {
-	result := make(map[pdfStructureObject][]StructureReference)
-	sets := make(map[pdfStructureObject]*pdfStructureReferenceSet)
+	result := make(map[pdfStructureObject][]StructureReference, len(b.objects))
+	var sets map[pdfStructureObject]*pdfStructureReferenceSet
 	appendReferences := func(key pdfStructureObject, sources []StructureReference) error {
+		if existing, exists := result[key]; !exists && len(sources) == 1 && len(sources[0].ObjectIDs) <= 1 {
+			copied := StructureReference{PageID: sources[0].PageID}
+			if len(sources[0].ObjectIDs) == 1 {
+				copied.ObjectIDs = []string{sources[0].ObjectIDs[0]}
+			}
+			result[key] = []StructureReference{copied}
+			return nil
+		} else if exists && (sets == nil || sets[key] == nil) {
+			if sets == nil {
+				sets = make(map[pdfStructureObject]*pdfStructureReferenceSet)
+			}
+			set := &pdfStructureReferenceSet{}
+			if err := set.append(ctx, existing); err != nil {
+				return err
+			}
+			sets[key] = set
+		}
+		if sets == nil {
+			sets = make(map[pdfStructureObject]*pdfStructureReferenceSet)
+		}
 		set := sets[key]
 		if set == nil {
 			set = &pdfStructureReferenceSet{}
@@ -373,6 +401,12 @@ func (b *pdfStructureBindings) objectReferences(ctx context.Context, mainReader 
 		return nil
 	}
 	for key, refs := range b.objects {
+		if len(refs) == 1 {
+			if err := appendReferences(key, refs); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		ordered := slices.Clone(refs)
 		sortStructureReferences(ordered, pageOrder)
 		if err := appendReferences(key, ordered); err != nil {
@@ -395,8 +429,10 @@ func (b *pdfStructureBindings) objectReferences(ctx context.Context, mainReader 
 		}
 	}
 	for key, refs := range result {
-		sortStructureReferences(refs, pageOrder)
-		result[key] = refs
+		if len(refs) > 1 {
+			sortStructureReferences(refs, pageOrder)
+			result[key] = refs
+		}
 	}
 	return result, ctx.Err()
 }
@@ -547,6 +583,7 @@ func (b *pdfStructureBindings) rollbackPage(pageID string, pageRef pdfgo.Referen
 		b.clearReaderMarked(reader)
 		delete(b.parents, reader)
 		delete(b.elements, reader)
+		delete(b.contentsCache, reader)
 	}
 	b.prepared = snap.prepared
 	b.invalid = snap.invalid
@@ -904,13 +941,23 @@ func (s *pdfStructureReferenceSet) append(ctx context.Context, sources []Structu
 // 入参: dictionary 来源字典, known 已投影字段
 // 返回: []StructureNode 扩展字段, error 读取或取消错误
 func (v *pdfStructureValues) extensions(dictionary pdfgo.Dictionary, known []pdfgo.Name) ([]StructureNode, error) {
-	var result []StructureNode
-	for _, key := range slices.Sorted(maps.Keys(dictionary)) {
+	if len(dictionary) == 0 {
+		return nil, v.ctx.Err()
+	}
+	var unknown []pdfgo.Name
+	for key := range dictionary {
+		if !slices.Contains(known, key) {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil, v.ctx.Err()
+	}
+	slices.Sort(unknown)
+	result := make([]StructureNode, 0, len(unknown))
+	for _, key := range unknown {
 		if err := v.ctx.Err(); err != nil {
 			return nil, err
-		}
-		if slices.Contains(known, key) {
-			continue
 		}
 		value, err := v.encode(dictionary[key], 0)
 		if err != nil {
@@ -1103,6 +1150,60 @@ func (p *pdfImporter) prepareStructureLazy(ctx context.Context) error {
 	return ctx.Err()
 }
 
+// cachedStructureContent 复用同一阅读器内已解析的MCR与OBJR内容容器，避免重复全树字典解析
+// 入参: item 结构内容引用
+// 返回: pdfgo.StructureContent 内容容器, error 引用或父树键错误
+func (p *pdfImporter) cachedStructureContent(item pdfgo.StructureItem) (pdfgo.StructureContent, error) {
+	var ref pdfgo.Reference
+	isStream := false
+	switch item.Type {
+	case "MCR":
+		if item.MCID < 0 {
+			return pdfgo.StructureContent{}, fmt.Errorf("invalid structure marked-content identifier")
+		}
+		if item.Page == (pdfgo.Reference{}) {
+			return pdfgo.StructureContent{}, fmt.Errorf("missing structure content page")
+		}
+		ref = item.Page
+		if item.Stream != (pdfgo.Reference{}) {
+			ref = item.Stream
+			isStream = true
+		}
+	case "OBJR":
+		ref = item.Target
+	default:
+		return p.reader.StructureContent(item)
+	}
+	if ref == (pdfgo.Reference{}) {
+		return p.reader.StructureContent(item)
+	}
+	key := pdfStructureContentCacheKey{itemType: item.Type, ref: ref, isStream: isStream}
+	b := p.structureBindings
+	if b != nil {
+		if byReader := b.contentsCache[p.reader]; byReader != nil {
+			if cached, ok := byReader[key]; ok {
+				return cached, nil
+			}
+		}
+	}
+	content, err := p.reader.StructureContent(item)
+	if err != nil {
+		return content, err
+	}
+	if b != nil {
+		if b.contentsCache == nil {
+			b.contentsCache = make(map[*pdfgo.Reader]map[pdfStructureContentCacheKey]pdfgo.StructureContent)
+		}
+		byReader := b.contentsCache[p.reader]
+		if byReader == nil {
+			byReader = make(map[pdfStructureContentCacheKey]pdfgo.StructureContent)
+			b.contentsCache[p.reader] = byReader
+		}
+		byReader[key] = content
+	}
+	return content, nil
+}
+
 // readStructureBindings 校验结构内容关联并准备有效图元绑定
 // 入参: ctx 取消上下文
 // 返回: error 结构、内容容器或取消错误
@@ -1140,7 +1241,7 @@ func (p *pdfImporter) readStructureBindings(ctx context.Context) error {
 		if item.Type != "MCR" && item.Type != "OBJR" {
 			return nil
 		}
-		content, err := p.reader.StructureContent(item)
+		content, err := p.cachedStructureContent(item)
 		if err != nil {
 			return err
 		}
@@ -1396,6 +1497,7 @@ func (p *pdfImporter) projectStructure(ctx context.Context, mainReader *pdfgo.Re
 		return err
 	}
 	root.Children = append(root.Children, extensions...)
+	preparedParents := p.structureBindings.prepared[p.reader]
 	stack := []*StructureNode{&root}
 	ids := make(map[string]pdfgo.Reference)
 	err = p.reader.WalkStructure(ctx, func(depth int, item pdfgo.StructureItem) error {
@@ -1407,16 +1509,18 @@ func (p *pdfImporter) projectStructure(ctx context.Context, mainReader *pdfgo.Re
 		node := StructureNode{Name: string(item.Type), Namespace: pdfStructureNamespace}
 		var content pdfgo.StructureContent
 		if item.Type == "MCR" || item.Type == "OBJR" {
-			content, err = p.reader.StructureContent(item)
+			content, err = p.cachedStructureContent(item)
 			if err != nil {
 				return err
 			}
-			mcid := int64(-1)
-			if item.Type == "MCR" {
-				mcid = item.MCID
-			}
-			if parent, ok := parents[[2]int64{content.ParentKey, mcid}]; !ok || parent != item.Parent {
-				return fmt.Errorf("PDF structure content parent mismatch")
+			if !preparedParents {
+				mcid := int64(-1)
+				if item.Type == "MCR" {
+					mcid = item.MCID
+				}
+				if parent, ok := parents[[2]int64{content.ParentKey, mcid}]; !ok || parent != item.Parent {
+					return fmt.Errorf("PDF structure content parent mismatch")
+				}
 			}
 		}
 		switch item.Type {
@@ -1429,22 +1533,28 @@ func (p *pdfImporter) projectStructure(ctx context.Context, mainReader *pdfgo.Re
 			if item.Reference != (pdfgo.Reference{}) {
 				node.Attributes = pdfStructureSource(item.Reference)
 			}
-			if _, err := p.reader.StructureAttributes(ctx, item); err != nil {
-				return err
-			}
-			for _, key := range []pdfgo.Name{"A", "C"} {
-				if value := item.Dictionary[key]; value != nil {
-					child, err := values.encode(value, 0)
-					if err != nil {
-						return err
+			if item.Dictionary["A"] != nil || item.Dictionary["C"] != nil {
+				if _, err := p.reader.StructureAttributes(ctx, item); err != nil {
+					return err
+				}
+				for _, key := range []pdfgo.Name{"A", "C"} {
+					if value := item.Dictionary[key]; value != nil {
+						child, err := values.encode(value, 0)
+						if err != nil {
+							return err
+						}
+						node.Children = append(node.Children, StructureNode{Name: string(key), Namespace: pdfStructureNamespace, Children: []StructureNode{child}})
 					}
-					node.Children = append(node.Children, StructureNode{Name: string(key), Namespace: pdfStructureNamespace, Children: []StructureNode{child}})
 				}
 			}
 			node.Attributes = append(node.Attributes, pdfStructureAttribute("Tag", string(item.Tag))...)
 			node.Attributes = append(node.Attributes, StructureAttribute{Name: "Revision", Value: strconv.FormatInt(item.Revision, 10)})
 			for _, field := range []pdfgo.Name{"ID", "T", "Lang", "Alt", "ActualText", "E"} {
-				value, err := p.reader.Resolve(item.Dictionary[field])
+				raw := item.Dictionary[field]
+				if raw == nil {
+					continue
+				}
+				value, err := p.reader.Resolve(raw)
 				if err != nil {
 					return err
 				}
@@ -1480,16 +1590,12 @@ func (p *pdfImporter) projectStructure(ctx context.Context, mainReader *pdfgo.Re
 				return err
 			}
 			node.Children = append(node.Children, extensions...)
-			targets, err := refs.targets(ctx, p.reader, item)
-			if err != nil {
-				return err
-			}
 			node.Attributes = []StructureAttribute{{Name: "MCID", Value: strconv.FormatInt(item.MCID, 10)}}
 			key := pdfStructureContent{reader: p.reader, page: item.Page, stream: content.Stream, mcid: item.MCID}
 			if property, ok := properties[key]; ok {
 				node.Children = append(node.Children, property)
 			}
-			for _, target := range targets {
+			for _, target := range refs[key] {
 				node.Children = append(node.Children, StructureNode{Name: "ObjectRef", Namespace: pdfStructureNamespace, Attributes: []StructureAttribute{{Name: "PageRef", Value: target.PageID}}, Text: strings.Join(target.ObjectIDs, ",")})
 			}
 		case "OBJR":
@@ -1684,7 +1790,7 @@ func (p *pdfImporter) documentMetadata(ctx context.Context, strict bool) error {
 			continue
 		}
 		if text != *field.text {
-			p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Message: "PDF metadata " + field.name + ": date normalized"})
+			p.addWarning(pdfgo.Diagnostic{Message: "PDF metadata " + field.name + ": date normalized"})
 			*field.text = text
 		}
 	}

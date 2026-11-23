@@ -19,11 +19,15 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"unicode"
 	"unicode/utf8"
 
+	"github.com/go-text/typesetting/font/opentype/tables"
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 	codecpdf "github.com/xiaoqidun/ofdgo/internal/codec/pdf"
 	"github.com/xiaoqidun/pdfgo"
@@ -63,7 +67,16 @@ type pdfTextReplacements struct {
 	widget   bool
 }
 
-// pdfTextGlyphItem 保存单字形的基线坐标、转义原文及字形索引，用于同行合并
+// pdfGSUBVertCache 按字体字节摘要缓存只读的OpenType竖排替换映射表
+var pdfGSUBVertCache sync.Map
+
+// pdfFallbackVertHolder 在Editor字体度量表中附带缓存竖排替换表，不改变主度量契约
+type pdfFallbackVertHolder struct {
+	FontMetrics
+	vert map[uint16]uint16
+}
+
+// pdfTextGlyphItem 保存单字形或连字多字形簇的基线坐标、转义原文及字形索引，用于同行合并
 type pdfTextGlyphItem struct {
 	x            float64
 	y            float64
@@ -71,6 +84,247 @@ type pdfTextGlyphItem struct {
 	runes        int
 	hasTransform bool
 	gid          uint16
+	gids         []uint16
+	xs           []float64
+	ys           []float64
+}
+
+// pdfEmptyLigatureGlyph 保存待并入相邻含文本字形的显式空串字形坐标与编号
+type pdfEmptyLigatureGlyph struct {
+	x   float64
+	y   float64
+	gid uint16
+}
+
+// pdfGlyphExplicitEmpty 判断字形是否在ToUnicode映射中显式映射为空串，与缺失映射区分开
+// 入参: font 源PDF字体, glyph 待检查字形
+// 返回: bool 是否为显式空串映射
+func pdfGlyphExplicitEmpty(font *pdfgo.Font, glyph pdfgo.Glyph) bool {
+	if glyph.Text != "" || glyph.Name == ".notdef" || font == nil || len(font.Unicode) == 0 {
+		return false
+	}
+	code := glyph.Code
+	var buf [4]byte
+	if font.Subtype == "Type0" || code > 0xff {
+		if code <= 0xffff {
+			buf[0], buf[1] = byte(code>>8), byte(code)
+			if text, ok := font.Unicode[string(buf[:2])]; ok {
+				return text == ""
+			}
+		} else {
+			if code <= 0xffffff {
+				buf[0], buf[1], buf[2] = byte(code>>16), byte(code>>8), byte(code)
+				if text, ok := font.Unicode[string(buf[:3])]; ok {
+					return text == ""
+				}
+			}
+			buf[0], buf[1], buf[2], buf[3] = byte(code>>24), byte(code>>16), byte(code>>8), byte(code)
+			if text, ok := font.Unicode[string(buf[:4])]; ok {
+				return text == ""
+			}
+		}
+	}
+	if code <= 0xff {
+		buf[0] = byte(code)
+		if text, ok := font.Unicode[string(buf[:1])]; ok {
+			return text == ""
+		}
+	}
+	return false
+}
+
+// pdfParseGSUBVertical 解析OpenType字体GSUB表的vert与vrt2单字形竖排替换映射
+// 入参: data 字体原始字节
+// 返回: map[uint16]uint16 横排字形到竖排字形的映射表
+func pdfParseGSUBVertical(data []byte) map[uint16]uint16 {
+	tbls, err := basefont.FileTables(data, 0)
+	if err != nil || len(tbls["GSUB"]) == 0 {
+		return nil
+	}
+	layout, _, err := tables.ParseLayout(tbls["GSUB"])
+	if err != nil {
+		return nil
+	}
+	var vertLookups, vrt2Lookups []uint16
+	for i, rec := range layout.FeatureList.Records {
+		if i >= len(layout.FeatureList.Features) {
+			break
+		}
+		tag := rec.Tag.String()
+		if tag == "vert" {
+			vertLookups = append(vertLookups, layout.FeatureList.Features[i].LookupListIndices...)
+		} else if tag == "vrt2" {
+			vrt2Lookups = append(vrt2Lookups, layout.FeatureList.Features[i].LookupListIndices...)
+		}
+	}
+	if len(vertLookups) == 0 && len(vrt2Lookups) == 0 {
+		return nil
+	}
+	result := make(map[uint16]uint16)
+	applyLookup := func(li uint16, overwrite bool) {
+		if int(li) >= len(layout.LookupList.Lookups) {
+			return
+		}
+		subtables, err := layout.LookupList.Lookups[li].AsGSUBLookups()
+		if err != nil {
+			return
+		}
+		for _, st := range subtables {
+			if ext, ok := st.(tables.ExtensionSubs); ok {
+				if ext.ExtensionOffset < 8 || uint64(ext.ExtensionOffset) > uint64(len(ext.RawData)) {
+					continue
+				}
+				st, err = ext.Resolve()
+				if err != nil {
+					continue
+				}
+			}
+			single, ok := st.(tables.SingleSubs)
+			if !ok {
+				continue
+			}
+			add := func(src, dst uint16) {
+				if src == 0 || dst == 0 {
+					return
+				}
+				if overwrite || result[src] == 0 {
+					result[src] = dst
+				}
+			}
+			switch d := single.Data.(type) {
+			case tables.SingleSubstData1:
+				switch cov := d.Coverage.(type) {
+				case tables.Coverage1:
+					for _, gid := range cov.Glyphs {
+						add(uint16(gid), uint16(int32(gid)+int32(d.DeltaGlyphID)))
+					}
+				case tables.Coverage2:
+					for _, rg := range cov.Ranges {
+						for gid := rg.StartGlyphID; gid <= rg.EndGlyphID; gid++ {
+							add(uint16(gid), uint16(int32(gid)+int32(d.DeltaGlyphID)))
+							if gid == math.MaxUint16 {
+								break
+							}
+						}
+					}
+				}
+			case tables.SingleSubstData2:
+				switch cov := d.Coverage.(type) {
+				case tables.Coverage1:
+					for idx, gid := range cov.Glyphs {
+						if idx < len(d.SubstituteGlyphIDs) {
+							add(uint16(gid), uint16(d.SubstituteGlyphIDs[idx]))
+						}
+					}
+				case tables.Coverage2:
+					for _, rg := range cov.Ranges {
+						for gid := rg.StartGlyphID; gid <= rg.EndGlyphID; gid++ {
+							idx := int(rg.StartCoverageIndex) + int(gid-rg.StartGlyphID)
+							if idx < len(d.SubstituteGlyphIDs) {
+								add(uint16(gid), uint16(d.SubstituteGlyphIDs[idx]))
+							}
+							if gid == math.MaxUint16 {
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, li := range vertLookups {
+		applyLookup(li, true)
+	}
+	for _, li := range vrt2Lookups {
+		applyLookup(li, false)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// pdfVerticalFallbackRune 在回退字体中解析竖排字符字形，兼容波浪号与破折号缺字回退
+// 入参: metrics 回退字体度量, r 原Unicode字符
+// 返回: uint16 字形编号, bool 是否发生了等价字符替换
+func pdfVerticalFallbackRune(metrics FontMetrics, r rune) (uint16, bool) {
+	if gid := metrics.GlyphIndex(r); gid != 0 {
+		return gid, false
+	}
+	switch r {
+	case '\u301c':
+		if gid := metrics.GlyphIndex('\uff5e'); gid != 0 {
+			return gid, true
+		}
+	case '\u2015':
+		if gid := metrics.GlyphIndex('\u2014'); gid != 0 {
+			return gid, true
+		}
+	}
+	return 0, false
+}
+
+// pdfVerticalRotateRune 判断竖排排版中缺少vert字形时需顺时针旋转90度的标点与符号
+// 入参: r Unicode字符
+// 返回: bool 是否需要顺时针旋转90度
+func pdfVerticalRotateRune(r rune) bool {
+	switch r {
+	case '\u301c', '\uff5e', '\u30fc', '\u2015', '\u2014', '\u2013', '\u2026', '\u2025',
+		'\uff08', '\uff09', '\u3014', '\u3015', '\uff3b', '\uff3d', '\uff5b', '\uff5d',
+		'\u3008', '\u3009', '\u300a', '\u300b', '\u300c', '\u300d', '\u300e', '\u300f',
+		'\u3010', '\u3011', '\u3016', '\u3017', '\u3018', '\u3019', '\u301a', '\u301b',
+		'\uff1d', '\uff0d', '\uff1a', '\uff1b', '(', ')', '[', ']', '{', '}':
+		return true
+	}
+	return false
+}
+
+// pdfRotateVerticalGlyph 将横排字形轮廓围绕字形框中心顺时针旋转90度
+// 入参: path 横排字形轮廓, metrics 字体度量, gid 字形编号, size 毫米字号
+// 返回: GeometryPath 旋转后轮廓, error 变换错误
+func pdfRotateVerticalGlyph(path GeometryPath, metrics FontMetrics, gid uint16, size float64) (GeometryPath, error) {
+	if len(path) == 0 {
+		return path, nil
+	}
+	cx, cy := 0.5*size, -0.38*size
+	if upem := float64(metrics.UnitsPerEm()); upem > 0 {
+		if adv := float64(metrics.GlyphAdvance(gid)) * size / upem; adv > 0 {
+			cx = adv / 2
+		}
+		if asc, desc, _ := metrics.VerticalMetrics(); asc != 0 || desc != 0 {
+			cy = -(float64(asc) - float64(desc)) / 2 * size / upem
+		}
+	}
+	return path.Transform(Matrix{a: 0, b: 1, c: -1, d: 0, e: cx + cy, f: cy - cx})
+}
+
+// pdfItemFlat 判断字形项的所有字形是否位于同一水平基线
+// 入参: item 字形项
+// 返回: bool 是否同基线
+func pdfItemFlat(item pdfTextGlyphItem) bool {
+	if len(item.gids) <= 1 {
+		return item.hasTransform || item.runes == 1
+	}
+	for i := 1; i < len(item.ys); i++ {
+		if math.Abs(item.ys[i]-item.ys[0]) > 1e-9 {
+			return false
+		}
+	}
+	return true
+}
+
+// pdfFormatGlyphIDs 将字形编号列表格式化为空格分隔的CGTransform序列
+// 入参: gids 字形编号切片
+// 返回: string 空格分隔字符串
+func pdfFormatGlyphIDs(gids []uint16) string {
+	var buf strings.Builder
+	for i, gid := range gids {
+		if i > 0 {
+			buf.WriteByte(' ')
+		}
+		buf.WriteString(strconv.Itoa(int(gid)))
+	}
+	return buf.String()
 }
 
 // pdfApplyReplacement 将整段原文映射到全部字形，字形位移遵循GB/T 33190的文字定位规则
@@ -90,7 +344,7 @@ func pdfApplyReplacement(object *TextObject, text string, positions []pdfgo.Poin
 	object.CGTransform = []CGTransform{{CodeCount: utf8.RuneCountInString(text), GlyphCount: len(glyphs), Glyphs: strings.Join(glyphs, " ")}}
 }
 
-// pdfCompactTextRuns 将同基线连续字形合并为单条TextCode与DeltaX，并合并连续一对一CGTransform
+// pdfCompactTextRuns 将同基线连续字形合并为单条TextCode与DeltaX，并输出多字形连字CGTransform
 // 入参: object 目标文字对象, items 字形项序列
 func pdfCompactTextRuns(object *TextObject, items []pdfTextGlyphItem) {
 	if len(items) == 0 {
@@ -103,9 +357,22 @@ func pdfCompactTextRuns(object *TextObject, items []pdfTextGlyphItem) {
 	pos := 0
 	for start := 0; start < len(items); {
 		first := items[start]
+		if len(first.gids) > 1 && !pdfItemFlat(first) {
+			dx := make([]float64, len(first.xs)-1)
+			dy := make([]float64, len(first.ys)-1)
+			for k := 1; k < len(first.xs); k++ {
+				dx[k-1] = first.xs[k] - first.xs[k-1]
+				dy[k-1] = first.ys[k] - first.ys[k-1]
+			}
+			object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: pos, CodeCount: first.runes, GlyphCount: len(first.gids), Glyphs: pdfFormatGlyphIDs(first.gids)})
+			object.TextCode = append(object.TextCode, TextCode{X: pdfNumbers(first.xs[0]), Y: pdfNumbers(first.ys[0]), DeltaX: pdfNumbers(dx...), DeltaY: pdfNumbers(dy...), Value: first.text})
+			pos += first.runes
+			start++
+			continue
+		}
 		end := start + 1
-		if first.hasTransform || first.runes == 1 {
-			for end < len(items) && math.Abs(items[end].y-first.y) <= 1e-9 && (items[end].hasTransform || items[end].runes == 1) {
+		if pdfItemFlat(first) {
+			for end < len(items) && math.Abs(items[end].y-first.y) <= 1e-9 && pdfItemFlat(items[end]) {
 				end++
 			}
 		}
@@ -125,24 +392,36 @@ func pdfCompactTextRuns(object *TextObject, items []pdfTextGlyphItem) {
 		for i := start; i < end; i++ {
 			item := items[i]
 			textBuf.WriteString(item.text)
-			if i > start {
-				dx := item.x - curX
-				deltas = append(deltas, dx)
-				curX += dx
-			}
-			if !item.hasTransform {
-				flushTransform()
-			} else if item.runes == 1 {
-				if runCount == 0 {
-					runStart = pos
-				} else {
-					glyphBuf.WriteByte(' ')
+			if len(item.gids) > 1 {
+				for k, gx := range item.xs {
+					if i > start || k > 0 {
+						dx := gx - curX
+						deltas = append(deltas, dx)
+						curX += dx
+					}
 				}
-				glyphBuf.WriteString(strconv.Itoa(int(item.gid)))
-				runCount++
-			} else {
 				flushTransform()
-				object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: pos, CodeCount: item.runes, GlyphCount: 1, Glyphs: strconv.Itoa(int(item.gid))})
+				object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: pos, CodeCount: item.runes, GlyphCount: len(item.gids), Glyphs: pdfFormatGlyphIDs(item.gids)})
+			} else {
+				if i > start {
+					dx := item.x - curX
+					deltas = append(deltas, dx)
+					curX += dx
+				}
+				if !item.hasTransform {
+					flushTransform()
+				} else if item.runes == 1 {
+					if runCount == 0 {
+						runStart = pos
+					} else {
+						glyphBuf.WriteByte(' ')
+					}
+					glyphBuf.WriteString(strconv.Itoa(int(item.gid)))
+					runCount++
+				} else {
+					flushTransform()
+					object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: pos, CodeCount: item.runes, GlyphCount: 1, Glyphs: strconv.Itoa(int(item.gid))})
+				}
 			}
 			pos += item.runes
 		}
@@ -235,35 +514,116 @@ func (r *pdfTextReplacements) markedContent(mark pdfgo.MarkedContentMark) error 
 	return nil
 }
 
-// apply 合并可等价表示的替换区段，原文相同但样式不同的区段保留原图元
+// apply 合并可等价表示的替换区段及相邻显式空串连字，原文相同但样式不同的区段保留原图元
 // 入参: nodes 原始图元
 // 返回: []pdfCompositeNode 转换图元, error 取消或语义转换错误
 func (r *pdfTextReplacements) apply(nodes []pdfCompositeNode) ([]pdfCompositeNode, error) {
-	if len(r.order) == 0 {
+	if len(r.order) != 0 {
+		if err := r.count(nodes, false); err != nil {
+			return nil, err
+		}
+		for _, span := range r.order {
+			span.identity = !span.blocked && span.count > 0 && span.matched == len(span.text.Text)
+		}
+		var err error
+		nodes, err = r.merge(nodes)
+		if err != nil {
+			return nil, err
+		}
+		for _, span := range r.order {
+			if span.applied || span.identity || !span.blocked && span.count == 0 && span.text.Text == "" {
+				continue
+			}
+			if r.importer.warning == nil {
+				return nil, &pdfgo.UnsupportedError{Feature: "ActualText span without equivalent OFD glyph mapping"}
+			}
+			r.importer.warning(pdfgo.Diagnostic{Offset: span.offset, Message: "PDF ActualText span not preserved; original appearance retained"})
+		}
+		r.clear(nodes)
+	}
+	return r.mergeEmptyLigatures(nodes)
+}
+
+// pdfCanMergeEmptyLigature 检查两个连续文字图元是否同组同样式且可无损合并连字字形
+// 入参: first 首个文字图元, next 后续文字图元
+// 返回: bool 是否可合并
+func pdfCanMergeEmptyLigature(first, next *pdfgo.TextMark) bool {
+	if first == nil || next == nil || first.Font == nil || len(first.Font.Program) == 0 || first.Font != next.Font {
+		return false
+	}
+	if first.Object != next.Object || first.Sequence != next.Sequence || first.Replacement != nil || next.Replacement != nil {
+		return false
+	}
+	if first.Mode != 0 || next.Mode != 0 || first.Size <= 0 || first.Size != next.Size || first.HorizontalScale <= 0 || first.HorizontalScale != next.HorizontalScale || first.Clip != nil || next.Clip != nil {
+		return false
+	}
+	if first.Matrix[0] != next.Matrix[0] || first.Matrix[1] != next.Matrix[1] || first.Matrix[2] != next.Matrix[2] || first.Matrix[3] != next.Matrix[3] {
+		return false
+	}
+	style := first.Style
+	paint := style.Fill
+	if style.SoftMask != nil || style.Transfer != nil || style.Halftone != nil || style.AlphaIsShape || style.FillOverprint || paint.Alpha != 1 || !codecpdf.NormalBlend(style.BlendMode) || paint.Tiling != nil || paint.Axial != nil || paint.Radial != nil || paint.Mesh != nil || paint.Function != nil || paint.Shading != nil {
+		return false
+	}
+	return reflect.DeepEqual(style, next.Style)
+}
+
+// mergeEmptyLigatures 将同对象同样式的显式空串连字图元并入相邻含文本文字图元，消除占位符污染
+// 入参: nodes 同层图元列表
+// 返回: []pdfCompositeNode 合并后的图元列表, error 取消错误
+func (r *pdfTextReplacements) mergeEmptyLigatures(nodes []pdfCompositeNode) ([]pdfCompositeNode, error) {
+	if len(nodes) == 0 {
 		return nodes, nil
 	}
-	if err := r.count(nodes, false); err != nil {
-		return nil, err
-	}
-	for _, span := range r.order {
-		span.identity = !span.blocked && span.count > 0 && span.matched == len(span.text.Text)
-	}
-	var err error
-	nodes, err = r.merge(nodes)
-	if err != nil {
-		return nil, err
-	}
-	for _, span := range r.order {
-		if span.applied || span.identity || !span.blocked && span.count == 0 && span.text.Text == "" {
+	result := nodes[:0]
+	for i := 0; i < len(nodes); {
+		if err := r.importer.ctx.Err(); err != nil {
+			return nil, err
+		}
+		node := nodes[i]
+		var err error
+		node.children, err = r.mergeEmptyLigatures(node.children)
+		if err != nil {
+			return nil, err
+		}
+		if node.text == nil || len(node.forms) != 0 || node.text.Font == nil || len(node.text.Font.Program) == 0 || len(node.text.Font.Unicode) == 0 {
+			result = append(result, node)
+			i++
 			continue
 		}
-		if r.importer.warning == nil {
-			return nil, &pdfgo.UnsupportedError{Feature: "ActualText span without equivalent OFD glyph mapping"}
+		end := i + 1
+		for end < len(nodes) && len(nodes[end].forms) == 0 && pdfCanMergeEmptyLigature(node.text, nodes[end].text) {
+			end++
 		}
-		r.importer.warning(pdfgo.Diagnostic{Offset: span.offset, Message: "PDF ActualText span not preserved; original appearance retained"})
+		if end-i > 1 {
+			hasEmpty, hasText := false, false
+			for k := i; k < end; k++ {
+				for _, g := range nodes[k].text.Glyphs {
+					if pdfGlyphExplicitEmpty(nodes[k].text.Font, g) {
+						hasEmpty = true
+					} else if g.Text != "" {
+						hasText = true
+					}
+				}
+			}
+			if hasEmpty && hasText {
+				marks := make([]*pdfgo.TextMark, 0, end-i)
+				for k := i; k < end; k++ {
+					marks = append(marks, nodes[k].text)
+				}
+				if merged, ok := codecpdf.MergeReplacement(marks, nil); ok {
+					node.text = merged
+					result = append(result, node)
+					i = end
+					continue
+				}
+			}
+		}
+		result = append(result, node)
+		i++
 	}
-	r.clear(nodes)
-	return nodes, nil
+	clear(nodes[len(result):])
+	return result, nil
 }
 
 // count 统计区段文字并逐字核对原文，排除需要组级合成的内容
@@ -414,10 +774,108 @@ func (r *pdfTextReplacements) clear(nodes []pdfCompositeNode) {
 	}
 }
 
+// fallbackExternalFont 解析非内嵌字体实际渲染所用的系统回退字体度量及竖排替换映射
+// 入参: id 字体资源标识
+// 返回: FontMetrics 回退字体度量, map[uint16]uint16 竖排替换表
+func (p *pdfImporter) fallbackExternalFont(id string) (FontMetrics, map[uint16]uint16) {
+	if p.editor == nil || p.editor.backends.Fonts == nil {
+		return nil, nil
+	}
+	cacheKey := "\x00fb:" + id
+	if cached := p.editor.fontMetrics[cacheKey]; cached != nil {
+		if holder, ok := p.editor.fontMetrics[cacheKey+":v"].(pdfFallbackVertHolder); ok {
+			return cached, holder.vert
+		}
+		return cached, nil
+	}
+	var external *Font
+	for _, resource := range p.editor.resources {
+		if resource.font != nil && resource.font.ID == id {
+			external = resource.font
+			break
+		}
+	}
+	if external == nil {
+		return nil, nil
+	}
+	reader := &Reader{doc: &Document{}, fontResourcesRead: true, fontCache: map[string]*Font{id: external}}
+	resolved, err := p.editor.newRenderer(reader).ResolveFont(id, false)
+	if err != nil || len(resolved.Data) == 0 {
+		return nil, nil
+	}
+	metrics, err := p.editor.backends.Fonts.OpenFont(resolved.Data)
+	if err != nil {
+		return nil, nil
+	}
+	digest := sha256.Sum256(resolved.Data)
+	var vert map[uint16]uint16
+	if raw, ok := pdfGSUBVertCache.Load(digest); ok {
+		vert, _ = raw.(map[uint16]uint16)
+	} else {
+		vert = pdfParseGSUBVertical(resolved.Data)
+		pdfGSUBVertCache.Store(digest, vert)
+	}
+	if p.editor.fontMetrics == nil {
+		p.editor.fontMetrics = make(map[string]FontMetrics)
+	}
+	p.editor.fontMetrics[cacheKey] = metrics
+	p.editor.fontMetrics[cacheKey+":v"] = pdfFallbackVertHolder{vert: vert}
+	return metrics, vert
+}
+
+// pdfSimpleFontWidthScales 按非内嵌简单字体显式Widths与回退字形进位宽计算逐字水平缩放比例
+// 入参: font 源PDF字体, glyphs 字形序列, metrics 回退字体度量
+// 返回: []float64 逐字缩放比例, bool 是否存在显著偏差
+func pdfSimpleFontWidthScales(font *pdfgo.Font, glyphs []pdfgo.Glyph, metrics FontMetrics) ([]float64, bool) {
+	if font == nil || font.Vertical || font.Dictionary == nil || font.Dictionary["Widths"] == nil || metrics == nil || len(glyphs) == 0 {
+		return nil, false
+	}
+	if font.Subtype != "Type1" && font.Subtype != "TrueType" && font.Subtype != "MMType1" {
+		return nil, false
+	}
+	upem := float64(metrics.UnitsPerEm())
+	if upem <= 0 {
+		return nil, false
+	}
+	scales := make([]float64, len(glyphs))
+	changed := false
+	for i, glyph := range glyphs {
+		scales[i] = 1
+		if glyph.Width <= 0 || glyph.Name == ".notdef" || utf8.RuneCountInString(glyph.Text) != 1 {
+			continue
+		}
+		char, _ := utf8.DecodeRuneInString(glyph.Text)
+		if unicode.IsSpace(char) {
+			continue
+		}
+		gid := metrics.GlyphIndex(char)
+		if gid == 0 {
+			continue
+		}
+		adv := float64(metrics.GlyphAdvance(gid)) * 1000 / upem
+		if adv <= 0 {
+			continue
+		}
+		ratio := glyph.Width / adv
+		if math.Abs(ratio-1) > 0.05 && ratio >= 0.05 && ratio <= 20 {
+			scales[i] = ratio
+			changed = true
+		}
+	}
+	return scales, changed
+}
+
 // text 保留字形及逐字基线，外部字体优先复用同名内嵌资源
 // 入参: mark PDF文字绘制信息
 // 返回: error 错误信息
 func (p *pdfImporter) text(mark pdfgo.TextMark) error {
+	return p.textRender(mark, 1, false, false, false)
+}
+
+// textRender 转换单段PDF文字，支持非内嵌简单字体宽度缩放与竖排字体回退旋转
+// 入参: mark PDF文字绘制信息, widthScale 显式Widths水平缩放比例, skipSplit 是否已拆分, forceOutlineFill 是否以矢量轮廓填充, verticalRotateText 是否使用CharDirection旋转
+// 返回: error 错误信息
+func (p *pdfImporter) textRender(mark pdfgo.TextMark, widthScale float64, skipSplit, forceOutlineFill, verticalRotateText bool) error {
 	if mark.Font.Subtype == pdfgo.Name("Type3") && mark.Mode == 3 {
 		return nil
 	}
@@ -516,7 +974,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		var err error
 		if embedded {
 			if imported.repairLimit != 0 {
-				p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF embedded font lacks trailing side bearings; unused metrics reconstructed from glyph bounds"})
+				p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF embedded font lacks trailing side bearings; unused metrics reconstructed from glyph bounds"})
 			}
 			id, err = p.editor.addFontResource(imported.resource, imported.checksum)
 			if err == nil {
@@ -557,18 +1015,122 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			}
 		}
 	}
+	fill, stroke, visible := paintMode == 0 || paintMode == 2, paintMode == 1 || paintMode == 2, true
+	var vertMap map[uint16]uint16
+	if !embedded && !skipSplit && mark.Replacement == nil && mark.Clip == nil && len(mark.Glyphs) > 0 {
+		if font.Vertical && paintMode != 3 {
+			fbMetrics, fbVert := p.fallbackExternalFont(id)
+			if fbOutline, ok := fbMetrics.(FontOutlines); ok && fbOutline != nil {
+				if !stroke && fill {
+					flags := make([]bool, len(mark.Glyphs))
+					anyFlag, allFlag := false, true
+					for i, glyph := range mark.Glyphs {
+						if utf8.RuneCountInString(glyph.Text) == 1 {
+							ch, _ := utf8.DecodeRuneInString(glyph.Text)
+							baseGID, sub := pdfVerticalFallbackRune(fbMetrics, ch)
+							if sub || fbVert[baseGID] != 0 || baseGID != 0 && pdfVerticalRotateRune(ch) {
+								flags[i] = true
+							}
+						}
+						anyFlag = anyFlag || flags[i]
+						allFlag = allFlag && flags[i]
+					}
+					if allFlag {
+						forceOutlineFill = true
+					} else if anyFlag {
+						for s := 0; s < len(mark.Glyphs); {
+							e := s + 1
+							for e < len(mark.Glyphs) && flags[e] == flags[s] {
+								e++
+							}
+							sub := mark
+							sub.Glyphs, sub.Positions = mark.Glyphs[s:e], mark.Positions[s:e]
+							if err := p.textRender(sub, 1, true, flags[s], false); err != nil {
+								return err
+							}
+							s = e
+						}
+						return nil
+					}
+				}
+			} else {
+				flags := make([]bool, len(mark.Glyphs))
+				anyFlag, allFlag := false, true
+				for i, glyph := range mark.Glyphs {
+					if utf8.RuneCountInString(glyph.Text) == 1 {
+						ch, _ := utf8.DecodeRuneInString(glyph.Text)
+						flags[i] = pdfVerticalRotateRune(ch)
+					}
+					anyFlag = anyFlag || flags[i]
+					allFlag = allFlag && flags[i]
+				}
+				if allFlag {
+					verticalRotateText = true
+				} else if anyFlag {
+					for s := 0; s < len(mark.Glyphs); {
+						e := s + 1
+						for e < len(mark.Glyphs) && flags[e] == flags[s] {
+							e++
+						}
+						sub := mark
+						sub.Glyphs, sub.Positions = mark.Glyphs[s:e], mark.Positions[s:e]
+						if err := p.textRender(sub, 1, true, false, flags[s]); err != nil {
+							return err
+						}
+						s = e
+					}
+					return nil
+				}
+			}
+		} else if !font.Vertical {
+			fbMetrics, _ := p.fallbackExternalFont(id)
+			if scales, changed := pdfSimpleFontWidthScales(font, mark.Glyphs, fbMetrics); changed {
+				same := true
+				firstScale := scales[0]
+				for i := 1; i < len(scales); i++ {
+					if math.Abs(scales[i]-firstScale) > 1e-4 {
+						same = false
+						break
+					}
+				}
+				if same {
+					widthScale = firstScale
+				} else {
+					for s := 0; s < len(mark.Glyphs); {
+						e := s + 1
+						for e < len(mark.Glyphs) && math.Abs(scales[e]-scales[s]) <= 1e-4 {
+							e++
+						}
+						sub := mark
+						sub.Glyphs, sub.Positions = mark.Glyphs[s:e], mark.Positions[s:e]
+						if err := p.textRender(sub, scales[s], true, false, false); err != nil {
+							return err
+						}
+						s = e
+					}
+					return nil
+				}
+			}
+		}
+	}
 	var metrics FontMetrics
 	var outline FontOutlines
 	if embedded {
 		metrics = imported.metrics
 		outline = metrics.(FontOutlines)
 	}
-	fill, stroke, visible := paintMode == 0 || paintMode == 2, paintMode == 1 || paintMode == 2, paintMode != 3
 	needOutline := stroke
 	for _, glyph := range mark.Glyphs {
 		needOutline = needOutline || glyph.Name == ".notdef"
 	}
-	if needOutline && !embedded {
+	verticalFallbackOutline := font.Vertical && !embedded && (stroke || forceOutlineFill)
+	if verticalFallbackOutline {
+		fbMetrics, fbVert := p.fallbackExternalFont(id)
+		if provider, ok := fbMetrics.(FontOutlines); ok && provider != nil {
+			metrics, outline, vertMap = fbMetrics, provider, fbVert
+		}
+	}
+	if needOutline && !embedded && outline == nil {
 		if resolved, err := p.editor.editorFont(id); err == nil {
 			if provider, ok := resolved.(FontOutlines); ok {
 				metrics, outline = resolved, provider
@@ -586,12 +1148,30 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		}
 	}
 	outlineStroke := stroke && outline != nil
+	outlineFill := forceOutlineFill && fill && !stroke && outline != nil
+	outlineDraw := outlineStroke || outlineFill
 	var glyphPaths []pdfgo.Path
 	const unit = 25.4 / 72
 	m := p.matrix.Mul(mark.Matrix).Mul(pdfgo.Matrix{1 / unit, 0, 0, -1 / unit, 0, 0})
 	var extent pdfPointBounds
-	object := TextObject{Font: id, Size: mark.Size * unit, HScale: mark.HorizontalScale}
+	object := TextObject{Font: id, Size: mark.Size * unit, HScale: mark.HorizontalScale * widthScale}
+	if verticalRotateText {
+		object.CharDirection = 90
+	}
+	mergeEmptyCluster := false
+	if embedded && mark.Replacement == nil && len(mark.Glyphs) > 1 {
+		hasEmpty, hasText := false, false
+		for _, g := range mark.Glyphs {
+			if pdfGlyphExplicitEmpty(font, g) {
+				hasEmpty = true
+			} else if g.Text != "" {
+				hasText = true
+			}
+		}
+		mergeEmptyCluster = hasEmpty && hasText
+	}
 	items := make([]pdfTextGlyphItem, 0, len(mark.Glyphs))
+	var pendingEmpty []pdfEmptyLigatureGlyph
 	if mark.Replacement != nil {
 		object.TextCode = make([]TextCode, 0, len(mark.Glyphs))
 		if embedded {
@@ -605,6 +1185,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		}
 		gid := glyph.ID
 		undefined := glyph.Name == ".notdef"
+		explicitEmpty := mergeEmptyCluster && pdfGlyphExplicitEmpty(font, glyph)
 		if !embedded && undefined {
 			gid = 0
 		}
@@ -612,7 +1193,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			gid = imported.type1Glyphs[glyph.Name]
 			glyph.HasID = true
 		}
-		if glyph.Text == "" && (glyph.HasID || undefined) {
+		if !explicitEmpty && glyph.Text == "" && (glyph.HasID || undefined) {
 			glyph.Text = "\u00a4"
 		}
 		if embedded && !glyph.HasID {
@@ -631,31 +1212,81 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		if !embedded && glyph.Text == "" {
 			return &pdfgo.UnsupportedError{Feature: "unmapped external font character"}
 		}
-		if outlineStroke && !embedded && !undefined {
+		rotateOutline := false
+		if outlineDraw && !embedded && !undefined {
 			char, _ := utf8.DecodeRuneInString(glyph.Text)
-			gid = metrics.GlyphIndex(char)
+			if verticalFallbackOutline {
+				baseGID, _ := pdfVerticalFallbackRune(metrics, char)
+				if vgid := vertMap[baseGID]; vgid != 0 {
+					gid = vgid
+				} else {
+					gid = baseGID
+					rotateOutline = baseGID != 0 && pdfVerticalRotateRune(char)
+				}
+			} else {
+				gid = metrics.GlyphIndex(char)
+			}
 		}
 		origin := mark.Positions[n]
-		escaped := escapeOFDText(glyph.Text)
-		count := utf8.RuneCountInString(glyph.Text)
-		hasTransform := embedded || undefined
-		if mark.Replacement != nil {
-			object.TextCode = append(object.TextCode, TextCode{X: pdfNumbers(origin.X * unit), Y: pdfNumbers(-origin.Y * unit), Value: escaped})
-			if hasTransform {
-				object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: position, CodeCount: count, GlyphCount: 1, Glyphs: strconv.Itoa(int(gid))})
+		itemX, itemY := origin.X*unit, -origin.Y*unit
+		if verticalRotateText {
+			cx, cy := 0.5*object.Size, -0.38*object.Size
+			itemX += cx + cy
+			itemY += cy - cx
+		}
+		if explicitEmpty {
+			if len(items) > 0 {
+				last := &items[len(items)-1]
+				if len(last.gids) == 0 {
+					last.gids = []uint16{last.gid}
+					last.xs = []float64{last.x}
+					last.ys = []float64{last.y}
+				}
+				last.gids = append(last.gids, gid)
+				last.xs = append(last.xs, itemX)
+				last.ys = append(last.ys, itemY)
+			} else {
+				pendingEmpty = append(pendingEmpty, pdfEmptyLigatureGlyph{x: itemX, y: itemY, gid: gid})
 			}
 		} else {
-			items = append(items, pdfTextGlyphItem{x: origin.X * unit, y: -origin.Y * unit, text: escaped, runes: count, hasTransform: hasTransform, gid: gid})
+			escaped := escapeOFDText(glyph.Text)
+			count := utf8.RuneCountInString(glyph.Text)
+			hasTransform := embedded || undefined
+			if mark.Replacement != nil {
+				object.TextCode = append(object.TextCode, TextCode{X: pdfNumbers(itemX), Y: pdfNumbers(itemY), Value: escaped})
+				if hasTransform {
+					object.CGTransform = append(object.CGTransform, CGTransform{CodePosition: position, CodeCount: count, GlyphCount: 1, Glyphs: strconv.Itoa(int(gid))})
+				}
+			} else if len(pendingEmpty) > 0 {
+				gids := make([]uint16, 0, len(pendingEmpty)+1)
+				xs := make([]float64, 0, len(pendingEmpty)+1)
+				ys := make([]float64, 0, len(pendingEmpty)+1)
+				for _, empty := range pendingEmpty {
+					gids = append(gids, empty.gid)
+					xs = append(xs, empty.x)
+					ys = append(ys, empty.y)
+				}
+				gids = append(gids, gid)
+				xs = append(xs, itemX)
+				ys = append(ys, itemY)
+				items = append(items, pdfTextGlyphItem{x: xs[0], y: ys[0], text: escaped, runes: count, hasTransform: true, gid: gids[0], gids: gids, xs: xs, ys: ys})
+				pendingEmpty = pendingEmpty[:0]
+			} else {
+				items = append(items, pdfTextGlyphItem{x: itemX, y: itemY, text: escaped, runes: count, hasTransform: hasTransform, gid: gid})
+			}
+			position += count
 		}
-		position += count
-		if embedded || outlineStroke || undefined && outline != nil {
+		if embedded || outlineDraw || undefined && outline != nil {
 			var path GeometryPath
 			var bounds Box
 			var err error
-			if provider, ok := outline.(FontGlyphBounds); ok && !outlineStroke {
+			if provider, ok := outline.(FontGlyphBounds); ok && !outlineDraw {
 				bounds, err = provider.GlyphBounds(gid, object.Size)
 			} else {
 				path, err = outline.GlyphOutline(gid, object.Size)
+				if err == nil && rotateOutline {
+					path, err = pdfRotateVerticalGlyph(path, metrics, gid, object.Size)
+				}
 				if err == nil {
 					bounds, err = path.Bounds()
 				}
@@ -680,10 +1311,10 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 				}
 			}
 			for _, point := range []pdfgo.Point{{X: bounds.X, Y: bounds.Y}, {X: bounds.X + bounds.W, Y: bounds.Y}, {X: bounds.X, Y: bounds.Y + bounds.H}, {X: bounds.X + bounds.W, Y: bounds.Y + bounds.H}} {
-				extent.add(m.Apply(pdfgo.Point{X: origin.X*unit + point.X*mark.HorizontalScale, Y: -origin.Y*unit + point.Y}))
+				extent.add(m.Apply(pdfgo.Point{X: origin.X*unit + point.X*mark.HorizontalScale*widthScale, Y: -origin.Y*unit + point.Y}))
 			}
-			if outlineStroke {
-				matrix := mark.Matrix.Mul(pdfgo.Matrix{mark.HorizontalScale / unit, 0, 0, -1 / unit, origin.X, origin.Y})
+			if outlineDraw {
+				matrix := mark.Matrix.Mul(pdfgo.Matrix{mark.HorizontalScale * widthScale / unit, 0, 0, -1 / unit, origin.X, origin.Y})
 				glyphPath, err := pdfGlyphPath(path, matrix)
 				if err != nil {
 					return err
@@ -692,6 +1323,18 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			}
 		} else {
 			width := glyph.Width / 1000 * object.Size * mark.HorizontalScale
+			if font.Vertical {
+				if fbMetrics, _ := p.fallbackExternalFont(id); fbMetrics != nil && fbMetrics.UnitsPerEm() > 0 {
+					if utf8.RuneCountInString(glyph.Text) == 1 {
+						char, _ := utf8.DecodeRuneInString(glyph.Text)
+						if fbGID, _ := pdfVerticalFallbackRune(fbMetrics, char); fbGID != 0 {
+							if fbWidth := float64(fbMetrics.GlyphAdvance(fbGID)) / float64(fbMetrics.UnitsPerEm()) * object.Size * mark.HorizontalScale; fbWidth > width {
+								width = fbWidth
+							}
+						}
+					}
+				}
+			}
 			bounds := Box{X: 0, Y: -object.Size, W: width, H: object.Size * 1.25}
 			if undefined {
 				b := font.BoundingBox
@@ -761,7 +1404,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 	if err != nil {
 		return err
 	}
-	if fill && !outlineStroke {
+	if fill && !outlineDraw {
 		object.FillColor, err = p.paintColor(mark.Style.Fill, box, mark.Style.RenderingIntent)
 		if err != nil {
 			return err
@@ -783,7 +1426,7 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 		}
 		p.clipTexts[mark.Clip] = []TextObject{clipObject}
 	}
-	if outlineStroke {
+	if outlineDraw {
 		for _, path := range glyphPaths {
 			if len(path.Segments) == 0 {
 				continue
@@ -795,11 +1438,10 @@ func (p *pdfImporter) text(mark pdfgo.TextMark) error {
 			if matrix == (pdfgo.Matrix{}) {
 				matrix = pdfgo.Identity()
 			}
-			if err := p.appendPath(pdfgo.PathMark{Sequence: mark.Sequence, Path: path, Style: mark.Style, Fill: fill, Stroke: true, StrokeMatrix: matrix}); err != nil {
+			if err := p.appendPath(pdfgo.PathMark{Sequence: mark.Sequence, Path: path, Style: mark.Style, Fill: fill, Stroke: outlineStroke, StrokeMatrix: matrix}); err != nil {
 				return err
 			}
 		}
-		object.Visible = new(bool)
 		object.Fill, object.Stroke = new(bool), new(bool)
 	}
 	p.appendOriginObject(GraphicObject{Type: "TextObject", TextObject: object}, p.textOrigin(mark))

@@ -286,6 +286,7 @@ func NewRenderer(reader *Reader, opts ...RendererOption) *Renderer {
 		compositeGraphicUnits: reader.compositeGraphicUnitCache,
 		templatePageCache:     make(map[string]*PageContent),
 		imageCache:            resourceCache[string, image.Image](reader.resources, imageCacheLimit),
+		svgPathMerge:          SVGPathMergeOptions{}.normalize(),
 		backends:              defaultRenderBackends(),
 		backendStates:         make(map[any]any),
 	}
@@ -333,6 +334,15 @@ func WithCompression(options CompressionOptions) RendererOption {
 func WithTransparentBackground(enabled bool) RendererOption {
 	return func(r *Renderer) {
 		r.transparentBackground = enabled
+	}
+}
+
+// WithSVGPathMerge 设置SVG纯色填充路径合并选项
+// 入参: options 路径合并选项
+// 返回: RendererOption 渲染选项
+func WithSVGPathMerge(options SVGPathMergeOptions) RendererOption {
+	return func(r *Renderer) {
+		r.svgPathMerge = options.normalize()
 	}
 }
 

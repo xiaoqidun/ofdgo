@@ -3684,7 +3684,16 @@ async function changeVersion(action) {
 		}
 		return;
 	}
-	if (action === "delete" && (!entry.id || !await requestConfirmation(`删除版本“${entry.name || entry.index}”？`))) return;
+	const ofdProtected = Boolean(state.doc?.ofdSignatureProtected);
+	if (action === "delete") {
+		if (!entry.id) return;
+		const message = ofdProtected ? `删除版本“${entry.name || entry.index}”将修改受签名保护的 OFD.xml 入口并导致对应签名失效，是否继续？` : `删除版本“${entry.name || entry.index}”？`;
+		if (!await requestConfirmation(message)) return;
+	} else if (ofdProtected && action !== "select") {
+		const labels = { add: "新增版本", rename: "重命名版本", default: "设置默认版本" };
+		const label = labels[action] || "修改版本";
+		if (!await requestConfirmation(`${label}将修改受签名保护的 OFD.xml 入口并导致对应签名失效，是否继续？`)) return;
+	}
 	el.versionStatus.textContent = "正在处理版本";
 	if (await changeDocument("ofdgoChangeVersion", null, action, entry.id, el.versionName.value.trim())) {
 		if (tab.closed || state.versionManagement !== manager) return;
@@ -3746,7 +3755,10 @@ function updateVersionControls() {
 	el.versionManageButton.hidden = !state.editing && !(state.doc?.versionCount > 0);
 	el.versionTitle.textContent = title;
 	el.versionManageButton.disabled = disabled;
-	el.versionNotice.textContent = state.editing ? state.editorInfo?.editWarnings?.join(" · ") || "" : "";
+	const notices = [];
+	if (state.editing && state.doc?.ofdSignatureProtected) notices.push("当前文档的 OFD.xml 入口受签名保护，新增、改名、删除或设默认版本将修改入口并使对应签名失效");
+	if (state.editing && state.editorInfo?.editWarnings?.length) notices.push(...state.editorInfo.editWarnings);
+	el.versionNotice.textContent = notices.join(" · ");
 	el.versionNotice.hidden = !el.versionNotice.textContent;
 	el.versionNameRow.hidden = !state.editing;
 	el.versionActions.classList.toggle("version-readonly", !state.editing);
@@ -15103,7 +15115,7 @@ async function mergeEditorSummary(tab, value, document, editor) {
 	}
 	const result = {...value, pages, pageCapabilities:capabilities};
 	if (value.detailsUnchanged && !document.detailsPending && !document.detailsError) {
-		for (const key of ["structures", "structureError", "fontCount", "signatureCount", "signatureError", "attachmentError", "attachments", "fonts", "signatures", "detailsPending", "detailsError"]) result[key] = document[key];
+		for (const key of ["structures", "structureError", "fontCount", "signatureCount", "ofdSignatureProtected", "signatureError", "attachmentError", "attachments", "fonts", "signatures", "detailsPending", "detailsError"]) result[key] = document[key];
 	}
 	return result;
 }

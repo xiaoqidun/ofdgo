@@ -290,7 +290,7 @@ func (p *pdfImporter) interactiveAnnotation(ctx context.Context, page *pdfgo.Pag
 	if err := p.appearanceAnnotation(ctx, page, annotation, actions...); err != nil {
 		return err
 	}
-	p.report.Warnings = append(p.report.Warnings, pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF " + string(annotation.Subtype) + " appearance and available primary assets retained; advanced interaction not transferred to OFD"})
+	p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF " + string(annotation.Subtype) + " appearance and available primary assets retained; advanced interaction not transferred to OFD"})
 	return nil
 }
 

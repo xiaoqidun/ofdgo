@@ -80,21 +80,23 @@ type RasterSegment struct {
 type RasterGroupKind uint8
 
 // RasterCommand 填充路径、绘制图像或管理透明组，Image非空时为图像指令
+// Interpolate为可选内存态图像插值开关，非空时优先于默认缩放插值策略
 // Group非零时为透明组边界指令，GroupAlpha为开启透明组时的整体透明度
 // EvenOdd仅控制填充规则，不影响描边
 // Transform将局部坐标映射到页面，图像局部坐标与image.Image的像素坐标一致
 // Clip为页面坐标裁剪，适用于路径、图像和透明组，nil表示不裁剪，空切片表示全部裁去
 // Stroke非空时为描边，宽度与虚线使用页面毫米，不随Transform再次缩放
 type RasterCommand struct {
-	Path       []RasterSegment
-	Paint      RasterPaint
-	EvenOdd    bool
-	Transform  RasterMatrix
-	Image      image.Image
-	Clip       []RasterSegment
-	Stroke     *StrokeOptions
-	Group      RasterGroupKind
-	GroupAlpha uint8
+	Path        []RasterSegment
+	Paint       RasterPaint
+	EvenOdd     bool
+	Transform   RasterMatrix
+	Image       image.Image
+	Interpolate *bool
+	Clip        []RasterSegment
+	Stroke      *StrokeOptions
+	Group       RasterGroupKind
+	GroupAlpha  uint8
 }
 
 // RasterPaint 预乘RGBA纯色或渐变，Gradient非空时忽略Color
@@ -759,7 +761,7 @@ func drawRasterImageCommandOffset(ctx context.Context, backend RasterBackend, pa
 	localM[4] -= float64(offset.X)
 	localM[5] -= float64(offset.Y)
 	if command.Clip == nil {
-		baseimage.DrawPixels(dst, src, localM, draw.Over)
+		baseimage.DrawPixelsInterpolate(dst, src, localM, draw.Over, command.Interpolate)
 		return ctx.Err()
 	}
 	mask, err := rasterClipMask(ctx, backend, page, command.Clip, cache)
@@ -783,7 +785,7 @@ func drawRasterImageCommandOffset(ctx context.Context, backend RasterBackend, pa
 	} else {
 		layer = image.NewRGBA64(bounds)
 	}
-	baseimage.DrawPixels(layer, baseimage.PixelSource(src), m, draw.Src)
+	baseimage.DrawPixelsInterpolate(layer, baseimage.PixelSource(src), m, draw.Src, command.Interpolate)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -800,6 +802,10 @@ func cloneRasterPage(page *RasterPage) *RasterPage {
 	for i := range result.Commands {
 		cmd := &result.Commands[i]
 		cmd.Path, cmd.Clip = slices.Clone(cmd.Path), slices.Clone(cmd.Clip)
+		if cmd.Interpolate != nil {
+			v := *cmd.Interpolate
+			cmd.Interpolate = &v
+		}
 		if cmd.Stroke != nil {
 			stroke := *cmd.Stroke
 			stroke.Dashes = slices.Clone(stroke.Dashes)
@@ -834,7 +840,8 @@ func (p *RasterPage) PixelSize() (int, int, error) {
 		return 0, 0, fmt.Errorf("invalid raster page size or DPI")
 	}
 	w, h := math.Max(1, math.Floor(p.Width*scale+0.5)), math.Max(1, math.Floor(p.Height*scale+0.5))
-	if !rasterPositive(w) || !rasterPositive(h) || w*h > math.MaxInt32/4 {
+	const maxRasterPagePixels = 256 << 20
+	if !rasterPositive(w) || !rasterPositive(h) || w > 1<<20 || h > 1<<20 || !finite(w*h) || w*h > maxRasterPagePixels {
 		return 0, 0, fmt.Errorf("invalid raster pixel dimensions: %g x %g", w, h)
 	}
 	return int(w), int(h), nil

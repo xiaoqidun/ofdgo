@@ -112,7 +112,7 @@ type svgResourceRenderer struct {
 	clipDefs         []svgClipDef
 	collectClips     bool
 	hasSVGDefs       bool
-	mergePaths       bool
+	pathMerge        SVGPathMergeOptions
 	idPrefix         string
 	precision        int
 	pathCount        int
@@ -121,6 +121,7 @@ type svgResourceRenderer struct {
 	pendingCursor    svgPathCursor
 	pendingRowBox    svgIntBox
 	pendingUnionBox  svgIntBox
+	pendingOps       int
 	pendingHasUnion  bool
 	pendingHasPath   bool
 }
@@ -143,7 +144,7 @@ type svgClipDef struct {
 	path string
 }
 
-// svgTemplateKey 按模板页、视口、精度、分辨率、压缩与资源模式区分共享SVG片段
+// svgTemplateKey 按模板页、视口、精度、合并模式、分辨率、压缩与资源模式区分共享SVG片段
 type svgTemplateKey struct {
 	template       *PageContent
 	width          float64
@@ -152,6 +153,7 @@ type svgTemplateKey struct {
 	offsetY        float64
 	dpi            float64
 	precision      int
+	pathMerge      SVGPathMergeOptions
 	printing       bool
 	printContents  string
 	externalImages bool
@@ -232,12 +234,13 @@ func svgQuantizePoint(x, y float64, m canvas.Matrix, scale float64) (int64, int6
 	return int64(math.Round(tx * scale)), int64(math.Round(ty * scale)), true
 }
 
-// svgInspectPath 校验纯色路径命令并计算量化控制点包围盒
+// svgInspectPath 校验纯色路径命令并计算量化控制点包围盒与命令数
 // 入参: data 只读路径数据, m 目标变换矩阵, scale 定点缩放倍率
-// 返回: svgIntBox 量化包围盒, bool 是否支持紧凑序列化
-func svgInspectPath(data []float64, m canvas.Matrix, scale float64) (svgIntBox, bool) {
+// 返回: svgIntBox 量化包围盒, int 路径命令数, bool 是否支持紧凑序列化
+func svgInspectPath(data []float64, m canvas.Matrix, scale float64) (svgIntBox, int, bool) {
 	var box svgIntBox
 	hasPoint := false
+	ops := 0
 	include := func(x, y float64) bool {
 		qx, qy, ok := svgQuantizePoint(x, y, m, scale)
 		if !ok {
@@ -258,26 +261,30 @@ func svgInspectPath(data []float64, m canvas.Matrix, scale float64) (svgIntBox, 
 		switch data[0] {
 		case canvas.MoveToCmd, canvas.LineToCmd:
 			if !include(data[1], data[2]) {
-				return svgIntBox{}, false
+				return svgIntBox{}, 0, false
 			}
+			ops++
 			data = data[4:]
 		case canvas.CloseCmd:
+			ops++
 			data = data[4:]
 		case canvas.QuadToCmd:
 			if !include(data[1], data[2]) || !include(data[3], data[4]) {
-				return svgIntBox{}, false
+				return svgIntBox{}, 0, false
 			}
+			ops++
 			data = data[6:]
 		case canvas.CubeToCmd:
 			if !include(data[1], data[2]) || !include(data[3], data[4]) || !include(data[5], data[6]) {
-				return svgIntBox{}, false
+				return svgIntBox{}, 0, false
 			}
+			ops++
 			data = data[8:]
 		default:
-			return svgIntBox{}, false
+			return svgIntBox{}, 0, false
 		}
 	}
-	return box, hasPoint
+	return box, ops, hasPoint
 }
 
 // appendSVGCoord 将定点整数坐标格式化为去尾零的紧凑SVG数字
@@ -729,10 +736,11 @@ func (s *svgResourceRenderer) flushPendingPath() {
 	s.pendingPath = output[:0]
 	s.pendingHasPath = false
 	s.pendingHasUnion = false
+	s.pendingOps = 0
 	s.pendingCursor = svgPathCursor{}
 }
 
-// RenderPath 跳过空路径和不可见路径并合并连续同色纯矢量路径，其余画笔保留后端处理
+// RenderPath 跳过空路径和不可见路径并按策略合并连续同色纯矢量路径，其余画笔保留后端处理
 // 入参: path 几何路径, style 绘制样式, m 页面变换
 func (s *svgResourceRenderer) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix) {
 	if s.err != nil {
@@ -760,17 +768,54 @@ func (s *svgResourceRenderer) RenderPath(path *canvas.Path, style canvas.Style, 
 	_, height := s.Size()
 	tm := canvas.Matrix{{1, 0, 0}, {0, -1, height}}.Mul(m)
 	prec, scale := s.effectivePrecision()
-	box, ok := svgInspectPath(raw, tm, float64(scale))
+	box, ops, ok := svgInspectPath(raw, tm, float64(scale))
 	if !ok {
 		s.flushPendingPath()
 		s.SVG.RenderPath(path, style, m)
 		return
 	}
-	if s.mergePaths && style.Fill.Color.A == 255 && style.FillRule == canvas.NonZero {
+	opt := s.pathMerge
+	if opt.Mode != SVGPathMergeOff && style.Fill.Color.A == 255 && style.FillRule == canvas.NonZero {
+		if opt.Mode == SVGPathMergeFull {
+			if s.pendingHasPath {
+				disjoint := s.pendingFill == style.Fill.Color && s.pendingRowBox.disjoint(box) && (!s.pendingHasUnion || s.pendingUnionBox.disjoint(box))
+				if !disjoint {
+					s.flushPendingPath()
+				}
+			}
+			if !s.pendingHasPath {
+				s.pendingPath = append(s.pendingPath[:0], `<path d="`...)
+				s.pendingFill = style.Fill.Color
+				s.pendingRowBox = box
+				s.pendingHasUnion = false
+				s.pendingHasPath = true
+				s.pendingCursor = svgPathCursor{}
+			} else if box.minY >= s.pendingRowBox.maxY || box.maxY <= s.pendingRowBox.minY {
+				if s.pendingHasUnion {
+					s.pendingUnionBox = s.pendingUnionBox.union(s.pendingRowBox)
+				} else {
+					s.pendingUnionBox = s.pendingRowBox
+					s.pendingHasUnion = true
+				}
+				s.pendingRowBox = box
+			} else {
+				s.pendingRowBox = s.pendingRowBox.union(box)
+			}
+			s.pendingPath = appendCompactSVGPath(s.pendingPath, raw, tm, prec, scale, &s.pendingCursor)
+			return
+		}
+		maxExtentQ := int64(math.MaxInt64 / 2)
+		if scaledExtent := opt.MaxExtent * float64(scale); scaledExtent < float64(maxExtentQ) {
+			maxExtentQ = int64(math.Round(scaledExtent))
+		}
 		if s.pendingHasPath {
-			disjoint := s.pendingFill == style.Fill.Color && s.pendingRowBox.disjoint(box) && (!s.pendingHasUnion || s.pendingUnionBox.disjoint(box))
-			if !disjoint {
+			sameRow := !(box.minY >= s.pendingRowBox.maxY || box.maxY <= s.pendingRowBox.minY)
+			joined := s.pendingRowBox.union(box)
+			canMerge := s.pendingFill == style.Fill.Color && sameRow && s.pendingRowBox.disjoint(box) && joined.maxX-joined.minX <= maxExtentQ && joined.maxY-joined.minY <= maxExtentQ && s.pendingOps+ops <= opt.MaxOps && len(s.pendingPath) < opt.MaxBytes
+			if !canMerge {
 				s.flushPendingPath()
+			} else {
+				s.pendingRowBox = joined
 			}
 		}
 		if !s.pendingHasPath {
@@ -779,18 +824,10 @@ func (s *svgResourceRenderer) RenderPath(path *canvas.Path, style canvas.Style, 
 			s.pendingRowBox = box
 			s.pendingHasUnion = false
 			s.pendingHasPath = true
+			s.pendingOps = 0
 			s.pendingCursor = svgPathCursor{}
-		} else if box.minY >= s.pendingRowBox.maxY || box.maxY <= s.pendingRowBox.minY {
-			if s.pendingHasUnion {
-				s.pendingUnionBox = s.pendingUnionBox.union(s.pendingRowBox)
-			} else {
-				s.pendingUnionBox = s.pendingRowBox
-				s.pendingHasUnion = true
-			}
-			s.pendingRowBox = box
-		} else {
-			s.pendingRowBox = s.pendingRowBox.union(box)
 		}
+		s.pendingOps += ops
 		s.pendingPath = appendCompactSVGPath(s.pendingPath, raw, tm, prec, scale, &s.pendingCursor)
 		return
 	}
@@ -1293,13 +1330,13 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 		target = buffered
 	}
 	s := &svgResourceRenderer{
-		SVG:        svg.New(target, box.W, box.H, &options),
-		renderer:   r,
-		writer:     target,
-		seen:       make(map[string]bool),
-		mergePaths: true,
-		idPrefix:   r.svgIDPrefix,
-		precision:  r.svgPrecision,
+		SVG:       svg.New(target, box.W, box.H, &options),
+		renderer:  r,
+		writer:    target,
+		seen:      make(map[string]bool),
+		pathMerge: r.SVGPathMerge(),
+		idPrefix:  r.svgIDPrefix,
+		precision: r.svgPrecision,
 	}
 	io.WriteString(target, svgCreatorMetadata)
 	io.WriteString(target, `<g style="image-orientation:none">`)

@@ -206,7 +206,7 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		}
 	}
 	clipPath := r.intersectCachedClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
-	r.drawClippedImage(ctx, img, clipPath, m)
+	r.drawClippedImageInterpolate(ctx, img, clipPath, m, obj.Interpolate)
 	if r.renderError != nil {
 		return
 	}
@@ -218,6 +218,12 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 // drawClippedImage 共用图像及签章的几何裁剪，编译、SVG和PDF输出保留原图及独立裁剪
 // 入参: ctx 画布上下文, img 原图, clipPath 页面裁剪，可为空, m 像素到画布的变换
 func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPath *canvas.Path, m canvas.Matrix) {
+	r.drawClippedImageInterpolate(ctx, img, clipPath, m, nil)
+}
+
+// drawClippedImageInterpolate 透传图像插值开关并执行几何裁剪与渲染输出
+// 入参: ctx 画布上下文, img 原图, clipPath 页面裁剪，可为空, m 像素到画布的变换, interpolate 可选插值开关
+func (r *Renderer) drawClippedImageInterpolate(ctx *canvas.Context, img image.Image, clipPath *canvas.Path, m canvas.Matrix, interpolate *bool) {
 	imgW, imgH := float64(img.Bounds().Dx()), float64(img.Bounds().Dy())
 	imageClip := clipPath
 	compiler, compiled := ctx.Renderer.(*canvasPageCompiler)
@@ -232,14 +238,17 @@ func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPa
 	if !compiled && !pdf && !isSVG {
 		v := ctx.CoordSystemView().Mul(ctx.View())
 		dpi := 96 * max(1, math.Hypot(v[0][0], v[1][0]), math.Hypot(v[0][1], v[1][1]))
-		img = r.imageWithClip(img, clipPath, m, dpi)
+		img = r.imageWithClip(img, clipPath, m, dpi, interpolate)
 	}
 	if r.renderError != nil {
 		return
 	}
 	m = m.Scale(imgW/float64(img.Bounds().Dx()), imgH/float64(img.Bounds().Dy()))
 	total := ctx.CoordSystemView().Mul(ctx.View()).Mul(m)
-	skipTransparentEdge := pdf || isSVG && (isOpaqueEncodedImage(img) || isAxisAlignedCanvasMatrix(total) && isDirectSVGEncodedImage(img))
+	pxPerMM := r.dpi / 25.4
+	pixelMatrix := [6]float64{total[0][0] * pxPerMM, total[1][0] * pxPerMM, total[0][1] * pxPerMM, total[1][1] * pxPerMM, 0, 0}
+	nearestAxis := compiled && isAxisAlignedCanvasMatrix(total) && baseimage.UseNearestNeighbor(img.Bounds(), pixelMatrix, interpolate)
+	skipTransparentEdge := pdf || nearestAxis || isSVG && (isOpaqueEncodedImage(img) || isAxisAlignedCanvasMatrix(total) && isDirectSVGEncodedImage(img))
 	if !skipTransparentEdge {
 		work := r.pageContext
 		if work == nil {
@@ -264,11 +273,19 @@ func (r *Renderer) drawClippedImage(ctx *canvas.Context, img image.Image, clipPa
 			m[1][2] -= m[1][0]*p + m[1][1]*p
 		}
 	}
+	if compiled {
+		compiler.imageInterpolate = interpolate
+		defer func() { compiler.imageInterpolate = nil }()
+	}
 	if pdf {
+		pdfOutput.imageInterpolate = interpolate
 		if imageClip != nil {
 			pdfOutput.imageClip = imageClip.Copy().Transform(ctx.CoordSystemView().Mul(ctx.View()))
 		}
-		defer func() { pdfOutput.imageClip = nil }()
+		defer func() {
+			pdfOutput.imageClip = nil
+			pdfOutput.imageInterpolate = nil
+		}()
 	}
 	if isSVG {
 		if imageClip != nil {
@@ -319,9 +336,9 @@ func (r *Renderer) renderImageBorder(ctx *canvas.Context, obj ImageObject, box B
 
 // imageWithClip 应用图片裁剪区域，保留原图采样精度
 // 低分辨率图片按最低精度细化蒙版，细化后的像素上限16Mi，不降低原图分辨率
-// 入参: img 图片对象, clipPath 裁剪路径, m 图片变换矩阵, dpi 最低蒙版分辨率，0保留原图精度
+// 入参: img 图片对象, clipPath 裁剪路径, m 图片变换矩阵, dpi 最低蒙版分辨率，0保留原图精度, interpolate 可选插值开关
 // 返回: image.Image 裁剪后的图片对象
-func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canvas.Matrix, dpi float64) image.Image {
+func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canvas.Matrix, dpi float64, interpolate *bool) image.Image {
 	work := r.pageContext
 	if work == nil {
 		work = r.outputContext()
@@ -358,7 +375,11 @@ func (r *Renderer) imageWithClip(img image.Image, clipPath *canvas.Path, m canva
 		} else {
 			resized = image.NewNRGBA(image.Rect(0, 0, nw, nh))
 		}
-		draw.CatmullRom.Scale(resized, resized.Bounds(), img, bounds, draw.Src, nil)
+		if interpolate != nil && !*interpolate || interpolate == nil && w <= 8 && h <= 8 && scale >= 4 {
+			draw.NearestNeighbor.Scale(resized, resized.Bounds(), img, bounds, draw.Src, nil)
+		} else {
+			draw.CatmullRom.Scale(resized, resized.Bounds(), img, bounds, draw.Src, nil)
+		}
 		img = resized
 		m = m.Scale(float64(w)/float64(nw), float64(h)/float64(nh))
 		bounds, w, h = resized.Bounds(), nw, nh

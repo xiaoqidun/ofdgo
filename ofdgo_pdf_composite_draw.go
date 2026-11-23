@@ -16,6 +16,7 @@ package ofdgo
 
 import (
 	"fmt"
+	"image"
 	"math"
 
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
@@ -71,19 +72,26 @@ func (c *pdfCompositor) drawMark(node pdfCompositeNode, pixels []pdfCompositePix
 	if fill && stroke {
 		initial = c.acquirePixels(len(pixels))
 		defer c.releasePixels(initial)
-		copy(initial, pixels)
 		if c.channels != nil && !grouped {
 			initialChannels = c.acquireChannels(len(c.channels))
 			defer c.releaseChannels(initialChannels)
-			copy(initialChannels, c.channels)
 		}
 		if grouped {
 			result = c.acquirePixels(len(pixels))
 			defer c.releasePixels(result)
-			copy(result, pixels)
-			for i := range result {
-				result[i].Effect = 0
-				result[i].Shape = 0
+		}
+		for y := region.Min.Y; y < region.Max.Y; y++ {
+			start, end := y*c.width+region.Min.X, y*c.width+region.Max.X
+			copy(initial[start:end], pixels[start:end])
+			if initialChannels != nil {
+				copy(initialChannels[start:end], c.channels[start:end])
+			}
+			if grouped {
+				copy(result[start:end], pixels[start:end])
+				for i := start; i < end; i++ {
+					result[i].Effect = 0
+					result[i].Shape = 0
+				}
 			}
 		}
 	}
@@ -116,7 +124,7 @@ func (c *pdfCompositor) drawMark(node pdfCompositeNode, pixels []pdfCompositePix
 // 入参: node 图元, outline 描边标志, paint 画刷, mode 混合模式, overprint 叠印标志, mask 蒙版, initial 挖空初始背景, initialChannels 初始通道, pixels 输出, space 混合空间
 // 返回: error 几何或颜色错误
 func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdfgo.Paint, mode pdfgo.Name, overprint bool, mask []float64, initial []pdfCompositePixel, initialChannels []uint8, pixels []pdfCompositePixel, space *pdfgo.ColorSpace) error {
-	coverage, err := c.coverage(node, outline)
+	coverage, covRect, err := c.coverageRect(node, outline)
 	if err != nil || coverage == nil {
 		return err
 	}
@@ -241,11 +249,7 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 	if g := paint.Radial; (node.image == nil || node.image.Image.ImageMask) && shading == nil && g != nil && g.Bounds == nil && g.Background == nil {
 		sampler = &pdfCompositeColorSampler{paint: paint, space: space, intent: style.RenderingIntent, conversion: style.ColorConversion, colorants: colorants}
 	}
-	bounds, err := c.geometryBounds(node, outline)
-	if err != nil {
-		return err
-	}
-	region := c.pixelBounds(bounds)
+	region := covRect
 	if sampler != nil && node.image == nil && !region.Empty() && c.inverse[1] == 0 && c.inverse[2] == 0 {
 		first := c.inverse.Apply(pdfgo.Point{X: c.box.X + (float64(region.Min.X)+.5)*step, Y: c.box.Y + (float64(region.Min.Y)+.5)*step})
 		last := c.inverse.Apply(pdfgo.Point{X: c.box.X + (float64(region.Max.X)-.5)*step, Y: c.box.Y + (float64(region.Max.Y)-.5)*step})
@@ -258,17 +262,20 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 	var previousAlpha float64
 	composedReady := false
 	originRecorded := c.origins == nil
+	covW := covRect.Dx()
 	for y := region.Min.Y; y < region.Max.Y; y++ {
 		if err := c.importer.ctx.Err(); err != nil {
 			return err
 		}
-		row := codecpdf.CoverageRow(coverage, y, region.Min.X, region.Max.X)
+		cy := y - covRect.Min.Y
+		row := codecpdf.CoverageRow(coverage, cy, 0, covW)
 		for x := region.Min.X; x < region.Max.X; x++ {
+			cx := x - covRect.Min.X
 			var a uint32
 			if row != nil {
-				a = uint32(row[4*(x-region.Min.X)+3]) * 257
+				a = uint32(row[4*cx+3]) * 257
 			} else {
-				a = baseimage.AlphaAt(coverage, x, y)
+				a = baseimage.AlphaAt(coverage, cx, cy)
 			}
 			if a == 0 {
 				continue
@@ -478,6 +485,9 @@ func (c *pdfCompositor) drawGroup(node pdfCompositeNode, pixels []pdfCompositePi
 		return nil
 	}
 	region := c.pixelBounds(b)
+	if region.Empty() {
+		return nil
+	}
 	blocked := c.transferBlocked
 	c.transferBlocked = blocked || g.Alpha != 1 || g.SoftMask != nil || !codecpdf.NormalBlend(g.BlendMode)
 	defer func() { c.transferBlocked = blocked }()
@@ -502,6 +512,62 @@ func (c *pdfCompositor) drawGroup(node pdfCompositeNode, pixels []pdfCompositePi
 	if sharedInitial && g.Alpha == 1 && g.SoftMask == nil && codecpdf.NormalBlend(g.BlendMode) {
 		return c.draw(node.children, pixels, space)
 	}
+	subW, subH := region.Dx(), region.Dy()
+	if subW < c.width || subH < c.height {
+		step := 25.4 / c.importer.rasterDPI
+		sub := *c
+		sub.box = Box{X: c.box.X + float64(region.Min.X)*step, Y: c.box.Y + float64(region.Min.Y)*step, W: float64(subW) * step, H: float64(subH) * step}
+		sub.width, sub.height = subW, subH
+		sub.masks = map[*pdfgo.SoftMask][]float64{}
+		sub.clipMasks = nil
+		sub.gradients, sub.meshes = nil, nil
+		subCount := subW * subH
+		subPixels := c.acquirePixels(subCount)
+		defer c.releasePixels(subPixels)
+		if c.channels != nil {
+			sub.channels = c.acquireChannels(subCount)
+			defer c.releaseChannels(sub.channels)
+		}
+		if c.transfers != nil {
+			sub.transfers = make([]*pdfgo.TransferFunction, subCount)
+		}
+		for y := range subH {
+			srcOff := (region.Min.Y+y)*c.width + region.Min.X
+			dstOff := y * subW
+			copy(subPixels[dstOff:dstOff+subW], pixels[srcOff:srcOff+subW])
+			if sub.channels != nil {
+				copy(sub.channels[dstOff:dstOff+subW], c.channels[srcOff:srcOff+subW])
+			}
+			if sub.transfers != nil {
+				copy(sub.transfers[dstOff:dstOff+subW], c.transfers[srcOff:srcOff+subW])
+			}
+		}
+		err := sub.drawGroupRegion(node, subPixels, parent, space, sameSpace, sharedInitial, image.Rect(0, 0, subW, subH))
+		sub.releaseMasks()
+		if err != nil {
+			return err
+		}
+		for y := range subH {
+			dstOff := (region.Min.Y+y)*c.width + region.Min.X
+			srcOff := y * subW
+			copy(pixels[dstOff:dstOff+subW], subPixels[srcOff:srcOff+subW])
+			if sub.channels != nil {
+				copy(c.channels[dstOff:dstOff+subW], sub.channels[srcOff:srcOff+subW])
+			}
+			if sub.transfers != nil {
+				copy(c.transfers[dstOff:dstOff+subW], sub.transfers[srcOff:srcOff+subW])
+			}
+		}
+		return nil
+	}
+	return c.drawGroupRegion(node, pixels, parent, space, sameSpace, sharedInitial, region)
+}
+
+// drawGroupRegion 在已紧致对齐的像素区域内执行透明组隔离、挖空与混合合成
+// 入参: node 透明组, pixels 父区域像素, parent 父混合空间, space 组混合空间, sameSpace 空间是否相同, sharedInitial 是否共享背景, region 目标区域
+// 返回: error 颜色或合成错误
+func (c *pdfCompositor) drawGroupRegion(node pdfCompositeNode, pixels []pdfCompositePixel, parent, space *pdfgo.ColorSpace, sameSpace, sharedInitial bool, region image.Rectangle) error {
+	g := node.group
 	initial := pixels
 	if !sharedInitial {
 		initial = c.acquirePixels(len(pixels))
@@ -557,7 +623,7 @@ func (c *pdfCompositor) drawGroup(node pdfCompositeNode, pixels []pdfCompositePi
 			return err
 		}
 	}
-	c.gradients, c.meshes = local.gradients, local.meshes
+	c.gradients, c.meshes, c.clipMasks = local.gradients, local.meshes, local.clipMasks
 	mask, err := c.mask(g.SoftMask, parent)
 	if err != nil {
 		return err
@@ -657,7 +723,7 @@ func (c *pdfCompositor) drawKnockout(nodes []pdfCompositeNode, initial, pixels [
 			}
 		}
 	}
-	c.gradients, c.meshes = local.gradients, local.meshes
+	c.gradients, c.meshes, c.clipMasks = local.gradients, local.meshes, local.clipMasks
 	return nil
 }
 
@@ -687,7 +753,46 @@ func (c *pdfCompositor) mask(mask *pdfgo.SoftMask, inherited *pdfgo.ColorSpace) 
 	if space == nil {
 		space = inherited
 	}
-	pixels := c.acquirePixels(c.width * c.height)
+	count := c.width * c.height
+	hasAlphaBBox, allInside, allOutside := false, false, false
+	var maskBounds pdfgo.Rectangle
+	var toForm pdfgo.Matrix
+	if mask.Subtype == "Alpha" {
+		if len(nodes) == 0 {
+			allOutside = true
+		} else if len(nodes) == 1 && nodes[0].group != nil && nodes[0].group.Matrix != (pdfgo.Matrix{}) {
+			g := nodes[0].group
+			if gInv, ok := g.Matrix.Inverse(); ok {
+				hasAlphaBBox = true
+				maskBounds = g.Bounds
+				toForm = gInv.Mul(c.inverse)
+				corners := [4]pdfgo.Point{
+					toForm.Apply(pdfgo.Point{X: c.box.X, Y: c.box.Y}),
+					toForm.Apply(pdfgo.Point{X: c.box.X + c.box.W, Y: c.box.Y}),
+					toForm.Apply(pdfgo.Point{X: c.box.X + c.box.W, Y: c.box.Y + c.box.H}),
+					toForm.Apply(pdfgo.Point{X: c.box.X, Y: c.box.Y + c.box.H}),
+				}
+				minX, minY := corners[0].X, corners[0].Y
+				maxX, maxY := corners[0].X, corners[0].Y
+				for _, pt := range corners[1:] {
+					minX, minY = math.Min(minX, pt.X), math.Min(minY, pt.Y)
+					maxX, maxY = math.Max(maxX, pt.X), math.Max(maxY, pt.Y)
+				}
+				if maxX < maskBounds.XMin || minX > maskBounds.XMax || maxY < maskBounds.YMin || minY > maskBounds.YMax {
+					allOutside = true
+				} else if minX >= maskBounds.XMin && maxX <= maskBounds.XMax && minY >= maskBounds.YMin && maxY <= maskBounds.YMax {
+					allInside = true
+				}
+			}
+		}
+	}
+	if allOutside {
+		result := c.scratch.masks.Acquire(count)
+		clear(result)
+		c.masks[mask] = result
+		return result, nil
+	}
+	pixels := c.acquirePixels(count)
 	defer c.releasePixels(pixels)
 	clear(pixels)
 	if mask.Subtype == "Luminosity" {
@@ -706,8 +811,10 @@ func (c *pdfCompositor) mask(mask *pdfgo.SoftMask, inherited *pdfgo.ColorSpace) 
 	local.channels = nil
 	local.softMask = true
 	if err := local.draw(nodes, pixels, space); err != nil {
+		c.clipMasks = local.clipMasks
 		return nil, err
 	}
+	c.clipMasks = local.clipMasks
 	result := c.scratch.masks.Acquire(len(pixels))
 	complete := false
 	defer func() {
@@ -718,22 +825,32 @@ func (c *pdfCompositor) mask(mask *pdfgo.SoftMask, inherited *pdfgo.ColorSpace) 
 	values := make(map[[4]float64]float64)
 	var previous [4]float64
 	var opacity float64
+	prevValid := false
+	step := 25.4 / c.importer.rasterDPI
+	checkOOB := hasAlphaBBox && !allInside
 	for i, pixel := range pixels {
 		if i%pdfCompositeTileSize == 0 {
 			if err := c.importer.ctx.Err(); err != nil {
 				return nil, err
 			}
 		}
+		if checkOOB && pixel.Alpha == 0 {
+			pt := toForm.Apply(pdfgo.Point{X: c.box.X + (float64(i%c.width)+.5)*step, Y: c.box.Y + (float64(i/c.width)+.5)*step})
+			if pt.X < maskBounds.XMin || pt.X > maskBounds.XMax || pt.Y < maskBounds.YMin || pt.Y > maskBounds.YMax {
+				result[i] = 0
+				continue
+			}
+		}
 		key := [4]float64{pixel.Alpha}
 		if mask.Subtype == "Luminosity" {
 			key = pixel.Values
 		}
-		if i != 0 && key == previous {
+		if prevValid && key == previous {
 			result[i] = opacity
 			continue
 		}
 		if cached, ok := values[key]; ok {
-			previous, opacity, result[i] = key, cached, cached
+			previous, opacity, prevValid, result[i] = key, cached, true, cached
 			continue
 		}
 		v := pixel.Alpha
@@ -747,7 +864,7 @@ func (c *pdfCompositor) mask(mask *pdfgo.SoftMask, inherited *pdfgo.ColorSpace) 
 		if err != nil {
 			return nil, err
 		}
-		previous, opacity = key, result[i]
+		previous, opacity, prevValid = key, result[i], true
 		if len(values) < 2*pdfCompositeTileSize {
 			values[key] = opacity
 		}

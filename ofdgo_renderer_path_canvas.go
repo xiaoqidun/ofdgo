@@ -485,6 +485,26 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 		r.renderError = fmt.Errorf("pattern tile count exceeds limit")
 		return
 	}
+	patternAlpha := fillAlphaByte(pattern.Alpha)
+	if patternAlpha == 0 {
+		return
+	}
+	objectCount := 0
+	for range pattern.CellContent.objects() {
+		objectCount++
+		if objectCount > 1 {
+			break
+		}
+	}
+	useGroup := canCanvasTransparencyGroup(ctx.Renderer) && patternAlpha < 255 && objectCount > 1
+	var endGroup func()
+	grouped := false
+	if useGroup {
+		endGroup, grouped = beginCanvasTransparencyGroup(ctx.Renderer, patternAlpha)
+		if grouped {
+			defer endGroup()
+		}
+	}
 	startX, endX := int(startXF), int(endXF)
 	startY, endY := int(startYF), int(endYF)
 	for ix := startX; ix <= endX; ix++ {
@@ -503,7 +523,9 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 			}
 			r.patternPage = &tileCTM
 			for obj := range pattern.CellContent.objects() {
-				obj = mergeGraphicObjectAlpha(obj, pattern.Alpha)
+				if !grouped {
+					obj = mergeGraphicObjectAlpha(obj, pattern.Alpha)
+				}
 				r.renderObject(ctx, &obj, pageH, nil, &tileCTM, true, tileClip)
 				if r.renderError != nil {
 					return

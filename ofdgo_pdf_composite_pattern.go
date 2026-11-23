@@ -30,6 +30,42 @@ type pdfCompositePattern struct {
 	box             Box
 	transferChecked bool
 	transferOpaque  bool
+	denseFold       *pdfDensePatternFold
+}
+
+// pdfDensePatternFold 缓存高密度平铺图案的单周期折叠像素
+type pdfDensePatternFold struct {
+	space    *pdfgo.ColorSpace
+	softMask bool
+	hasChan  bool
+	dpi      float64
+	scaleX   float64
+	scaleY   float64
+	width    int
+	height   int
+	pixels   []pdfCompositePixel
+	channels []uint8
+}
+
+// pdfCompositeOverPixel 对两个透明底合成像素执行标准源覆盖混合
+// 入参: dst 目标像素, src 源像素, components 颜色分量数
+func pdfCompositeOverPixel(dst *pdfCompositePixel, src pdfCompositePixel, components int) {
+	if src.Shape == 0 && src.Alpha == 0 {
+		return
+	}
+	if src.Alpha >= 1 {
+		dst.Values, dst.Alpha = src.Values, 1
+	} else if src.Alpha > 0 {
+		alpha := src.Alpha + dst.Alpha*(1-src.Alpha)
+		if alpha > 0 {
+			for i := 0; i < components; i++ {
+				dst.Values[i] = math.Max(0, math.Min(1, (src.Values[i]*src.Alpha+dst.Values[i]*dst.Alpha*(1-src.Alpha))/alpha))
+			}
+		}
+		dst.Alpha = alpha
+	}
+	dst.Effect += src.Effect * (1 - dst.Effect)
+	dst.Shape += src.Shape * (1 - dst.Shape)
 }
 
 // pdfShadingSourceKey 区分图案的使用几何及填充或描边
@@ -101,11 +137,22 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 	})
 	left, right := math.Ceil((area.X-source.BBox.XMax)/xstep), math.Floor((area.X+area.W-source.BBox.XMin)/xstep)
 	top, bottom := math.Ceil((area.Y-source.BBox.YMax)/ystep), math.Floor((area.Y+area.H-source.BBox.YMin)/ystep)
+	countX, countY := right-left+1, bottom-top+1
+	if finite(countX) && finite(countY) && (countX <= 0 || countY <= 0) {
+		result := c.acquirePixels(len(backdrop))
+		clear(result)
+		return result, nil
+	}
 	limit := float64(int(^uint(0) >> 1))
+	dense := !finite(countX) || !finite(countY) || countX*countY > pdfPatternDenseFoldLimit
 	for _, value := range []float64{left, right, top, bottom} {
 		if !finite(value) || value <= -limit || value >= limit {
-			return nil, fmt.Errorf("PDF tiling pattern instance range overflow")
+			dense = true
+			break
 		}
+	}
+	if dense {
+		return c.tilingDense(source, pattern, matrix, inverse, len(backdrop), space, channels)
 	}
 	result := c.acquirePixels(len(backdrop))
 	complete := false
@@ -132,8 +179,16 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 	disjoint := source.BBox.XMax-source.BBox.XMin <= xstep && source.BBox.YMax-source.BBox.YMin <= ystep
 	pixelStep := 25.4 / c.importer.rasterDPI
 	localInverse, _ := pattern.local.matrix.Inverse()
-	for row := int(top); row <= int(bottom); row++ {
-		for column := int(left); column <= int(right); column++ {
+	rowStart, rowEnd, rowStep := int(top), int(bottom), 1
+	if source.YStep < 0 {
+		rowStart, rowEnd, rowStep = int(bottom), int(top), -1
+	}
+	colStart, colEnd, colStep := int(left), int(right), 1
+	if source.XStep < 0 {
+		colStart, colEnd, colStep = int(right), int(left), -1
+	}
+	for row := rowStart; row != rowEnd+rowStep; row += rowStep {
+		for column := colStart; column != colEnd+colStep; column += colStep {
 			if err := c.importer.ctx.Err(); err != nil {
 				return nil, err
 			}
@@ -211,6 +266,169 @@ func (c *pdfCompositor) tiling(paint pdfgo.Paint, backdrop []pdfCompositePixel, 
 		pixel.Alpha = pixel.Effect
 	}
 	complete = true
+	return result, nil
+}
+
+// tilingDense 对超密集或亚像素步距平铺图案执行单周期折叠并在当前块查表填充
+// 入参: source 原图案, pattern 预解析单元, matrix 图案到页面矩阵, inverse 页面到图案逆矩阵, count 目标像素数, space 混合空间, channels 可选源通道输出
+// 返回: []pdfCompositePixel 源颜色及覆盖, error 绘制或取消错误
+func (c *pdfCompositor) tilingDense(source *pdfgo.TilingPattern, pattern *pdfCompositePattern, matrix, inverse pdfgo.Matrix, count int, space *pdfgo.ColorSpace, channels []uint8) ([]pdfCompositePixel, error) {
+	b := source.BBox
+	bw, bh := b.XMax-b.XMin, b.YMax-b.YMin
+	xstep, ystep := math.Abs(source.XStep), math.Abs(source.YStep)
+	if bw <= 0 || bh <= 0 || xstep <= 0 || ystep <= 0 {
+		result := c.acquirePixels(count)
+		clear(result)
+		return result, nil
+	}
+	pixelStep := 25.4 / c.importer.rasterDPI
+	const maxDim = 512.0
+	spanW, spanH := math.Max(bw, xstep), math.Max(bh, ystep)
+	sx := math.Hypot(matrix[0], matrix[1]) / pixelStep
+	sy := math.Hypot(matrix[2], matrix[3]) / pixelStep
+	if !finite(sx) || sx <= 0 {
+		sx = 1
+	}
+	if !finite(sy) || sy <= 0 {
+		sy = 1
+	}
+	if spanW*sx > maxDim {
+		sx = maxDim / spanW
+	}
+	if spanH*sy > maxDim {
+		sy = maxDim / spanH
+	}
+	fold := pattern.denseFold
+	if fold == nil || !fold.space.Equal(space) || fold.softMask != c.softMask || fold.dpi != c.importer.rasterDPI || fold.scaleX != sx || fold.scaleY != sy || channels != nil && !fold.hasChan {
+		srcW := max(1, int(math.Ceil(spanW*sx)))
+		srcH := max(1, int(math.Ceil(spanH*sy)))
+		cellW, cellH := float64(srcW)*pixelStep, float64(srcH)*pixelStep
+		local := pattern.local
+		local.matrix = pdfgo.Matrix{cellW / spanW, 0, 0, -cellH / spanH, -b.XMin * cellW / spanW, b.YMax * cellH / spanH}
+		local.pageWidth, local.pageHeight = cellW, cellH
+		local.compositeCache = nil
+		localInverse, ok := local.matrix.Inverse()
+		if !ok {
+			return nil, fmt.Errorf("invalid PDF dense pattern matrix")
+		}
+		srcPixels := make([]pdfCompositePixel, srcW*srcH)
+		var srcChannels []uint8
+		if channels != nil {
+			srcChannels = make([]uint8, srcW*srcH)
+		}
+		cell := pdfCompositor{importer: &local, box: Box{W: cellW, H: cellH}, width: srcW, height: srcH, inverse: localInverse, cache: local.compositingCache(), scratch: &pdfCompositeScratch{}, origins: c.origins, masks: map[*pdfgo.SoftMask][]float64{}, softMask: c.softMask, channels: srcChannels}
+		err := cell.draw(pattern.nodes, srcPixels, space)
+		cell.releaseMasks()
+		if err != nil {
+			return nil, err
+		}
+		for i := range srcPixels {
+			srcPixels[i].Alpha = srcPixels[i].Effect
+		}
+		dx := max(1, min(srcW, int(math.Round(xstep*float64(srcW)/spanW))))
+		dy := max(1, min(srcH, int(math.Round(ystep*float64(srcH)/spanH))))
+		components := space.Components()
+		band := srcPixels
+		bandChannels := srcChannels
+		if bh > ystep && dy < srcH {
+			band = make([]pdfCompositePixel, srcW*dy)
+			if srcChannels != nil {
+				bandChannels = make([]uint8, srcW*dy)
+			}
+			rowCount := (srcH + dy - 1) / dy
+			start, end, step := 0, rowCount-1, 1
+			if source.YStep < 0 {
+				start, end, step = rowCount-1, 0, -1
+			}
+			for k := start; k != end+step; k += step {
+				if err := c.importer.ctx.Err(); err != nil {
+					return nil, err
+				}
+				y0 := k * dy
+				for y := 0; y < dy && y0+y < srcH; y++ {
+					for x := range srcW {
+						si, di := (y0+y)*srcW+x, y*srcW+x
+						pdfCompositeOverPixel(&band[di], srcPixels[si], components)
+						if bandChannels != nil && srcPixels[si].Shape != 0 {
+							bandChannels[di] = srcChannels[si]
+						}
+					}
+				}
+			}
+		}
+		folded := band
+		foldedChannels := bandChannels
+		if bw > xstep && dx < srcW {
+			folded = make([]pdfCompositePixel, dx*dy)
+			if bandChannels != nil {
+				foldedChannels = make([]uint8, dx*dy)
+			}
+			colCount := (srcW + dx - 1) / dx
+			start, end, step := colCount-1, 0, -1
+			if source.XStep < 0 {
+				start, end, step = 0, colCount-1, 1
+			}
+			for k := start; k != end+step; k += step {
+				if err := c.importer.ctx.Err(); err != nil {
+					return nil, err
+				}
+				x0 := k * dx
+				for y := range dy {
+					for x := 0; x < dx && x0+x < srcW; x++ {
+						si, di := y*srcW+x0+x, y*dx+x
+						pdfCompositeOverPixel(&folded[di], band[si], components)
+						if foldedChannels != nil && band[si].Shape != 0 {
+							foldedChannels[di] = bandChannels[si]
+						}
+					}
+				}
+			}
+		} else if srcW != dx || len(folded) != dx*dy {
+			cropped := make([]pdfCompositePixel, dx*dy)
+			var croppedChannels []uint8
+			if foldedChannels != nil {
+				croppedChannels = make([]uint8, dx*dy)
+			}
+			for y := range dy {
+				for x := range dx {
+					cropped[y*dx+x] = folded[y*srcW+x]
+					if croppedChannels != nil {
+						croppedChannels[y*dx+x] = foldedChannels[y*srcW+x]
+					}
+				}
+			}
+			folded, foldedChannels = cropped, croppedChannels
+		}
+		fold = &pdfDensePatternFold{space: space, softMask: c.softMask, hasChan: channels != nil, dpi: c.importer.rasterDPI, scaleX: sx, scaleY: sy, width: dx, height: dy, pixels: folded, channels: foldedChannels}
+		pattern.denseFold = fold
+	}
+	result := c.acquirePixels(count)
+	for y := range c.height {
+		if err := c.importer.ctx.Err(); err != nil {
+			c.releasePixels(result)
+			return nil, err
+		}
+		py := c.box.Y + (float64(y)+.5)*pixelStep
+		for x := range c.width {
+			pt := inverse.Apply(pdfgo.Point{X: c.box.X + (float64(x)+.5)*pixelStep, Y: py})
+			fx := math.Mod(pt.X-b.XMin, xstep)
+			if fx < 0 {
+				fx += xstep
+			}
+			fy := math.Mod(b.YMax-pt.Y, ystep)
+			if fy < 0 {
+				fy += ystep
+			}
+			tx := max(0, min(fold.width-1, int(fx/xstep*float64(fold.width))))
+			ty := max(0, min(fold.height-1, int(fy/ystep*float64(fold.height))))
+			index := y*c.width + x
+			fi := ty*fold.width + tx
+			result[index] = fold.pixels[fi]
+			if channels != nil && fold.pixels[fi].Shape != 0 {
+				channels[index] = fold.channels[fi]
+			}
+		}
+	}
 	return result, nil
 }
 

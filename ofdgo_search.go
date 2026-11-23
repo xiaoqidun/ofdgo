@@ -638,22 +638,197 @@ func (r *Renderer) searchTextParallel(ctx context.Context, pages []Page, indices
 	return ctx.Err()
 }
 
-// writeTo 输出非空文本对象，可在首个对象前分隔上一页
+// textRunGeometry 保存文本对象首尾端点的页面坐标、阅读方向及行高
+type textRunGeometry struct {
+	valid       bool
+	fromSpans   bool
+	startX      float64
+	startY      float64
+	endX        float64
+	endY        float64
+	startDirX   float64
+	startDirY   float64
+	endDirX     float64
+	endDirY     float64
+	startH      float64
+	endH        float64
+	startBoxTop float64
+	startBoxBot float64
+	endBoxTop   float64
+	endBoxBot   float64
+}
+
+// isCJKTextRune 判断字符是否属于中日韩文字或全角标点
+// 入参: r 字符
+// 返回: bool 是否为中日韩或全角字符
+func isCJKTextRune(r rune) bool {
+	return unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r) || unicode.Is(unicode.Hangul, r) || r >= 0x3000 && r <= 0x303F || r >= 0xFF00 && r <= 0xFFEF
+}
+
+// extractTextRunGeometry 提取文本对象首尾端点定位及方向，无有效定位时返回valid为false
+// 入参: run 文本对象
+// 返回: textRunGeometry 文本几何定位信息
+func extractTextRunGeometry(run TextRun) textRunGeometry {
+	spanEdge := func(span TextSpan) (startX, startY, endX, endY, ux, uy, h float64, ok bool) {
+		m := span.Matrix
+		a, b, c, d, e, f := m[0], m[1], m[2], m[3], m[4], m[5]
+		h = math.Hypot(c, d)
+		if !finite(h) || h <= 0 {
+			return 0, 0, 0, 0, 0, 0, 0, false
+		}
+		w := math.Hypot(a, b)
+		if !finite(w) {
+			return 0, 0, 0, 0, 0, 0, 0, false
+		}
+		if w > 1e-6 {
+			ux, uy = a/w, b/w
+		} else {
+			ux, uy = d/h, -c/h
+		}
+		startX, startY = e+c/2, f+d/2
+		endX, endY = e+a+c/2, f+b+d/2
+		if !finite(startX) || !finite(startY) || !finite(endX) || !finite(endY) {
+			return 0, 0, 0, 0, 0, 0, 0, false
+		}
+		return startX, startY, endX, endY, ux, uy, h, true
+	}
+	if len(run.Spans) > 0 {
+		var geom textRunGeometry
+		for _, span := range run.Spans {
+			sx, sy, _, _, ux, uy, h, ok := spanEdge(span)
+			if ok {
+				geom.startX, geom.startY, geom.startDirX, geom.startDirY, geom.startH = sx, sy, ux, uy, h
+				geom.valid, geom.fromSpans = true, true
+				break
+			}
+		}
+		if geom.valid {
+			for i := len(run.Spans) - 1; i >= 0; i-- {
+				_, _, ex, ey, ux, uy, h, ok := spanEdge(run.Spans[i])
+				if ok {
+					geom.endX, geom.endY, geom.endDirX, geom.endDirY, geom.endH = ex, ey, ux, uy, h
+					return geom
+				}
+			}
+		}
+	}
+	var first, last Box
+	hasBox := false
+	maxH := 0.0
+	for _, box := range run.Boxes {
+		if box.W > 0 && box.H > 0 {
+			if !hasBox {
+				first = box
+				hasBox = true
+			}
+			last = box
+			maxH = math.Max(maxH, box.H)
+		}
+	}
+	if !hasBox {
+		return textRunGeometry{}
+	}
+	return textRunGeometry{
+		valid:       true,
+		startX:      first.X,
+		startY:      first.Y + first.H/2,
+		endX:        last.X + last.W,
+		endY:        last.Y + last.H/2,
+		startDirX:   1,
+		endDirX:     1,
+		startH:      maxH,
+		endH:        maxH,
+		startBoxTop: first.Y,
+		startBoxBot: first.Y + first.H,
+		endBoxTop:   last.Y,
+		endBoxBot:   last.Y + last.H,
+	}
+}
+
+// textRunSeparator 依据相邻文本对象的基线方向与空间距离计算拼接分隔符
+// 入参: prevText 前文本, prev 前几何定位, currText 后文本, curr 后几何定位
+// 返回: string 空串、空格或换行符
+func textRunSeparator(prevText string, prev textRunGeometry, currText string, curr textRunGeometry) string {
+	if !prev.valid || !curr.valid {
+		return "\n"
+	}
+	if strings.HasSuffix(prevText, "\n") || strings.HasPrefix(currText, "\n") {
+		return ""
+	}
+	if prev.endDirX*curr.startDirX+prev.endDirY*curr.startDirY < 0.9 {
+		return "\n"
+	}
+	refH := math.Min(prev.endH, curr.startH)
+	maxH := math.Max(prev.endH, curr.startH)
+	if refH <= 0 || maxH > refH*3 {
+		return "\n"
+	}
+	ux, uy := prev.endDirX, prev.endDirY
+	dx, dy := curr.startX-prev.endX, curr.startY-prev.endY
+	along := dx*ux + dy*uy
+	perp := math.Abs(-dx*uy + dy*ux)
+	if prev.fromSpans || curr.fromSpans {
+		if perp > maxH*0.45 {
+			return "\n"
+		}
+	} else {
+		sameBand := !(prev.endBoxBot < curr.startBoxTop-0.15*maxH || curr.startBoxBot < prev.endBoxTop-0.15*maxH)
+		if !sameBand && perp > maxH*0.45 {
+			return "\n"
+		}
+	}
+	if along < -refH*0.35 || along > maxH*2.5 {
+		return "\n"
+	}
+	prevLast, _ := utf8.DecodeLastRuneInString(prevText)
+	currFirst, _ := utf8.DecodeRuneInString(currText)
+	if unicode.IsSpace(prevLast) || unicode.IsSpace(currFirst) {
+		return ""
+	}
+	cjk := isCJKTextRune(prevLast) || isCJKTextRune(currFirst)
+	threshold := refH * 0.32
+	if prev.fromSpans && curr.fromSpans {
+		threshold = refH * 0.18
+		if cjk {
+			threshold = refH * 0.5
+		}
+	} else if cjk {
+		threshold = refH * 0.65
+	}
+	if along >= threshold {
+		return " "
+	}
+	return ""
+}
+
+// writeTo 按空间定位智能重组同行相邻文本对象，无定位信息时回退逐对象换行
 // 入参: writer 输出流, separator 是否需要前导换行
 // 返回: int64 已写字节数, error 写入错误
 func (p *PageText) writeTo(writer io.Writer, separator bool) (int64, error) {
 	var written int64
+	var prevText string
+	var prevGeom textRunGeometry
+	hasPrev := false
 	for _, run := range p.Runs {
 		if run.Text == "" {
 			continue
 		}
-		if separator {
-			n, err := io.WriteString(writer, "\n")
+		currGeom := extractTextRunGeometry(run)
+		sep := ""
+		if !hasPrev {
+			if separator {
+				sep = "\n"
+			}
+		} else {
+			sep = textRunSeparator(prevText, prevGeom, run.Text, currGeom)
+		}
+		if sep != "" {
+			n, err := io.WriteString(writer, sep)
 			written += int64(n)
 			if err != nil {
 				return written, err
 			}
-			if n != 1 {
+			if n != len(sep) {
 				return written, io.ErrShortWrite
 			}
 		}
@@ -665,7 +840,9 @@ func (p *PageText) writeTo(writer io.Writer, separator bool) (int64, error) {
 		if n != len(run.Text) {
 			return written, io.ErrShortWrite
 		}
-		separator = true
+		prevText = run.Text
+		prevGeom = currGeom
+		hasPrev = true
 	}
 	return written, nil
 }
@@ -843,11 +1020,6 @@ func (r *Renderer) extractFastPlainPageText(ctx context.Context, page *PageConte
 		case "TextObject", "Text":
 			t := obj.TextObject
 			if t.Visible != nil && !*t.Visible {
-				return true
-			}
-			shouldFill := t.Fill == nil || *t.Fill
-			shouldStroke := t.Stroke != nil && *t.Stroke
-			if !shouldFill && !shouldStroke {
 				return true
 			}
 			for _, tc := range t.TextCode {

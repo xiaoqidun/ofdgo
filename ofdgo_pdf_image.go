@@ -30,10 +30,15 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
-// PDF原生有损照片防膨胀JPEG编码参数
+// PDF原生有损照片防膨胀JPEG编码与超大图像降采样护栏参数
 const (
-	pdfPhotoJPEGQuality = 92
-	pdfPhotoMinPixels   = 65536
+	pdfPhotoJPEGQuality    = 92
+	pdfPhotoMinPixels      = 65536
+	pdfMaxSafeImagePixels  = 32 << 20
+	pdfGuardTargetPixels   = 16 << 20
+	pdfExtremeDPIPixels    = 16 << 20
+	pdfExtremeDPIThreshold = 1200.0
+	pdfGuardMinDPI         = 600.0
 )
 
 // pdfImageKey 区分图像引用或流、渲染意图、原生输出空间、模板填充色及采样尺寸
@@ -282,12 +287,23 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	if err != nil {
 		return err
 	}
+	effW, effH := p.imageEffectiveDimensions(source)
+	guarded := false
 	if !source.ImageMask && p.compression.Mode == CompressionLossy {
 		m := p.matrix.Mul(mark.Matrix)
 		scaleBoost := max(1.0, p.imageScaleBoost)
 		key.size = compressionImageSize(math.Hypot(m[0], m[1])*scaleBoost, math.Hypot(m[2], m[3])*scaleBoost, p.compression.ImageDPI())
-		if key.size.X >= source.Width || key.size.Y >= source.Height {
+		if key.size.X >= effW || key.size.Y >= effH {
 			key.size = image.Point{}
+		}
+	}
+	if p.warning != nil {
+		if guardSize := p.guardImageSize(effW, effH, mark.Matrix); guardSize != (image.Point{}) {
+			if key.size == (image.Point{}) || int64(guardSize.X)*int64(guardSize.Y) < int64(key.size.X)*int64(key.size.Y) {
+				key.size = guardSize
+			}
+			guarded = true
+			p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: fmt.Sprintf("oversized PDF image %dx%d downsampled to %dx%d", effW, effH, key.size.X, key.size.Y)})
 		}
 	}
 	if source.ImageMask {
@@ -361,12 +377,14 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 					decoded, encodeErr = pdfgo.ResizeImage(p.ctx, decoded, key.size)
 				}
 			} else {
-				data, encodeErr = source.JBIG2FileContext(p.ctx)
-				if encodeErr == nil && len(data) == 0 {
-					data, encodeErr = source.JPEGFileContext(p.ctx)
-				}
-				if encodeErr == nil && len(data) == 0 && !source.ImageMask && p.compression.Mode != CompressionLossy {
-					data, encodeErr = codecpdf.EncodeCMYKTIFF(p.ctx, source)
+				if !guarded {
+					data, encodeErr = source.JBIG2FileContext(p.ctx)
+					if encodeErr == nil && len(data) == 0 {
+						data, encodeErr = source.JPEGFileContext(p.ctx)
+					}
+					if encodeErr == nil && len(data) == 0 && !source.ImageMask && p.compression.Mode != CompressionLossy {
+						data, encodeErr = codecpdf.EncodeCMYKTIFF(p.ctx, source)
+					}
 				}
 				if encodeErr == nil && len(data) == 0 {
 					preferJPEG, encodeErr = p.preferLossyPhotoJPEG(source, key.process)
@@ -451,10 +469,90 @@ func (p *pdfImporter) appendImage(mark pdfgo.ImageMark, id string) error {
 	if err != nil {
 		return err
 	}
-	object := ImageObject{Boundary: pdfBoundary(box), ResourceID: id, CTM: pdfNumbers(m[0], m[1], m[2], m[3], m[4]-box.X, m[5]-box.Y), Alpha: &alpha, Clips: clips}
+	var interpolate *bool
+	if mark.Image.Interpolate {
+		enabled := true
+		interpolate = &enabled
+	}
+	object := ImageObject{Boundary: pdfBoundary(box), ResourceID: id, CTM: pdfNumbers(m[0], m[1], m[2], m[3], m[4]-box.X, m[5]-box.Y), Alpha: &alpha, Clips: clips, Interpolate: interpolate}
 	p.appendSequenceObject(GraphicObject{Type: "ImageObject", ImageObject: object}, mark.Sequence)
 	p.report.ImageObjects++
 	return nil
+}
+
+// imageEffectiveDimensions 计算图像及其外部遮罩流合并后的有效像素尺寸
+// 入参: source PDF源图像
+// 返回: int 有效宽度, int 有效高度
+func (p *pdfImporter) imageEffectiveDimensions(source *pdfgo.Image) (int, int) {
+	if source == nil {
+		return 0, 0
+	}
+	w, h := source.Width, source.Height
+	for _, maskObj := range [2]pdfgo.Object{source.SoftMask, source.Mask} {
+		if maskObj == nil || p.reader == nil {
+			continue
+		}
+		resolved, err := p.reader.Resolve(maskObj)
+		if err != nil {
+			continue
+		}
+		stream, ok := resolved.(*pdfgo.Stream)
+		if !ok || stream == nil || stream.Dictionary == nil {
+			continue
+		}
+		mwObj, _ := p.reader.Resolve(stream.Dictionary["Width"])
+		mhObj, _ := p.reader.Resolve(stream.Dictionary["Height"])
+		if mw, ok := mwObj.(pdfgo.Integer); ok && int(mw) > w {
+			w = int(mw)
+		}
+		if mh, ok := mhObj.(pdfgo.Integer); ok && int(mh) > h {
+			h = int(mh)
+		}
+	}
+	return w, h
+}
+
+// guardImageSize 对像素总量超限或等效DPI极高的巨图计算安全降采样尺寸
+// 入参: effW 有效宽度, effH 有效高度, markMatrix 图像页面变换矩阵
+// 返回: image.Point 降采样目标尺寸，无需护栏时返回零值
+func (p *pdfImporter) guardImageSize(effW, effH int, markMatrix pdfgo.Matrix) image.Point {
+	if effW <= 0 || effH <= 0 {
+		return image.Point{}
+	}
+	effPixels := uint64(effW) * uint64(effH)
+	m := p.matrix.Mul(markMatrix)
+	scaleBoost := max(1.0, p.imageScaleBoost)
+	drawWMM := math.Hypot(m[0], m[1]) * scaleBoost
+	drawHMM := math.Hypot(m[2], m[3]) * scaleBoost
+	effDPI := 0.0
+	if drawWMM > 0 && drawHMM > 0 {
+		effDPI = math.Max(float64(effW)/(drawWMM/25.4), float64(effH)/(drawHMM/25.4))
+	}
+	if effPixels <= pdfMaxSafeImagePixels && (effPixels <= pdfExtremeDPIPixels || effDPI <= pdfExtremeDPIThreshold) {
+		return image.Point{}
+	}
+	gw, gh := effW, effH
+	if drawWMM > 0 && drawHMM > 0 {
+		targetDPI := math.Max(p.rasterDPI, pdfGuardMinDPI)
+		tw := math.Ceil(drawWMM * targetDPI / 25.4)
+		th := math.Ceil(drawHMM * targetDPI / 25.4)
+		if finite(tw) && finite(th) && tw > 0 && th > 0 {
+			scale := math.Max(tw/float64(effW), th/float64(effH))
+			if scale < 1 {
+				gw = max(1, int(math.Ceil(float64(effW)*scale)))
+				gh = max(1, int(math.Ceil(float64(effH)*scale)))
+			}
+		}
+	}
+	if uint64(gw)*uint64(gh) > pdfGuardTargetPixels {
+		scale := math.Sqrt(float64(pdfGuardTargetPixels) / float64(uint64(gw)*uint64(gh)))
+		gw = max(1, int(math.Floor(float64(gw)*scale)))
+		gh = max(1, int(math.Floor(float64(gh)*scale)))
+	}
+	if gw >= effW && gh >= effH {
+		return image.Point{}
+	}
+	return image.Point{X: gw, Y: gh}
 }
 
 // preferLossyPhotoJPEG 判断默认导入模式下是否将原生不透明8位有损照片编码为高质量JPEG

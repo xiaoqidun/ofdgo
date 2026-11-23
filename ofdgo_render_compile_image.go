@@ -111,7 +111,7 @@ func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) er
 		}
 		bounds := img.Bounds()
 		placed := matrix.Multiply(Matrix{a: 1 / float64(bounds.Dx()), d: 1 / float64(bounds.Dy())}).Multiply(TranslationMatrix(-float64(bounds.Min.X), -float64(bounds.Min.Y)))
-		if err := c.addImage(img, placed, clip); err != nil {
+		if err := c.addImage(img, placed, clip, object.Interpolate); err != nil {
 			return err
 		}
 	}
@@ -127,11 +127,11 @@ func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) er
 	return nil
 }
 
-// addImage 保留图像资源与页面坐标裁剪，延迟像素采样
-// 入参: img 图像, matrix 像素到页面矩阵, clip 页面裁剪
+// addImage 保留图像资源、插值开关与页面坐标裁剪，延迟像素采样
+// 入参: img 图像, matrix 像素到页面矩阵, clip 页面裁剪, interpolate 可选插值开关
 // 返回: error 裁剪转换错误
-func (c *semanticCompiler) addImage(img image.Image, matrix Matrix, clip *GeometryPath) error {
-	command := RasterCommand{Image: img, Transform: RasterMatrix(matrix.Values())}
+func (c *semanticCompiler) addImage(img image.Image, matrix Matrix, clip *GeometryPath, interpolate *bool) error {
+	command := RasterCommand{Image: img, Interpolate: interpolate, Transform: RasterMatrix(matrix.Values())}
 	if clip != nil {
 		if box, ok := geometryRectangleBounds(*clip); ok {
 			bounds := img.Bounds()
@@ -286,5 +286,5 @@ func (c *semanticCompiler) stampImage(img image.Image, stamp Stamp) error {
 	}
 	bounds := img.Bounds()
 	matrix := TranslationMatrix(box.X, box.Y).Multiply(Matrix{a: box.W / float64(bounds.Dx()), d: box.H / float64(bounds.Dy())}).Multiply(TranslationMatrix(-float64(bounds.Min.X), -float64(bounds.Min.Y)))
-	return c.addImage(img, matrix, clip)
+	return c.addImage(img, matrix, clip, nil)
 }

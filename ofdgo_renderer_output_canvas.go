@@ -265,7 +265,7 @@ func (CanvasBackend) RenderSVG(ctx context.Context, r *Renderer, page *PageConte
 			return SVGResources{}, err
 		}
 		buffer := bufio.NewWriter(writer)
-		renderer := &svgResourceRenderer{SVG: svg.New(buffer, box.W, box.H, nil), renderer: r, writer: buffer, seen: make(map[string]bool), embeddedFonts: true, mergePaths: true, precision: r.svgPrecision}
+		renderer := &svgResourceRenderer{SVG: svg.New(buffer, box.W, box.H, nil), renderer: r, writer: buffer, seen: make(map[string]bool), embeddedFonts: true, pathMerge: r.SVGPathMerge(), precision: r.svgPrecision}
 		io.WriteString(buffer, svgCreatorMetadata)
 		io.WriteString(buffer, `<g style="image-orientation:none">`)
 		if err := r.renderCanvasPageToContext(canvas.NewContext(renderer), page, !r.transparentBackground); err != nil {
@@ -807,8 +807,12 @@ func (r *epsImageRenderer) RenderImage(img image.Image, matrix canvas.Matrix) {
 	if r.err = r.ctx.Err(); r.err != nil {
 		return
 	}
+	interpolate := true
+	if width <= 8 && height <= 8 && math.Hypot(matrix[0][0], matrix[1][0])*codecpdf.PtPerMM >= 4 && math.Hypot(matrix[0][1], matrix[1][1])*codecpdf.PtPerMM >= 4 {
+		interpolate = false
+	}
 	m := matrix.Scale(float64(width), float64(height))
-	_, r.err = fmt.Fprintf(r.writer, " gsave /DeviceRGB setcolorspace [%s %s %s %s %s %s] concat <</ImageType 1 /BitsPerComponent 8 /Decode [0 1 0 1 0 1] /Interpolate true /Width %d /Height %d /ImageMatrix [%d 0 0 -%d 0 %d] /DataSource currentfile /ASCII85Decode filter /%s filter>>image\n", ofdNumber(m[0][0]), ofdNumber(m[1][0]), ofdNumber(m[0][1]), ofdNumber(m[1][1]), ofdNumber(m[0][2]), ofdNumber(m[1][2]), width, height, width, height, height, filter)
+	_, r.err = fmt.Fprintf(r.writer, " gsave /DeviceRGB setcolorspace [%s %s %s %s %s %s] concat <</ImageType 1 /BitsPerComponent 8 /Decode [0 1 0 1 0 1] /Interpolate %t /Width %d /Height %d /ImageMatrix [%d 0 0 -%d 0 %d] /DataSource currentfile /ASCII85Decode filter /%s filter>>image\n", ofdNumber(m[0][0]), ofdNumber(m[1][0]), ofdNumber(m[0][1]), ofdNumber(m[1][1]), ofdNumber(m[0][2]), ofdNumber(m[1][2]), interpolate, width, height, width, height, height, filter)
 	if r.err != nil {
 		return
 	}

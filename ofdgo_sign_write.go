@@ -43,6 +43,9 @@ const (
 // ErrSignatureDependency 表示移除操作会改变保留签名或其他版本使用的入口和保护文件
 var ErrSignatureDependency = errors.New("signature dependency conflict")
 
+// ErrOFDEntryProtected 表示OFD.xml入口已被签名保护，修改入口将导致对应签名失效
+var ErrOFDEntryProtected = fmt.Errorf("%w: OFD.xml protected", ErrSignatureDependency)
+
 // SignatureWriteMode 签署方式
 type SignatureWriteMode uint8
 
@@ -514,7 +517,7 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 			}
 			if listShared {
 				if protected["OFD.xml"] || currentProtected["OFD.xml"] {
-					return fmt.Errorf("%w: cannot isolate shared signature list while OFD.xml is protected", ErrSignatureDependency)
+					return fmt.Errorf("%w: cannot isolate shared signature list while OFD.xml is protected", ErrOFDEntryProtected)
 				}
 				replacedListFrom = listPath
 				listPath = signatureWriteAvailableInView(r, overlay, listPath)
@@ -1442,7 +1445,7 @@ func (e *Editor) PrepareDocumentSignaturesContext(ctx context.Context) error {
 		return err
 	}
 	if protected["OFD.xml"] {
-		return fmt.Errorf("%w: protected file OFD.xml", ErrSignatureDependency)
+		return fmt.Errorf("%w: protected file OFD.xml", ErrOFDEntryProtected)
 	}
 	ofdData, err := reader.readFileViewContext(ctx, "OFD.xml")
 	if err != nil {
@@ -1496,6 +1499,31 @@ func (e *Editor) ClearSignatures() error {
 // 返回: error 依赖、读取或取消错误
 func (e *Editor) ClearSignaturesContext(ctx context.Context) error {
 	return e.removeSignatures(ctx, "")
+}
+
+// OFDEntrySignatureProtected 判断包内是否存在签名保护OFD.xml入口，不要求证书、私钥或重算摘要
+// 入参: ctx 取消上下文，nil使用后台上下文
+// 返回: bool 是否受签名保护, error 读取、结构或取消错误
+func (r *Reader) OFDEntrySignatureProtected(ctx context.Context) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if r == nil {
+		return false, fmt.Errorf("nil signature reader")
+	}
+	if r.ofd == nil {
+		if err := r.initRootContext(ctx); err != nil {
+			return false, err
+		}
+	}
+	protected, _, err := r.signatureRemovalProtected(ctx, "", nil, false)
+	if err != nil {
+		return false, err
+	}
+	return protected["OFD.xml"], nil
 }
 
 // SignTo 从阅读器包内容创建独立快照，完成签署和回验后写出
@@ -1820,6 +1848,9 @@ func (e *Editor) removeSignatures(ctx context.Context, id string) error {
 			return err
 		}
 		if !same {
+			if file == "OFD.xml" {
+				return fmt.Errorf("%w: protected file %s", ErrOFDEntryProtected, file)
+			}
 			return fmt.Errorf("%w: protected file %s", ErrSignatureDependency, file)
 		}
 	}

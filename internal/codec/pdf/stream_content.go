@@ -34,7 +34,31 @@ import (
 type ContentResourceSink interface {
 	FontResource(font *canvas.Font, vertical bool) (pdfgo.Name, pdfgo.Reference, *FontEntry)
 	OpacityGS(alpha uint8) (pdfgo.Name, pdfgo.Reference)
+	OpacityPairGS(fillAlpha, strokeAlpha uint8) (pdfgo.Name, pdfgo.Reference)
+	StandardType1Font(baseFont string) (pdfgo.Name, pdfgo.Reference)
 	ShadingPattern(gradient canvas.Gradient, m canvas.Matrix) (pdfgo.Name, pdfgo.Reference)
+}
+
+// TextStrokeStyle 描述PDF原生文本渲染模式与描边样式，线宽与虚线单位均为毫米
+type TextStrokeStyle struct {
+	// RenderMode 指定PDF文本渲染模式(Tr)，常用1描边、2填充并描边、3不可见
+	RenderMode int
+	// FillAlpha 指定HasFill为真时的填充透明度(0-255)
+	FillAlpha uint8
+	// HasFill 指示是否包含填充绘制，供RenderMode为2时区分双透明度状态
+	HasFill bool
+	// StrokeColor 指定预乘RGBA描边颜色
+	StrokeColor color.RGBA
+	// LineWidth 指定描边线宽，单位毫米
+	LineWidth float64
+	// LineCap 指定线端样式
+	LineCap canvas.Capper
+	// LineJoin 指定折角连接样式
+	LineJoin canvas.Joiner
+	// DashOffset 指定虚线起始偏移，单位毫米
+	DashOffset float64
+	// Dashes 指定虚线线段长度列表，单位毫米
+	Dashes []float64
 }
 
 // ContentResources 记录单个页面或Form内容流实际引用的PDF资源集合
@@ -551,9 +575,32 @@ func (b *ContentBuilder) RenderText(text *canvas.Text, m canvas.Matrix, onSubCan
 }
 
 // WrapFauxBold 为指定起始span之后的文字区间原地注入Tr=2填充并细描边状态
-// 入参: firstSpan 起始span序号, lineWidth 描边线宽, fillColor 填充颜色
+// 入参: firstSpan 起始span序号, lineWidth 描边线宽(毫米), fillColor 填充颜色
 func (b *ContentBuilder) WrapFauxBold(firstSpan int, lineWidth float64, fillColor color.RGBA) {
-	if firstSpan < 0 || firstSpan >= len(b.spanStarts) || lineWidth <= 0 {
+	if lineWidth <= 0 {
+		return
+	}
+	b.WrapTextStyle(firstSpan, TextStrokeStyle{
+		RenderMode:  2,
+		FillAlpha:   fillColor.A,
+		HasFill:     true,
+		StrokeColor: fillColor,
+		LineWidth:   lineWidth,
+		LineCap:     canvas.RoundCap,
+		LineJoin:    canvas.RoundJoin,
+	})
+}
+
+// WrapRenderMode 为指定起始span之后的文字区间原地注入指定PDF文本渲染模式并安全恢复0 Tr
+// 入参: firstSpan 起始span序号, mode 文本渲染模式编号
+func (b *ContentBuilder) WrapRenderMode(firstSpan int, mode int) {
+	b.WrapTextStyle(firstSpan, TextStrokeStyle{RenderMode: mode})
+}
+
+// WrapTextStyle 为指定起始span之后的文字区间原地包裹文本渲染模式与描边图形状态并安全恢复0 Tr
+// 入参: firstSpan 起始span序号, style 文本渲染模式与描边样式
+func (b *ContentBuilder) WrapTextStyle(firstSpan int, style TextStrokeStyle) {
+	if firstSpan < 0 || firstSpan >= len(b.spanStarts) || style.RenderMode < 0 || style.RenderMode > 7 {
 		return
 	}
 	b.EndText()
@@ -562,24 +609,145 @@ func (b *ContentBuilder) WrapFauxBold(firstSpan int, lineWidth float64, fillColo
 		return
 	}
 	var prefix []byte
-	prefix = append(prefix, " q "...)
-	prefix = appendCompactFloatBytes(prefix, lineWidth, 4)
-	prefix = append(prefix, " w 1 j 1 J [] 0 d "...)
-	if fillColor.R == fillColor.G && fillColor.G == fillColor.B {
-		prefix = appendCompactFloatBytes(prefix, float64(fillColor.R)/255, 4)
-		prefix = append(prefix, " G"...)
-	} else {
-		prefix = appendCompactFloatBytes(prefix, float64(fillColor.R)/255, 4)
+	prefix = append(prefix, " q"...)
+	var overrideGS []byte
+	if style.RenderMode == 1 || style.RenderMode == 2 {
 		prefix = append(prefix, ' ')
-		prefix = appendCompactFloatBytes(prefix, float64(fillColor.G)/255, 4)
-		prefix = append(prefix, ' ')
-		prefix = appendCompactFloatBytes(prefix, float64(fillColor.B)/255, 4)
-		prefix = append(prefix, " RG"...)
+		prefix = appendCompactFloatBytes(prefix, style.LineWidth, 4)
+		prefix = append(prefix, " w"...)
+		lineCap := 0
+		switch style.LineCap.(type) {
+		case canvas.RoundCapper:
+			lineCap = 1
+		case canvas.SquareCapper:
+			lineCap = 2
+		}
+		prefix = append(prefix, ' ', byte('0'+lineCap), ' ', 'J')
+		lineJoin := 0
+		miterLimit := 10.0
+		switch j := style.LineJoin.(type) {
+		case canvas.RoundJoiner:
+			lineJoin = 1
+		case canvas.BevelJoiner:
+			lineJoin = 2
+		case canvas.MiterJoiner:
+			lineJoin = 0
+			if !math.IsNaN(j.Limit) {
+				miterLimit = j.Limit
+			}
+		}
+		prefix = append(prefix, ' ', byte('0'+lineJoin), ' ', 'j')
+		if lineJoin == 0 {
+			prefix = append(prefix, ' ')
+			prefix = appendCompactFloatBytes(prefix, miterLimit, 4)
+			prefix = append(prefix, " M"...)
+		}
+		arr := style.Dashes
+		if len(arr)%2 == 1 {
+			arr = append(slices.Clone(arr), arr...)
+		}
+		dashPhase := style.DashOffset
+		if dashPhase < 0 && len(arr) > 0 {
+			total := 0.0
+			for _, d := range arr {
+				total += d
+			}
+			if total > 0 {
+				for dashPhase < 0 {
+					dashPhase += total
+				}
+			}
+		}
+		if len(arr) == 0 {
+			prefix = append(prefix, " [] 0 d"...)
+		} else {
+			prefix = append(prefix, " ["...)
+			for i, d := range arr {
+				if i > 0 {
+					prefix = append(prefix, ' ')
+				}
+				prefix = appendCompactFloatBytes(prefix, d, 4)
+			}
+			prefix = append(prefix, "] "...)
+			prefix = appendCompactFloatBytes(prefix, dashPhase, 4)
+			prefix = append(prefix, " d"...)
+		}
+		c := style.StrokeColor
+		if c.A == 0 {
+			prefix = append(prefix, " 0 G"...)
+		} else {
+			a := float64(c.A) / 255.0
+			if c.R == c.G && c.G == c.B {
+				prefix = append(prefix, ' ')
+				prefix = appendCompactFloatBytes(prefix, float64(c.R)/255.0/a, 4)
+				prefix = append(prefix, " G"...)
+			} else {
+				prefix = append(prefix, ' ')
+				prefix = appendCompactFloatBytes(prefix, float64(c.R)/255.0/a, 4)
+				prefix = append(prefix, ' ')
+				prefix = appendCompactFloatBytes(prefix, float64(c.G)/255.0/a, 4)
+				prefix = append(prefix, ' ')
+				prefix = appendCompactFloatBytes(prefix, float64(c.B)/255.0/a, 4)
+				prefix = append(prefix, " RG"...)
+			}
+		}
+		if style.RenderMode == 2 && style.HasFill {
+			if style.FillAlpha != c.A || c.A != 255 {
+				gsName, gsRef := b.sink.OpacityPairGS(style.FillAlpha, c.A)
+				b.addExtGState(gsName, gsRef)
+				prefix = append(prefix, " /"...)
+				prefix = append(prefix, gsName...)
+				prefix = append(prefix, " gs"...)
+				if style.FillAlpha != c.A {
+					overrideGS = append(append([]byte{'/'}, gsName...), " gs"...)
+				}
+			}
+		} else if style.RenderMode == 1 && (c.A != 255 || b.state.alpha != 255) {
+			gsName, gsRef := b.sink.OpacityGS(c.A)
+			b.addExtGState(gsName, gsRef)
+			prefix = append(prefix, " /"...)
+			prefix = append(prefix, gsName...)
+			prefix = append(prefix, " gs"...)
+		}
 	}
-	b.injectFauxBoldRenderMode(start)
+	b.injectTextRenderMode(start, style.RenderMode, overrideGS)
 	b.insertBytes(start, prefix)
-	b.buf = append(b.buf, " Q"...)
+	b.buf = append(b.buf, " 0 Tr Q"...)
 	b.restoreAfterQ()
+}
+
+// WriteInvisibleActualText 使用内置标准Type1字体在指定位置写出3 Tr不可见ActualText占位层
+// 入参: m 文本矩阵, fontSize 字号(毫米), text 原文内容, clip 可选页面坐标系裁剪路径
+func (b *ContentBuilder) WriteInvisibleActualText(m canvas.Matrix, fontSize float64, text string, clip *canvas.Path) {
+	if text == "" {
+		return
+	}
+	encoded, err := pdfgo.EncodeTextString(text)
+	if err != nil {
+		return
+	}
+	if !finite(fontSize) || fontSize <= 0 {
+		fontSize = 3.5
+	}
+	b.EndText()
+	name, ref := b.sink.StandardType1Font("Helvetica")
+	b.addFont(name, ref)
+	var actual bytes.Buffer
+	actual.WriteString(" /Span<</ActualText")
+	appendPDFLiteralString(&actual, []byte(encoded))
+	actual.WriteString(">>BDC")
+	b.buf = append(b.buf, " q"...)
+	if clip != nil {
+		b.buf = appendClipPathOps(b.buf, clip)
+	}
+	b.buf = append(b.buf, actual.Bytes()...)
+	b.buf = append(b.buf, " BT 3 Tr /"...)
+	b.buf = append(b.buf, name...)
+	b.buf = append(b.buf, ' ')
+	b.buf = appendCompactFloatBytes(b.buf, fontSize, 4)
+	b.buf = append(b.buf, " Tf"...)
+	b.appendMatrixOp(m, " Tm")
+	b.buf = append(b.buf, " (x)Tj 0 Tr ET EMC Q"...)
 }
 
 // WrapActualText 为指定起始span之后的文字区间原地包裹Marked Content ActualText标记
@@ -705,11 +873,9 @@ func (a contentPathAdapter) RenderPath(path *canvas.Path, style canvas.Style, m 
 }
 
 // RenderText 装饰适配器不处理递归文字
-// 入参: text 文字, m 变换矩阵
 func (a contentPathAdapter) RenderText(_ *canvas.Text, _ canvas.Matrix) {}
 
 // RenderImage 装饰适配器不处理图像
-// 入参: img 图像, m 变换矩阵
 func (a contentPathAdapter) RenderImage(_ image.Image, _ canvas.Matrix) {}
 
 // insertBytes 在内容流指定位置原地插入字节片段并平移后续span偏移
@@ -730,11 +896,17 @@ func (b *ContentBuilder) insertBytes(pos int, data []byte) {
 	}
 }
 
-// injectFauxBoldRenderMode 在指定区间内将顶层0 Tr替换为2 Tr并在顶层BT后注入2 Tr，自动跳过字符串字面量
-// 入参: start 区间起始偏移
-func (b *ContentBuilder) injectFauxBoldRenderMode(start int) {
+// injectTextRenderMode 在指定区间内将顶层0 Tr替换为目标渲染模式并在顶层BT后注入，按需同步gs状态
+// 入参: start 区间起始偏移, mode 目标文本渲染模式编号, overrideGS 可选替换BT内ExtGState指令
+func (b *ContentBuilder) injectTextRenderMode(start int, mode int, overrideGS []byte) {
+	type bufEdit struct {
+		relStart int
+		relEnd   int
+		repl     []byte
+	}
 	segment := b.buf[start:]
-	var positions []int
+	var edits []bufEdit
+	trOp := []byte{' ', byte('0' + mode), ' ', 'T', 'r'}
 	parenDepth := 0
 	for i := 0; i < len(segment); i++ {
 		c := segment[i]
@@ -756,7 +928,7 @@ func (b *ContentBuilder) injectFauxBoldRenderMode(start int) {
 			prevOK := i == 0 || isPDFDelimiterOrSpace(segment[i-1])
 			nextOK := i+4 == len(segment) || isPDFDelimiterOrSpace(segment[i+4])
 			if prevOK && nextOK {
-				segment[i] = '2'
+				segment[i] = byte('0' + mode)
 				i += 3
 				continue
 			}
@@ -765,40 +937,64 @@ func (b *ContentBuilder) injectFauxBoldRenderMode(start int) {
 			prevOK := i == 0 || isPDFDelimiterOrSpace(segment[i-1])
 			nextOK := i+2 == len(segment) || isPDFDelimiterOrSpace(segment[i+2])
 			if prevOK && nextOK {
-				positions = append(positions, i+2)
+				edits = append(edits, bufEdit{relStart: i + 2, relEnd: i + 2, repl: trOp})
 				i++
+				continue
+			}
+		}
+		if len(overrideGS) > 0 && c == '/' && i+6 < len(segment) && segment[i+1] == 'G' && segment[i+2] == 'S' {
+			prevOK := i == 0 || isPDFDelimiterOrSpace(segment[i-1])
+			if prevOK {
+				j := i + 3
+				for j < len(segment) && segment[j] >= '0' && segment[j] <= '9' {
+					j++
+				}
+				if j > i+3 && j < len(segment) && segment[j] == '_' {
+					u := j + 1
+					for u < len(segment) && segment[u] >= '0' && segment[u] <= '9' {
+						u++
+					}
+					if u > j+1 {
+						j = u
+					}
+				}
+				if j > i+3 && j+3 <= len(segment) && segment[j] == ' ' && segment[j+1] == 'g' && segment[j+2] == 's' {
+					end := j + 3
+					if end == len(segment) || isPDFDelimiterOrSpace(segment[end]) {
+						edits = append(edits, bufEdit{relStart: i, relEnd: end, repl: overrideGS})
+						i = end - 1
+					}
+				}
 			}
 		}
 	}
-	if len(positions) == 0 {
+	if len(edits) == 0 {
 		return
 	}
-	const trOp = " 2 Tr"
-	extra := len(positions) * len(trOp)
-	oldLen := len(b.buf)
-	b.buf = append(b.buf, make([]byte, extra)...)
-	dst := len(b.buf)
-	srcEnd := oldLen
-	for idx := len(positions) - 1; idx >= 0; idx-- {
-		split := start + positions[idx]
-		tailLen := srcEnd - split
-		dst -= tailLen
-		copy(b.buf[dst:dst+tailLen], b.buf[split:srcEnd])
-		dst -= len(trOp)
-		copy(b.buf[dst:dst+len(trOp)], trOp)
-		srcEnd = split
+	deltaTotal := 0
+	for _, e := range edits {
+		deltaTotal += len(e.repl) - (e.relEnd - e.relStart)
 	}
+	rebuilt := make([]byte, 0, len(segment)+deltaTotal)
+	pos := 0
+	for _, e := range edits {
+		rebuilt = append(rebuilt, segment[pos:e.relStart]...)
+		rebuilt = append(rebuilt, e.repl...)
+		pos = e.relEnd
+	}
+	rebuilt = append(rebuilt, segment[pos:]...)
+	b.buf = append(b.buf[:start], rebuilt...)
 	for i, off := range b.spanStarts {
 		if off <= start {
 			continue
 		}
 		shift := 0
-		for _, rel := range positions {
-			if start+rel <= off {
-				shift += len(trOp)
+		for _, e := range edits {
+			if start+e.relStart <= off {
+				shift += len(e.repl) - (e.relEnd - e.relStart)
 			}
 		}
-		if shift > 0 {
+		if shift != 0 {
 			b.spanStarts[i] = off + shift
 		}
 	}

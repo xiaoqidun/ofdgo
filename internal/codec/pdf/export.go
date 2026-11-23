@@ -66,6 +66,7 @@ type RawImage struct {
 	BitsPerComponent int
 	ColorSpace       string
 	Data             []byte
+	Interpolate      *bool
 }
 
 // StreamWriter 为PDF 1.7流式写出器，支持平衡页面树、对象流分批压缩及预测器交叉引用流
