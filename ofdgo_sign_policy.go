@@ -141,9 +141,9 @@ func signatureDigestEquivalent(a, b string) bool {
 	return ok && ok2 && x == y
 }
 
-// signatureAlgorithmEquivalent 比较签名算法别名与OID
-// 入参: a 第一算法, b 第二算法, digest 摘要算法
-// 返回: bool 是否为相同算法
+// signatureAlgorithmEquivalent 比较策略允许的签名算法与实际签名算法是否匹配
+// 入参: a 策略允许算法, b 实际签名算法, digest 实际摘要算法
+// 返回: bool 是否匹配
 func signatureAlgorithmEquivalent(a, b, digest string) bool {
 	if isSM2SignatureMethod(a) && isSM2SignatureMethod(b) {
 		return true
@@ -151,9 +151,16 @@ func signatureAlgorithmEquivalent(a, b, digest string) bool {
 	if !(isRSASignatureMethod(a) && isRSASignatureMethod(b) || isECDSASignatureMethod(a) && isECDSASignatureMethod(b)) {
 		return false
 	}
-	x, err := signatureMethodHash(a, digest)
-	y, err2 := signatureMethodHash(b, digest)
-	return err == nil && err2 == nil && x == y
+	x, errA := signatureMethodHash(a, "")
+	y, errB := signatureMethodHash(b, "")
+	if errA != nil {
+		return true
+	}
+	if errB == nil {
+		return x == y
+	}
+	d, ok := signatureDigestHash(digest)
+	return ok && x == d
 }
 
 // signatureSignerDigest 验证SignerInfo中的摘要与签名算法一致
@@ -296,12 +303,33 @@ func inDocumentContentSubdir(target, docRootDir string) bool {
 // 返回: string 错误信息
 func (e signaturePolicyRejection) Error() string { return e.message }
 
+// appendSignaturePolicyError 追加签名策略错误并避免覆盖既有原因
+// 入参: msg 策略错误文本
+func (report *SignatureVerifyReport) appendSignaturePolicyError(msg string) {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return
+	}
+	report.PolicyChecked = true
+	report.PolicyOK = false
+	if report.PolicyError == "" {
+		report.PolicyError = msg
+		return
+	}
+	for _, part := range strings.Split(report.PolicyError, "; ") {
+		if part == msg {
+			return
+		}
+	}
+	report.PolicyError += "; " + msg
+}
+
 // applySignaturePolicyError 将实际算法策略拒绝记入报告
 // 入参: err 验签错误
 func (report *SignatureVerifyReport) applySignaturePolicyError(err error) {
 	var rejection signaturePolicyRejection
 	if errors.As(err, &rejection) {
-		report.PolicyChecked, report.PolicyOK, report.PolicyError = true, false, rejection.Error()
+		report.appendSignaturePolicyError(rejection.Error())
 	}
 }
 
@@ -315,9 +343,8 @@ func (report *SignatureVerifyReport) applySignaturePolicy(o *signatureVerifyOpti
 		report.PolicyChecked, report.PolicyOK = true, true
 	}
 	p := o.Policy
-	var err error
 	if len(p.OFDVersions) != 0 && !signatureStringAllowed(ofdVersion, p.OFDVersions) {
-		err = fmt.Errorf("OFD version rejected: %s", ofdVersion)
+		report.appendSignaturePolicyError(fmt.Sprintf("OFD version rejected: %s", ofdVersion))
 	}
 	if sesVersion != 0 && len(p.SESVersions) != 0 {
 		allowed := false
@@ -325,27 +352,31 @@ func (report *SignatureVerifyReport) applySignaturePolicy(o *signatureVerifyOpti
 			allowed = allowed || v == sesVersion
 		}
 		if !allowed {
-			err = fmt.Errorf("SES version rejected: %d", sesVersion)
+			report.appendSignaturePolicyError(fmt.Sprintf("SES version rejected: %d", sesVersion))
 		}
 	}
-	if e := signatureAlgorithmPolicy(p, method, digest); e != nil {
-		err = e
-	}
-	if err != nil {
-		report.PolicyOK, report.PolicyError = false, err.Error()
+	if err := signatureAlgorithmPolicy(p, method, digest); err != nil {
+		report.appendSignaturePolicyError(err.Error())
 	}
 }
 
 // applySignatureCoverage 区分引用摘要通过和文档覆盖完整
-// 入参: ctx 取消上下文, report 验签报告, listPath 签名列表路径, o 验签选项
-func (r *Reader) applySignatureCoverage(ctx context.Context, report *SignatureVerifyReport, listPath string, o *signatureVerifyOptions) {
+// 入参: ctx 取消上下文, report 验签报告, listPath 签名列表路径, sigList 已解析签名列表, sigFile 当前签名描述, o 验签选项
+func (r *Reader) applySignatureCoverage(ctx context.Context, report *SignatureVerifyReport, listPath string, sigList *Signatures, sigFile *SignatureFile, o *signatureVerifyOptions) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	covered := make(map[string]bool)
+	failed := make(map[string]bool)
 	for _, ref := range report.References {
-		if ref.Checked && ref.OK {
-			covered[cleanPackagePath(ref.Path)] = true
+		p := cleanPackagePath(ref.Path)
+		if ref.Checked && ref.OK && ref.Error == "" {
+			if !failed[p] {
+				covered[p] = true
+			}
+		} else {
+			failed[p] = true
+			delete(covered, p)
 		}
 	}
 	for name := range covered {
@@ -366,6 +397,7 @@ func (r *Reader) applySignatureCoverage(ctx context.Context, report *SignatureVe
 	}
 	if o.Policy.RequireDocumentCoverage {
 		root := path.Dir(cleanPackagePath(o.DocRoot))
+		cleanList := cleanPackagePath(listPath)
 		contentRequired := map[string]bool{"OFD.xml": true}
 		if r.ofd != nil && o.DocIndex >= 0 && o.DocIndex < len(r.ofd.DocBody) {
 			if cover := strings.TrimSpace(r.ofd.DocBody[o.DocIndex].DocInfo.Cover); cover != "" {
@@ -385,14 +417,26 @@ func (r *Reader) applySignatureCoverage(ctx context.Context, report *SignatureVe
 		if r.versionInfo != nil && strings.TrimSpace(r.versionInfo.Location) != "" {
 			versionPath := cleanPackagePath(r.versionInfo.Location)
 			if validPackagePath(versionPath) {
-				contentRequired[versionPath] = true
-				docRequired[versionPath] = true
+				locked := covered[cleanList]
+				if locked {
+					contentRequired[versionPath] = true
+					docRequired[versionPath] = true
+				}
 				if err := r.signatureCoverageReferences(ctx, versionPath, docRequired); err != nil && report.CoverageError == "" {
 					report.CoverageOK, report.CoverageError = false, err.Error()
 				}
+				if !locked && !contentRequired[versionPath] {
+					delete(docRequired, versionPath)
+				}
 			}
 		} else if r.ofd != nil && o.DocIndex >= 0 && o.DocIndex < len(r.ofd.DocBody) && r.ofd.DocBody[o.DocIndex].versioned {
-			if versions, err := r.DocumentVersionsContext(ctx); err == nil {
+			versions, err := r.DocumentVersionsContext(ctx)
+			if err != nil {
+				report.CoverageOK = false
+				if report.CoverageError == "" {
+					report.CoverageError = err.Error()
+				}
+			} else {
 				for _, ver := range versions {
 					verPath := cleanPackagePath(ver.Location)
 					if validPackagePath(verPath) {
@@ -404,23 +448,41 @@ func (r *Reader) applySignatureCoverage(ctx context.Context, report *SignatureVe
 				}
 			}
 		}
-		cleanList := cleanPackagePath(listPath)
 		excluded := make(map[string]bool)
 		if !contentRequired[cleanList] {
 			excluded[cleanList] = true
 		}
-		name := cleanPackagePath(signatureRefPath(listPath, report.BaseLoc))
-		data, err := r.readFileViewContext(ctx, name)
-		if err != nil {
-			report.CoverageOK = false
-			report.CoverageError = err.Error()
-			return
+		loadSigFile := func(target string) (*SignatureFile, error) {
+			if o.sigFileCache != nil {
+				if cached, ok := o.sigFileCache[target]; ok {
+					return cached, nil
+				}
+			}
+			raw, err := r.readFileViewContext(ctx, target)
+			if err != nil {
+				return nil, err
+			}
+			parsed, err := parseSignatureFile(raw)
+			if err != nil {
+				return nil, err
+			}
+			if o.sigFileCache != nil {
+				o.sigFileCache[target] = parsed
+			}
+			return parsed, nil
 		}
-		file, err := parseSignatureFile(data)
-		if err != nil {
-			report.CoverageOK = false
-			report.CoverageError = err.Error()
-			return
+		name := cleanPackagePath(signatureRefPath(listPath, report.BaseLoc))
+		file := sigFile
+		if file == nil {
+			var err error
+			file, err = loadSigFile(name)
+			if err != nil {
+				report.CoverageOK = false
+				report.CoverageError = err.Error()
+				return
+			}
+		} else if o.sigFileCache != nil {
+			o.sigFileCache[name] = file
 		}
 		if !contentRequired[name] {
 			excluded[name] = true
@@ -431,60 +493,62 @@ func (r *Reader) applySignatureCoverage(ctx context.Context, report *SignatureVe
 		if sealPath, ok := canExcludeSignatureSeal(cleanList, name, file.SignedInfo.Seal.BaseLoc, root, contentRequired, false); ok {
 			excluded[sealPath] = true
 		}
-		if listData, err := r.readFileViewContext(ctx, cleanList); err == nil {
-			var list Signatures
-			if xml.Unmarshal(listData, &list) == nil {
-				var versionScope *versionSignatureScope
-				if r.versionInfo != nil {
-					versionScope, _ = r.buildVersionSignatureScope(ctx, cleanList, list)
+		list := sigList
+		if list == nil {
+			if listData, err := r.readFileViewContext(ctx, cleanList); err == nil {
+				var parsed Signatures
+				if xml.Unmarshal(listData, &parsed) == nil {
+					list = &parsed
 				}
-				after := false
-				for _, entry := range list.List {
-					if err := ctx.Err(); err != nil {
-						report.CoverageOK, report.CoverageError = false, err.Error()
-						return
-					}
-					entryPath := cleanPackagePath(signatureRefPath(listPath, entry.BaseLoc))
-					if versionScope != nil && !r.versionSignatureMatches(ctx, versionScope, entry) {
-						if validPackagePath(entryPath) && !contentRequired[entryPath] {
-							excluded[entryPath] = true
-							if entryData, err := r.readFileViewContext(ctx, entryPath); err == nil {
-								if entryFile, err := parseSignatureFile(entryData); err == nil {
-									if valPath := cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedValue)); validPackagePath(valPath) && !contentRequired[valPath] {
-										excluded[valPath] = true
-									}
-									if sealPath := cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedInfo.Seal.BaseLoc)); validPackagePath(sealPath) && !contentRequired[sealPath] {
-										excluded[sealPath] = true
-									}
-								}
+			}
+		}
+		if list != nil {
+			var versionScope *versionSignatureScope
+			if r.versionInfo != nil {
+				versionScope, _ = r.buildVersionSignatureScope(ctx, cleanList, *list)
+			}
+			after := false
+			for _, entry := range list.List {
+				if err := ctx.Err(); err != nil {
+					report.CoverageOK, report.CoverageError = false, err.Error()
+					return
+				}
+				entryPath := cleanPackagePath(signatureRefPath(listPath, entry.BaseLoc))
+				if versionScope != nil && !r.versionSignatureMatches(ctx, versionScope, entry) {
+					if validPackagePath(entryPath) && !contentRequired[entryPath] {
+						excluded[entryPath] = true
+						if entryFile, err := loadSigFile(entryPath); err == nil {
+							if valPath := cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedValue)); validPackagePath(valPath) && !contentRequired[valPath] {
+								excluded[valPath] = true
+							}
+							if sealPath := cleanPackagePath(signatureRefPath(entryPath, entryFile.SignedInfo.Seal.BaseLoc)); validPackagePath(sealPath) && !contentRequired[sealPath] {
+								excluded[sealPath] = true
 							}
 						}
-						continue
 					}
-					if !after {
-						if entryPath == name && (report.ID == "" || entry.ID == report.ID) {
-							after = true
+					continue
+				}
+				if !after {
+					if entryPath == name && (report.ID == "" || entry.ID == report.ID) {
+						after = true
+					}
+					continue
+				}
+				if !validPackagePath(entryPath) || entryPath == "OFD.xml" || contentRequired[entryPath] || !strings.EqualFold(path.Ext(entryPath), ".xml") {
+					continue
+				}
+				if entryFile, err := loadSigFile(entryPath); err == nil && canExcludeSubsequentSignature(cleanList, entryPath, root) {
+					if !docRequired[entryPath] || inSignatureSubdir(entryPath, cleanList, entryPath, root, true) {
+						excluded[entryPath] = true
+					}
+					if valPath, ok := canExcludeSignatureValue(cleanList, entryPath, entryFile.SignedValue, root, contentRequired, true); ok {
+						if !docRequired[valPath] || inSignatureSubdir(valPath, cleanList, entryPath, root, true) {
+							excluded[valPath] = true
 						}
-						continue
 					}
-					if !validPackagePath(entryPath) || entryPath == "OFD.xml" || contentRequired[entryPath] || !strings.EqualFold(path.Ext(entryPath), ".xml") {
-						continue
-					}
-					if entryData, err := r.readFileViewContext(ctx, entryPath); err == nil {
-						if entryFile, err := parseSignatureFile(entryData); err == nil && canExcludeSubsequentSignature(cleanList, entryPath, root) {
-							if !docRequired[entryPath] || inSignatureSubdir(entryPath, cleanList, entryPath, root, true) {
-								excluded[entryPath] = true
-							}
-							if valPath, ok := canExcludeSignatureValue(cleanList, entryPath, entryFile.SignedValue, root, contentRequired, true); ok {
-								if !docRequired[valPath] || inSignatureSubdir(valPath, cleanList, entryPath, root, true) {
-									excluded[valPath] = true
-								}
-							}
-							if sealPath, ok := canExcludeSignatureSeal(cleanList, entryPath, entryFile.SignedInfo.Seal.BaseLoc, root, contentRequired, true); ok {
-								if !docRequired[sealPath] || inSignatureSubdir(sealPath, cleanList, entryPath, root, true) {
-									excluded[sealPath] = true
-								}
-							}
+					if sealPath, ok := canExcludeSignatureSeal(cleanList, entryPath, entryFile.SignedInfo.Seal.BaseLoc, root, contentRequired, true); ok {
+						if !docRequired[sealPath] || inSignatureSubdir(sealPath, cleanList, entryPath, root, true) {
+							excluded[sealPath] = true
 						}
 					}
 				}
@@ -514,7 +578,7 @@ func (r *Reader) applySignatureCoverage(ctx context.Context, report *SignatureVe
 				if clean == "" || clean == "." || strings.HasSuffix(item, "/") || excluded[clean] || otherOwned[clean] {
 					return
 				}
-				if !multiDoc || root != "." && strings.HasPrefix(clean, root+"/") {
+				if !multiDoc || root == "." || strings.HasPrefix(clean, root+"/") {
 					required[clean] = true
 				}
 			}

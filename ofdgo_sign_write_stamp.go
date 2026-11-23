@@ -71,7 +71,8 @@ func signatureWriteStamps(r *Reader, stamps []SignatureStamp) ([]SignatureStamp,
 		}
 		ids[stamp.ID] = true
 	}
-	for _, position := range positions {
+	for i, position := range positions {
+		result[i].PageRef = doc.Pages.Page[position.Page-1].ID
 		box := position.Box
 		if !signatureWriteBoxValid(box) {
 			return nil, fmt.Errorf("invalid stamp boundary")
@@ -358,7 +359,14 @@ func (r *Reader) signatureStampChanges(ctx context.Context, name string, changes
 		if err != nil {
 			return nil, err
 		}
-		node := ofd.childAt("DocBody", r.documentIndex).child("Signatures")
+		body := ofd.childAt("DocBody", r.documentIndex)
+		if body == nil {
+			return nil, fmt.Errorf("missing document body")
+		}
+		node := body.child("Signatures")
+		if node == nil {
+			return nil, fmt.Errorf("missing document signatures entry")
+		}
 		parts["OFD.xml"] = editorPatchXML(entry, []editorXMLPatch{editorXMLContent(entry, node, editorFontXMLText("/"+target))})
 	}
 	parts[target] = editorPatchXML(data, patches)

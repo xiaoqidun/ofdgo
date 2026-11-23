@@ -17,6 +17,7 @@ package webui
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto"
 	"crypto/sha256"
@@ -265,72 +266,92 @@ type annotationPreview struct {
 
 // signatureInfo 签名验证信息
 type signatureInfo struct {
-	DocIndex             int                  `json:"docIndex"`
-	DocRoot              string               `json:"docRoot,omitempty"`
-	ID                   string               `json:"id"`
-	Type                 string               `json:"type"`
-	Status               string               `json:"status"`
-	IntegrityValid       bool                 `json:"integrityValid"`
-	TrustedValid         bool                 `json:"trustedValid"`
-	Error                string               `json:"error,omitempty"`
-	Signer               string               `json:"signer,omitempty"`
-	SignatureDateTime    string               `json:"signatureDateTime,omitempty"`
-	SealName             string               `json:"sealName,omitempty"`
-	Provider             string               `json:"provider,omitempty"`
-	Company              string               `json:"company,omitempty"`
-	SealType             string               `json:"sealType,omitempty"`
-	SealID               string               `json:"sealId,omitempty"`
-	SealVendor           string               `json:"sealVendor,omitempty"`
-	Version              string               `json:"version,omitempty"`
-	SignSubject          string               `json:"signSubject,omitempty"`
-	SignIssuer           string               `json:"signIssuer,omitempty"`
-	SignSerial           string               `json:"signSerial,omitempty"`
-	SealSubject          string               `json:"sealSubject,omitempty"`
-	SignatureMethod      string               `json:"signatureMethod,omitempty"`
-	DigestMethod         string               `json:"digestMethod,omitempty"`
-	ReferenceCount       int                  `json:"referenceCount"`
-	ReferenceChecked     int                  `json:"referenceChecked"`
-	ReferencePassed      int                  `json:"referencePassed"`
-	Stamps               []signatureStampInfo `json:"stamps,omitempty"`
-	DataHashChecked      bool                 `json:"dataHashChecked"`
-	DataHashOK           bool                 `json:"dataHashOK"`
-	SignedValueChecked   bool                 `json:"signedValueChecked"`
-	SignedValueOK        bool                 `json:"signedValueOK"`
-	CertChecked          bool                 `json:"certChecked"`
-	CertOK               bool                 `json:"certOK"`
-	CertTimeChecked      bool                 `json:"certTimeChecked,omitempty"`
-	CertTimeOK           bool                 `json:"certTimeOK,omitempty"`
-	CertTrustChecked     bool                 `json:"certTrustChecked,omitempty"`
-	CertTrustOK          bool                 `json:"certTrustOK,omitempty"`
-	CertTrustError       string               `json:"certTrustError,omitempty"`
-	SignatureTimeChecked bool                 `json:"signatureTimeChecked,omitempty"`
-	SignatureTimeOK      bool                 `json:"signatureTimeOK,omitempty"`
-	SealChecked          bool                 `json:"sealChecked"`
-	SealOK               bool                 `json:"sealOK"`
-	SealMatchChecked     bool                 `json:"sealMatchChecked"`
-	SealMatchOK          bool                 `json:"sealMatchOK"`
-	SealTimeChecked      bool                 `json:"sealTimeChecked,omitempty"`
-	SealTimeOK           bool                 `json:"sealTimeOK,omitempty"`
-	SealCertTimeChecked  bool                 `json:"sealCertTimeChecked,omitempty"`
-	SealCertTimeOK       bool                 `json:"sealCertTimeOK,omitempty"`
-	CoverageChecked      bool                 `json:"coverageChecked"`
-	CoverageOK           bool                 `json:"coverageOK"`
-	CoverageError        string               `json:"coverageError,omitempty"`
-	UncoveredFiles       []string             `json:"uncoveredFiles,omitempty"`
-	PolicyChecked        bool                 `json:"policyChecked"`
-	PolicyOK             bool                 `json:"policyOK"`
-	PolicyError          string               `json:"policyError,omitempty"`
-	TimestampChecked     bool                 `json:"timestampChecked"`
-	TimestampOK          bool                 `json:"timestampOK"`
-	Timestamps           []timestampInfo      `json:"timestamps,omitempty"`
-	RevocationChecked    bool                 `json:"revocationChecked"`
-	RevocationOK         bool                 `json:"revocationOK"`
-	Revocations          []revocationInfo     `json:"revocations,omitempty"`
+	DocIndex             int                         `json:"docIndex"`
+	VersionID            string                      `json:"versionId,omitempty"`
+	DocRoot              string                      `json:"docRoot,omitempty"`
+	ID                   string                      `json:"id"`
+	Type                 string                      `json:"type"`
+	Status               string                      `json:"status"`
+	IntegrityValid       bool                        `json:"integrityValid"`
+	TrustedValid         bool                        `json:"trustedValid"`
+	Error                string                      `json:"error,omitempty"`
+	Signer               string                      `json:"signer,omitempty"`
+	SignatureDateTime    string                      `json:"signatureDateTime,omitempty"`
+	SealName             string                      `json:"sealName,omitempty"`
+	Provider             string                      `json:"provider,omitempty"`
+	Company              string                      `json:"company,omitempty"`
+	SealType             string                      `json:"sealType,omitempty"`
+	SealID               string                      `json:"sealId,omitempty"`
+	SealVendor           string                      `json:"sealVendor,omitempty"`
+	SealVersion          int                         `json:"sealVersion,omitempty"`
+	SealCreateTime       string                      `json:"sealCreateTime,omitempty"`
+	SealValidStart       string                      `json:"sealValidStart,omitempty"`
+	SealValidEnd         string                      `json:"sealValidEnd,omitempty"`
+	Version              string                      `json:"version,omitempty"`
+	SignSubject          string                      `json:"signSubject,omitempty"`
+	SignIssuer           string                      `json:"signIssuer,omitempty"`
+	SignSerial           string                      `json:"signSerial,omitempty"`
+	SignNotBefore        string                      `json:"signNotBefore,omitempty"`
+	SignNotAfter         string                      `json:"signNotAfter,omitempty"`
+	SealSubject          string                      `json:"sealSubject,omitempty"`
+	SealNotBefore        string                      `json:"sealNotBefore,omitempty"`
+	SealNotAfter         string                      `json:"sealNotAfter,omitempty"`
+	SignatureMethod      string                      `json:"signatureMethod,omitempty"`
+	DigestMethod         string                      `json:"digestMethod,omitempty"`
+	DigestOK             bool                        `json:"digestOK"`
+	ReferenceCount       int                         `json:"referenceCount"`
+	ReferenceChecked     int                         `json:"referenceChecked"`
+	ReferencePassed      int                         `json:"referencePassed"`
+	FailedReferences     []signatureReferenceFailure `json:"failedReferences,omitempty"`
+	Stamps               []signatureStampInfo        `json:"stamps,omitempty"`
+	DataHashChecked      bool                        `json:"dataHashChecked"`
+	DataHashOK           bool                        `json:"dataHashOK"`
+	SignedValueChecked   bool                        `json:"signedValueChecked"`
+	SignedValueOK        bool                        `json:"signedValueOK"`
+	CertChecked          bool                        `json:"certChecked"`
+	CertOK               bool                        `json:"certOK"`
+	CertTimeChecked      bool                        `json:"certTimeChecked,omitempty"`
+	CertTimeOK           bool                        `json:"certTimeOK,omitempty"`
+	CertTrustChecked     bool                        `json:"certTrustChecked,omitempty"`
+	CertTrustOK          bool                        `json:"certTrustOK,omitempty"`
+	CertTrustError       string                      `json:"certTrustError,omitempty"`
+	SignatureTimeChecked bool                        `json:"signatureTimeChecked,omitempty"`
+	SignatureTimeOK      bool                        `json:"signatureTimeOK,omitempty"`
+	SealChecked          bool                        `json:"sealChecked"`
+	SealOK               bool                        `json:"sealOK"`
+	SealMatchChecked     bool                        `json:"sealMatchChecked"`
+	SealMatchOK          bool                        `json:"sealMatchOK"`
+	SealTimeChecked      bool                        `json:"sealTimeChecked,omitempty"`
+	SealTimeOK           bool                        `json:"sealTimeOK,omitempty"`
+	SealCertTimeChecked  bool                        `json:"sealCertTimeChecked,omitempty"`
+	SealCertTimeOK       bool                        `json:"sealCertTimeOK,omitempty"`
+	CoverageChecked      bool                        `json:"coverageChecked"`
+	CoverageOK           bool                        `json:"coverageOK"`
+	CoverageError        string                      `json:"coverageError,omitempty"`
+	UncoveredFiles       []string                    `json:"uncoveredFiles,omitempty"`
+	PolicyChecked        bool                        `json:"policyChecked"`
+	PolicyOK             bool                        `json:"policyOK"`
+	PolicyError          string                      `json:"policyError,omitempty"`
+	TimestampChecked     bool                        `json:"timestampChecked"`
+	TimestampOK          bool                        `json:"timestampOK"`
+	Timestamps           []timestampInfo             `json:"timestamps,omitempty"`
+	RevocationChecked    bool                        `json:"revocationChecked"`
+	RevocationOK         bool                        `json:"revocationOK"`
+	Revocations          []revocationInfo            `json:"revocations,omitempty"`
+}
+
+// signatureReferenceFailure 签名保护文件异常明细
+type signatureReferenceFailure struct {
+	Path  string `json:"path"`
+	Error string `json:"error,omitempty"`
 }
 
 // timestampInfo 独立展示时间戳绑定、签名、信任和证书时效
 type timestampInfo struct {
 	Time               string `json:"time,omitempty"`
+	Signer             string `json:"signer,omitempty"`
+	PolicyOID          string `json:"policyOID,omitempty"`
+	SerialNumber       string `json:"serialNumber,omitempty"`
 	Valid              bool   `json:"valid"`
 	BindingChecked     bool   `json:"bindingChecked"`
 	BindingOK          bool   `json:"bindingOK"`
@@ -725,6 +746,128 @@ func signatureReportError(report ofdgo.SignatureVerifyReport) string {
 		return report.Error
 	}
 	return report.StampPositionError
+}
+
+// signatureFailedReferences 收集未通过、未检完或出错的保护文件明细
+// 入参: refs 保护文件验证结果
+// 返回: []signatureReferenceFailure 异常明细列表
+func signatureFailedReferences(refs []ofdgo.SignatureReferenceVerify) []signatureReferenceFailure {
+	const limit = 50
+	var failed []signatureReferenceFailure
+	for _, ref := range refs {
+		if ref.OK && ref.Checked && ref.Error == "" {
+			continue
+		}
+		failed = append(failed, signatureReferenceFailure{
+			Path:  cmp.Or(ref.Path, ref.FileRef),
+			Error: ref.Error,
+		})
+		if len(failed) >= limit {
+			break
+		}
+	}
+	return failed
+}
+
+// signatureReportNonCertFailure 判断除缺少裸签名外部证书外的实质性验证失败
+// 入参: report 签名验证报告
+// 返回: bool 是否存在实质性失败
+func signatureReportNonCertFailure(report ofdgo.SignatureVerifyReport) bool {
+	if report.StampPositionError != "" || !report.DigestOK || len(report.References) == 0 {
+		return true
+	}
+	for _, ref := range report.References {
+		if !ref.OK || !ref.Checked || ref.Error != "" {
+			return true
+		}
+	}
+	return report.DataHashChecked && !report.DataHashOK ||
+		report.SignedValueChecked && !report.SignedValueOK ||
+		report.SealChecked && !report.SealOK ||
+		report.SealMatchChecked && !report.SealMatchOK ||
+		report.CertChecked && !report.CertOK ||
+		report.CertTimeChecked && !report.CertTimeOK ||
+		report.CertTrustChecked && !report.CertTrustOK ||
+		report.SignatureTimeChecked && !report.SignatureTimeOK ||
+		report.SealTimeChecked && !report.SealTimeOK ||
+		report.SealCertTimeChecked && !report.SealCertTimeOK ||
+		report.CoverageChecked && !report.CoverageOK ||
+		report.PolicyChecked && !report.PolicyOK ||
+		report.TimestampChecked && !report.TimestampOK ||
+		report.RevocationChecked && !report.RevocationOK
+}
+
+// signatureReportStatus 判定界面展示的签名状态
+// 入参: report 签名验证报告
+// 返回: string 签名状态（valid、invalid、unchecked）
+func signatureReportStatus(report ofdgo.SignatureVerifyReport) string {
+	if report.Valid {
+		return "valid"
+	}
+	if report.Error == "signature certificate not found" && !signatureReportNonCertFailure(report) {
+		return "unchecked"
+	}
+	if report.HasFailure() || !report.DigestOK {
+		return "invalid"
+	}
+	return "unchecked"
+}
+
+// signatureIdentityError 将签署身份解析错误转换为清晰提示，未知错误保留原始信息
+// 入参: err 原始解析错误
+// 返回: error 面向界面的错误
+func signatureIdentityError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "do not match"):
+		return fmt.Errorf("证书与私钥不匹配")
+	case strings.Contains(msg, "at least 2048 bits"):
+		return fmt.Errorf("RSA私钥长度不足2048位或公钥指数无效")
+	case strings.Contains(msg, "unsupported ECDSA signature curve"):
+		return fmt.Errorf("不支持的椭圆曲线，仅支持SM2或P-256/P-384/P-521")
+	case strings.Contains(msg, "private key password required"):
+		return fmt.Errorf("私钥已加密，请输入私钥口令")
+	case strings.Contains(msg, "invalid private key or incorrect password"):
+		return fmt.Errorf("私钥无效或私钥口令错误")
+	case strings.Contains(msg, "legacy encrypted PEM"):
+		return fmt.Errorf("不支持传统加密PEM或多私钥文件，请使用加密PKCS#8格式")
+	case strings.Contains(msg, "unsupported private key PEM type"):
+		return fmt.Errorf("不支持的私钥PEM类型")
+	case strings.Contains(msg, "invalid private key encoding"):
+		return fmt.Errorf("私钥编码格式无效")
+	case strings.Contains(msg, "unsupported signature private key"), strings.Contains(msg, "unsupported signature public key"):
+		return fmt.Errorf("不支持的签名密钥算法")
+	case strings.Contains(msg, "expected one certificate"):
+		return fmt.Errorf("证书文件须仅包含单张证书")
+	default:
+		return fmt.Errorf("签署身份解析失败：%w", err)
+	}
+}
+
+// signaturePageAreaBox 按库层页面区域回退规则解析物理边界框
+// 入参: reader 阅读器, page 页面引用
+// 返回: ofdgo.Box 物理边界框, error 错误信息
+func signaturePageAreaBox(reader *ofdgo.Reader, page ofdgo.Page) (ofdgo.Box, error) {
+	area, err := reader.PageArea(page)
+	if err != nil {
+		return ofdgo.Box{}, err
+	}
+	raw := cmp.Or(strings.TrimSpace(area.PhysicalBox), strings.TrimSpace(area.ApplicationBox), strings.TrimSpace(area.ContentBox), "0 0 210 297")
+	box, err := ofdgo.ParseBox(raw)
+	if err != nil || box.W <= 0 || box.H <= 0 {
+		return ofdgo.Box{}, fmt.Errorf("invalid page box: %s", raw)
+	}
+	return box, nil
+}
+
+// signatureBoxText 编码印章毫米区域字符串
+// 入参: box 毫米区域
+// 返回: string 区域文本
+func signatureBoxText(box ofdgo.Box) string {
+	return strconv.FormatFloat(box.X, 'f', -1, 64) + " " + strconv.FormatFloat(box.Y, 'f', -1, 64) + " " + strconv.FormatFloat(box.W, 'f', -1, 64) + " " + strconv.FormatFloat(box.H, 'f', -1, 64)
 }
 
 // failureResult 统一原生及浏览器业务错误协议
@@ -9154,29 +9297,32 @@ func (e *businessEngine) verifySignatures(args []platformValue) (any, error) {
 		}
 		files[name] = data
 	}
-	now := time.Now()
+	var verifyTime *time.Time
 	if rawTime := strings.TrimSpace(optionalString(input.Get("verifyTime"))); rawTime != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, rawTime)
 		if err != nil {
 			return nil, fmt.Errorf("invalid verifyTime %q", rawTime)
 		}
-		now = parsed
+		verifyTime = &parsed
 	}
 	policy := ofdgo.SignaturePolicy{RejectWeakAlgorithms: true, RequireDocumentCoverage: true,
 		RequireTimestamp: input.Get("requireTimestamp").Bool(), RequireRevocation: input.Get("requireRevocation").Bool()}
 	options := []ofdgo.SignatureVerifyOption{
-		ofdgo.WithSignatureVerifyTime(now), ofdgo.WithSignaturePolicy(policy),
+		ofdgo.WithSignaturePolicy(policy),
 		ofdgo.WithSignatureTrustCerts(files["roots"]...), ofdgo.WithSignatureCerts(files["certificates"]...),
+	}
+	if verifyTime != nil {
+		options = append(options, ofdgo.WithSignatureVerifyTime(*verifyTime))
 	}
 	if policy.RequireTimestamp || len(files["timestampRoots"])+len(files["tokens"]) > 0 {
 		options = append(options, ofdgo.WithSignatureTimestamp(ofdgo.SignatureTimestampOptions{
-			TrustCerts: files["timestampRoots"], Certificates: files["certificates"], Tokens: files["tokens"], Required: policy.RequireTimestamp, VerifyTime: &now,
+			TrustCerts: files["timestampRoots"], Certificates: files["certificates"], Tokens: files["tokens"], Required: policy.RequireTimestamp, VerifyTime: verifyTime,
 		}))
 	}
 	if policy.RequireRevocation || len(files["crls"])+len(files["ocsp"]) > 0 {
 		options = append(options, ofdgo.WithSignatureRevocation(ofdgo.SignatureRevocationOptions{
 			SignatureRevocationEvidence: ofdgo.SignatureRevocationEvidence{CRLs: files["crls"], OCSPResponses: files["ocsp"]},
-			Certificates:                append(files["certificates"], files["roots"]...), Required: policy.RequireRevocation, VerifyTime: &now,
+			Certificates:                slices.Concat(files["certificates"], files["roots"]), Required: policy.RequireRevocation, VerifyTime: verifyTime,
 		}))
 	}
 	reports, err := e.currentSession.Reader.VerifyDocumentSignaturesContext(e.operationContext(), e.currentSession.Reader.DocumentIndex(), options...)
@@ -9332,10 +9478,80 @@ func (e *businessEngine) signatureStampsFromJS(input platformValue) ([]ofdgo.Sig
 		}
 		return stamps, nil
 	case "seam":
-		return e.currentSession.Reader.SignatureSeamStamps(indices, box)
+		return e.currentSession.signatureSeamStamps(indices, box)
 	default:
 		return nil, fmt.Errorf("invalid stamp placement")
 	}
+}
+
+// signatureSeamStamps 按视口页面边界与物理区域差值换算骑缝印章位置
+// 入参: indices 零基页码列表, box 视口基准下的右侧内缩、顶部偏移和完整印章尺寸
+// 返回: []ofdgo.SignatureStamp 骑缝印章位置列表, error 校验或读取错误
+func (s *session) signatureSeamStamps(indices []int, box ofdgo.Box) ([]ofdgo.SignatureStamp, error) {
+	if s == nil || s.Reader == nil || s.doc == nil {
+		return nil, fmt.Errorf("invalid seam stamp parameters")
+	}
+	if len(indices) < 2 || math.IsNaN(box.X) || math.IsInf(box.X, 0) || math.IsNaN(box.Y) || math.IsInf(box.Y, 0) || math.IsNaN(box.W) || math.IsInf(box.W, 0) || math.IsNaN(box.H) || math.IsInf(box.H, 0) || box.X < 0 || box.Y < 0 || box.W <= 0 || box.H <= 0 {
+		return s.Reader.SignatureSeamStamps(indices, box)
+	}
+	pageBoxes := make([]ofdgo.Box, len(indices))
+	physicalBoxes := make([]ofdgo.Box, len(indices))
+	seen := make(map[int]bool, len(indices))
+	uniform := true
+	var baseDX, baseDY float64
+	for i, index := range indices {
+		if index < 0 || index >= len(s.doc.Pages.Page) || seen[index] {
+			return s.Reader.SignatureSeamStamps(indices, box)
+		}
+		seen[index] = true
+		pageBox, err := s.pageBox(index, nil)
+		if err != nil {
+			return nil, err
+		}
+		physical, err := signaturePageAreaBox(s.Reader, s.doc.Pages.Page[index])
+		if err != nil {
+			return nil, err
+		}
+		pageBoxes[i], physicalBoxes[i] = pageBox, physical
+		dx := (physical.X + physical.W) - (pageBox.X + pageBox.W)
+		dy := pageBox.Y - physical.Y
+		if i == 0 {
+			baseDX, baseDY = dx, dy
+		} else if math.Abs(dx-baseDX) > 1e-9 || math.Abs(dy-baseDY) > 1e-9 {
+			uniform = false
+		}
+	}
+	if uniform && box.X+baseDX >= 0 && box.Y+baseDY >= 0 {
+		return s.Reader.SignatureSeamStamps(indices, ofdgo.Box{X: box.X + baseDX, Y: box.Y + baseDY, W: box.W, H: box.H})
+	}
+	pageIDs := make(map[string]bool, len(s.doc.Pages.Page))
+	for _, page := range s.doc.Pages.Page {
+		id := strings.TrimSpace(page.ID)
+		if id == "" || pageIDs[id] {
+			return nil, fmt.Errorf("ambiguous stamp page ID: %s", page.ID)
+		}
+		pageIDs[id] = true
+	}
+	sliceW := box.W / float64(len(indices))
+	stamps := make([]ofdgo.SignatureStamp, 0, len(indices))
+	for i, index := range indices {
+		pageBox, physical := pageBoxes[i], physicalBoxes[i]
+		clip := ofdgo.Box{X: float64(i) * sliceW, W: sliceW, H: box.H}
+		boundary := ofdgo.Box{X: pageBox.X + pageBox.W - box.X - sliceW - clip.X, Y: pageBox.Y + box.Y, W: box.W, H: box.H}
+		visX, visY := boundary.X+clip.X, boundary.Y
+		if visX < physical.X-1e-9 || visY < physical.Y-1e-9 || visX+sliceW > physical.X+physical.W+1e-9 || visY+box.H > physical.Y+physical.H+1e-9 {
+			return nil, fmt.Errorf("stamp is outside page %d", index+1)
+		}
+		stamps = append(stamps, ofdgo.SignatureStamp{
+			PageRef:  s.doc.Pages.Page[index].ID,
+			Boundary: signatureBoxText(boundary),
+			Clip:     signatureBoxText(clip),
+		})
+	}
+	if _, err := s.Reader.SignatureStampPositions(stamps); err != nil {
+		return nil, err
+	}
+	return stamps, nil
 }
 
 // signaturePlacement 校验预览确认的印章范围，不生成签名
@@ -9376,7 +9592,7 @@ func (e *businessEngine) saveSigned(args []platformValue) (any, error) {
 	}
 	signer, certificate, err := ofdgo.ParseSignatureIdentity(certificate, key, password)
 	if err != nil {
-		return nil, fmt.Errorf("证书、私钥或口令无效")
+		return nil, signatureIdentityError(err)
 	}
 	roots, err := e.securityFilesFromJS(input.Get("roots"))
 	if err != nil {
@@ -9386,8 +9602,12 @@ func (e *businessEngine) saveSigned(args []platformValue) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	prepareAllDocuments := e.currentSession.Reader.DocumentCount() > 1
+	if field := input.Get("prepareAllDocuments"); !field.IsUndefined() && !field.IsNull() {
+		prepareAllDocuments = field.Bool()
+	}
 	options := ofdgo.SignatureWriteOptions{Signer: signer, Certificate: certificate, TrustRoots: roots,
-		Intermediates: intermediates, Lock: input.Get("lock").Bool()}
+		Intermediates: intermediates, Lock: input.Get("lock").Bool(), PrepareAllDocuments: prepareAllDocuments}
 	if compression := input.Get("compression"); !compression.IsUndefined() && !compression.IsNull() {
 		if err := e.compressionFromJS(compression, &options.Compression); err != nil {
 			return nil, err
@@ -9474,6 +9694,7 @@ func (e *businessEngine) saveSigned(args []platformValue) (any, error) {
 			_, err = editor.SignToContext(ctx, writer, options)
 		}
 	} else {
+		options.OnProgress = progress
 		_, err = e.currentSession.Reader.SignToContext(ctx, writer, options)
 	}
 	if err != nil {
@@ -10758,12 +10979,7 @@ func (s *session) signatureInfosContext(ctx context.Context) ([]signatureInfo, e
 // 入参: report 签名验证报告
 // 返回: signatureInfo 签名验证信息
 func (s *session) signatureInfo(report ofdgo.SignatureVerifyReport) signatureInfo {
-	status := "unchecked"
-	if report.Valid {
-		status = "valid"
-	} else if report.HasFailure() {
-		status = "invalid"
-	}
+	status := signatureReportStatus(report)
 	dateTime := report.SignatureDateTime
 	if !report.SignatureTime.IsZero() {
 		dateTime = report.SignatureTime.Format(time.RFC3339Nano)
@@ -10771,12 +10987,13 @@ func (s *session) signatureInfo(report ofdgo.SignatureVerifyReport) signatureInf
 	checked, passed := signatureReferenceCounts(report.References)
 	info := signatureInfo{
 		DocIndex:             report.DocIndex,
+		VersionID:            report.VersionID,
 		DocRoot:              report.DocRoot,
 		ID:                   report.ID,
 		Type:                 string(report.Type),
 		Status:               status,
-		IntegrityValid:       report.IntegrityValid(),
-		TrustedValid:         report.TrustedValid(),
+		IntegrityValid:       report.IntegrityValid() && report.StampPositionError == "",
+		TrustedValid:         report.TrustedValid() && report.StampPositionError == "",
 		Error:                signatureReportError(report),
 		Signer:               signatureSigner(report),
 		SignatureDateTime:    dateTime,
@@ -10786,16 +11003,26 @@ func (s *session) signatureInfo(report ofdgo.SignatureVerifyReport) signatureInf
 		SealType:             report.SealType,
 		SealID:               report.SealInfo.ID,
 		SealVendor:           report.SealInfo.VendorID,
+		SealVersion:          report.SealInfo.Version,
+		SealCreateTime:       securityTime(report.SealInfo.CreateTime),
+		SealValidStart:       securityTime(report.SealInfo.ValidStart),
+		SealValidEnd:         securityTime(report.SealInfo.ValidEnd),
 		Version:              report.Provider.Version,
 		SignSubject:          report.SignCert.Subject,
 		SignIssuer:           report.SignCert.Issuer,
 		SignSerial:           report.SignCert.SerialNumber,
+		SignNotBefore:        securityTime(report.SignCert.NotBefore),
+		SignNotAfter:         securityTime(report.SignCert.NotAfter),
 		SealSubject:          report.SealCert.Subject,
+		SealNotBefore:        securityTime(report.SealCert.NotBefore),
+		SealNotAfter:         securityTime(report.SealCert.NotAfter),
 		SignatureMethod:      report.SignatureMethod,
 		DigestMethod:         report.DigestMethod,
+		DigestOK:             report.DigestOK,
 		ReferenceCount:       len(report.References),
 		ReferenceChecked:     checked,
 		ReferencePassed:      passed,
+		FailedReferences:     signatureFailedReferences(report.References),
 		Stamps:               s.signatureStampInfos(report.StampPositions),
 		DataHashChecked:      report.DataHashChecked,
 		DataHashOK:           report.DataHashOK,
@@ -10832,7 +11059,8 @@ func (s *session) signatureInfo(report ofdgo.SignatureVerifyReport) signatureInf
 	}
 	for _, stamp := range report.Timestamps {
 		info.Timestamps = append(info.Timestamps, timestampInfo{
-			Time: securityTime(stamp.Time), Valid: stamp.Valid,
+			Time: securityTime(stamp.Time), Signer: cmp.Or(stamp.Signer.CommonName, stamp.Signer.Subject),
+			PolicyOID: stamp.PolicyOID, SerialNumber: stamp.SerialNumber, Valid: stamp.Valid,
 			BindingChecked: stamp.BindingChecked, BindingOK: stamp.BindingOK,
 			SignedValueChecked: stamp.SignedValueChecked, SignedValueOK: stamp.SignedValueOK,
 			CertTrustChecked: stamp.CertTrustChecked, CertTrustOK: stamp.CertTrustOK,

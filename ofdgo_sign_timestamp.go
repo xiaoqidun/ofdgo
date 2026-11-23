@@ -17,6 +17,7 @@ package ofdgo
 import (
 	"bytes"
 	"context"
+	"crypto/x509/pkix"
 	"encoding/asn1"
 	"fmt"
 	"math/big"
@@ -58,7 +59,7 @@ type SignatureTimestampOptions struct {
 }
 
 // SignatureTimestampReport 时间戳验证报告
-// Time只表示令牌声明时间, 仅Valid为true时可作为可信时间使用
+// Time只表示令牌声明时间, 仅Valid、CertTrustChecked与CertTrustOK均为true时可作为可信时间使用
 type SignatureTimestampReport struct {
 	tsaName            asn1.RawValue
 	Time               time.Time
@@ -83,13 +84,14 @@ type signatureTimestampEvidence struct {
 	Token   []byte
 	Data    []byte
 	AltData [][]byte
+	ForSeal bool
 }
 
 // VerifySignatureTimestamp 验证RFC3161令牌与原始字节的绑定
 // 入参: token DER编码TimeStampToken, data 被时间戳保护的原始字节, options 验证选项
 // 返回: SignatureTimestampReport 验证报告
 func VerifySignatureTimestamp(token, data []byte, options SignatureTimestampOptions) (report SignatureTimestampReport) {
-	return verifyTimestampToken(token, data, nil, options, false)
+	return verifyTimestampToken(token, data, nil, options, false, &SignaturePolicy{RejectWeakAlgorithms: true})
 }
 
 // WithSignatureTimestamp 设置离线时间戳验证
@@ -110,10 +112,10 @@ func WithSignatureTimestamp(options SignatureTimestampOptions) SignatureVerifyOp
 }
 
 // verifyTimestampToken 验证时间戳令牌并按场景控制未配置信任根时的策略
-// 入参: token DER编码令牌, data 主保护字节, altData 备选保护字节, options 验证选项, allowUntrusted 是否允许未提供信任根时仅校验完整性
+// 入参: token DER编码令牌, data 主保护字节, altData 备选保护字节, options 验证选项, allowUntrusted 是否允许未提供信任根时仅校验完整性, policy 算法策略
 // 返回: SignatureTimestampReport 验证报告
-func verifyTimestampToken(token, data []byte, altData [][]byte, options SignatureTimestampOptions, allowUntrusted bool) (report SignatureTimestampReport) {
-	err := verifySignatureTimestamp(token, data, altData, options, allowUntrusted, &report)
+func verifyTimestampToken(token, data []byte, altData [][]byte, options SignatureTimestampOptions, allowUntrusted bool, policy *SignaturePolicy) (report SignatureTimestampReport) {
+	err := verifySignatureTimestamp(token, data, altData, options, allowUntrusted, policy, &report)
 	if err != nil {
 		report.Error = err.Error()
 	}
@@ -134,9 +136,16 @@ func cloneSignatureEvidence(values [][]byte) [][]byte {
 }
 
 // verifySignatureTimestamp 检查令牌绑定、签名与TSA信任
-// 入参: token 令牌DER, data 原始字节, altData 备选绑定字节, o 验证选项, allowUntrusted 未提供信任根时是否跳过信任链强制要求, report 结果
+// 入参: token 令牌DER, data 原始字节, altData 备选绑定字节, o 验证选项, allowUntrusted 未提供信任根时是否跳过信任链强制要求, policy 算法策略, report 结果
 // 返回: error 验证错误
-func verifySignatureTimestamp(token, data []byte, altData [][]byte, o SignatureTimestampOptions, allowUntrusted bool, report *SignatureTimestampReport) error {
+func verifySignatureTimestamp(token, data []byte, altData [][]byte, o SignatureTimestampOptions, allowUntrusted bool, policy *SignaturePolicy, report *SignatureTimestampReport) error {
+	if hasBERIndefiniteOrConstructedOctet(token) {
+		normalized, err := berToDefinite(token)
+		if err != nil {
+			return fmt.Errorf("invalid RFC3161 CMS token")
+		}
+		token = normalized
+	}
 	oid, content, present, err := parseGBTContentInfoBytes(token)
 	if err != nil || !present || oid != signContentCMS && oid != signContentSignedData {
 		return fmt.Errorf("invalid RFC3161 CMS token")
@@ -157,7 +166,7 @@ func verifySignatureTimestamp(token, data []byte, altData [][]byte, o SignatureT
 	if err != nil {
 		return err
 	}
-	if err := verifyTimestampInfo(tst, data, altData, o, report); err != nil {
+	if err := verifyTimestampInfo(tst, data, altData, o, policy, report); err != nil {
 		return err
 	}
 	certs := appendSignatureCerts(nil, o.Certificates...)
@@ -194,7 +203,7 @@ func verifySignatureTimestamp(token, data []byte, altData [][]byte, o SignatureT
 	if err != nil || digestAlg != signer.DigestAlg {
 		return fmt.Errorf("timestamp digest set mismatch")
 	}
-	if err := signatureAlgorithmPolicy(&SignaturePolicy{RejectWeakAlgorithms: true}, signer.SignatureAlg, signer.DigestAlg); err != nil {
+	if err := signatureAlgorithmPolicy(policy, signer.SignatureAlg, signer.DigestAlg); err != nil {
 		return err
 	}
 	attrs, err := signatureAuthenticatedAttributes(signer.AuthAttrs)
@@ -279,9 +288,9 @@ func verifySignatureTimestamp(token, data []byte, altData [][]byte, o SignatureT
 }
 
 // verifyTimestampInfo 验证TSTInfo及可选nonce和策略
-// 入参: data TSTInfo字节, bound 主被保护字节, altBounds 备选被保护字节, o 验证选项, report 结果
+// 入参: data TSTInfo字节, bound 主被保护字节, altBounds 备选被保护字节, o 验证选项, policy 算法策略, report 结果
 // 返回: error 验证错误
-func verifyTimestampInfo(data, bound []byte, altBounds [][]byte, o SignatureTimestampOptions, report *SignatureTimestampReport) error {
+func verifyTimestampInfo(data, bound []byte, altBounds [][]byte, o SignatureTimestampOptions, policy *SignaturePolicy, report *SignatureTimestampReport) error {
 	var raw asn1.RawValue
 	rest, err := asn1.Unmarshal(data, &raw)
 	if err != nil || len(rest) != 0 || raw.Tag != asn1.TagSequence {
@@ -310,7 +319,7 @@ func verifyTimestampInfo(data, bound []byte, altBounds [][]byte, o SignatureTime
 	if err != nil {
 		return err
 	}
-	if err := signatureAlgorithmPolicy(&SignaturePolicy{RejectWeakAlgorithms: true}, "", method); err != nil {
+	if err := signatureAlgorithmPolicy(policy, "", method); err != nil {
 		return err
 	}
 	want, err := asn1OctetString(imprint[1])
@@ -347,13 +356,7 @@ func verifyTimestampInfo(data, bound []byte, altBounds [][]byte, o SignatureTime
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	if o.VerifyTime != nil {
-		now = *o.VerifyTime
-	}
-	if report.Time.After(now) {
-		return fmt.Errorf("timestamp is in the future")
-	}
+	var accuracyDur time.Duration
 	previous := -1
 	for _, item := range items[5:] {
 		order := -1
@@ -366,9 +369,10 @@ func verifyTimestampInfo(data, bound []byte, altBounds [][]byte, o SignatureTime
 				Micros  int `asn1:"optional,tag:1"`
 			}
 			rest, err := asn1.Unmarshal(item.FullBytes, &accuracy)
-			if err != nil || len(rest) != 0 || accuracy.Seconds < 0 || accuracy.Millis < 0 || accuracy.Millis > 999 || accuracy.Micros < 0 || accuracy.Micros > 999 {
+			if err != nil || len(rest) != 0 || accuracy.Seconds < 0 || accuracy.Seconds > 3600 || accuracy.Millis < 0 || accuracy.Millis > 999 || accuracy.Micros < 0 || accuracy.Micros > 999 {
 				return fmt.Errorf("invalid timestamp accuracy")
 			}
+			accuracyDur = time.Duration(accuracy.Seconds)*time.Second + time.Duration(accuracy.Millis)*time.Millisecond + time.Duration(accuracy.Micros)*time.Microsecond
 		case item.Class == asn1.ClassUniversal && item.Tag == asn1.TagBoolean:
 			order = 1
 			var ordering bool
@@ -388,7 +392,17 @@ func verifyTimestampInfo(data, bound []byte, altBounds [][]byte, o SignatureTime
 				return err
 			}
 		case item.Class == asn1.ClassContextSpecific && item.Tag == 1:
-			return fmt.Errorf("timestamp extensions not supported")
+			order = 4
+			var exts []pkix.Extension
+			rest, err := asn1.UnmarshalWithParams(item.FullBytes, &exts, "tag:1")
+			if err != nil || len(rest) != 0 || !item.IsCompound {
+				return fmt.Errorf("invalid timestamp extensions")
+			}
+			for _, ext := range exts {
+				if ext.Critical {
+					return fmt.Errorf("unsupported critical timestamp extension")
+				}
+			}
 		default:
 			return fmt.Errorf("invalid timestamp optional field")
 		}
@@ -396,6 +410,16 @@ func verifyTimestampInfo(data, bound []byte, altBounds [][]byte, o SignatureTime
 			return fmt.Errorf("duplicate or unordered timestamp field")
 		}
 		previous = order
+	}
+	now := time.Now()
+	tolerance := accuracyDur
+	if o.VerifyTime != nil {
+		now = *o.VerifyTime
+	} else if tolerance < time.Second {
+		tolerance = time.Second
+	}
+	if report.Time.After(now.Add(tolerance)) {
+		return fmt.Errorf("timestamp is in the future")
 	}
 	if o.Nonce != nil && (report.Nonce == nil || report.Nonce.Cmp(o.Nonce) != 0) {
 		return fmt.Errorf("timestamp nonce mismatch")
@@ -557,10 +581,10 @@ func signatureTimestampAttributes(raw asn1.RawValue) ([][]byte, error) {
 	return tokens, nil
 }
 
-// applySignatureTimestamps 验证内嵌及外部时间戳并返回经信任链验证的可信时间戳时间
+// applySignatureTimestamps 验证内嵌及外部时间戳并返回经信任链验证的可信签署与制章时间戳时间
 // 入参: ctx 取消上下文, o 验签选项, signedValue 签名文件字节, embedded 内嵌令牌
-// 返回: *time.Time 已通过信任链验证的最早时间戳时间
-func (report *SignatureVerifyReport) applySignatureTimestamps(ctx context.Context, o *signatureVerifyOptions, signedValue []byte, embedded []signatureTimestampEvidence) *time.Time {
+// 返回: *time.Time 已通过信任链验证的最早签署时间戳时间, *time.Time 已通过信任链验证的最早制章时间戳时间
+func (report *SignatureVerifyReport) applySignatureTimestamps(ctx context.Context, o *signatureVerifyOptions, signedValue []byte, embedded []signatureTimestampEvidence) (*time.Time, *time.Time) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -568,16 +592,17 @@ func (report *SignatureVerifyReport) applySignatureTimestamps(ctx context.Contex
 	if o.Timestamp != nil {
 		options = *o.Timestamp
 	}
-	if len(options.TrustCerts) == 0 && len(o.TrustCerts) != 0 {
+	if o.Policy != nil {
+		options.Required = options.Required || o.Policy.RequireTimestamp
+	}
+	if o.Timestamp != nil && len(options.TrustCerts) == 0 && len(o.TrustCerts) != 0 {
 		options.TrustCerts = appendSignatureCerts(nil, o.TrustCerts...)
 	}
 	if options.VerifyTime == nil && o.VerifyTime != nil {
 		options.VerifyTime = o.VerifyTime
 	}
-	if o.Policy != nil {
-		options.Required = options.Required || o.Policy.RequireTimestamp
-	}
 	allowUntrusted := len(options.TrustCerts) == 0 && !options.Required && o.Timestamp == nil
+	policy := &SignaturePolicy{RejectWeakAlgorithms: true}
 	evidence := append([]signatureTimestampEvidence(nil), embedded...)
 	for _, token := range options.Tokens {
 		evidence = append(evidence, signatureTimestampEvidence{Token: token, Data: signedValue})
@@ -595,64 +620,67 @@ func (report *SignatureVerifyReport) applySignatureTimestamps(ctx context.Contex
 			}
 		}
 	}
+	var earliestSign time.Time
+	var trustedSignTime, trustedSealTime *time.Time
 	for _, item := range evidence {
 		if err := ctx.Err(); err != nil {
 			report.Timestamps = append(report.Timestamps, SignatureTimestampReport{Error: err.Error()})
 			break
 		}
-		report.Timestamps = append(report.Timestamps, verifyTimestampToken(item.Token, item.Data, item.AltData, options, allowUntrusted))
+		result := verifyTimestampToken(item.Token, item.Data, item.AltData, options, allowUntrusted, policy)
+		report.Timestamps = append(report.Timestamps, result)
+		if result.Valid && !result.Time.IsZero() {
+			if !item.ForSeal {
+				if earliestSign.IsZero() || result.Time.Before(earliestSign) {
+					earliestSign = result.Time
+				}
+				if result.CertTrustChecked && result.CertTrustOK && (trustedSignTime == nil || result.Time.Before(*trustedSignTime)) {
+					t := result.Time
+					trustedSignTime = &t
+				}
+			} else if result.CertTrustChecked && result.CertTrustOK && (trustedSealTime == nil || result.Time.Before(*trustedSealTime)) {
+				t := result.Time
+				trustedSealTime = &t
+			}
+		}
 	}
-	var trustedTime *time.Time
 	if len(report.Timestamps) != 0 {
 		report.TimestampChecked, report.TimestampOK = true, true
-		checkRange := func(checked, ok *bool, at, start, end time.Time) {
-			if !start.IsZero() && !end.IsZero() {
-				if !*checked {
-					*checked, *ok = true, true
-				}
-				*ok = *ok && timeInRange(at, start, end)
-			}
-		}
 		for _, result := range report.Timestamps {
 			report.TimestampOK = report.TimestampOK && result.Valid
-			if result.Valid && !result.Time.IsZero() {
-				if len(report.signerCerts) > 0 {
-					if !report.SignatureTimeChecked {
-						report.SignatureTimeChecked, report.SignatureTimeOK = true, true
-					}
-					report.SignatureTimeOK = report.SignatureTimeOK && signatureCertsValidAt(report.signerCerts, result.Time)
-				} else {
-					checkRange(&report.SignatureTimeChecked, &report.SignatureTimeOK, result.Time, report.SignCert.NotBefore, report.SignCert.NotAfter)
+		}
+		if !earliestSign.IsZero() {
+			if report.SignatureTime.IsZero() {
+				report.SignatureTime = earliestSign
+			}
+			if len(report.signerCerts) > 0 {
+				if !report.SignatureTimeChecked {
+					report.SignatureTimeChecked, report.SignatureTimeOK = true, true
 				}
-				if !report.SealInfo.ValidStart.IsZero() || !report.SealInfo.ValidEnd.IsZero() {
-					if !report.SealTimeChecked {
-						report.SealTimeChecked, report.SealTimeOK = true, true
-					}
-					valid := !report.SealInfo.ValidStart.IsZero() && !report.SealInfo.ValidEnd.IsZero() && timeInRange(result.Time, report.SealInfo.ValidStart, report.SealInfo.ValidEnd)
-					if !report.SealInfo.CreateTime.IsZero() && result.Time.Before(report.SealInfo.CreateTime) {
-						valid = false
-					}
-					report.SealTimeOK = report.SealTimeOK && valid
+				report.SignatureTimeOK = report.SignatureTimeOK && signatureCertsValidAt(report.signerCerts, earliestSign)
+			} else if !report.SignCert.NotBefore.IsZero() && !report.SignCert.NotAfter.IsZero() {
+				if !report.SignatureTimeChecked {
+					report.SignatureTimeChecked, report.SignatureTimeOK = true, true
 				}
+				report.SignatureTimeOK = report.SignatureTimeOK && timeInRange(earliestSign, report.SignCert.NotBefore, report.SignCert.NotAfter)
+			}
+			if !report.SealInfo.ValidStart.IsZero() || !report.SealInfo.ValidEnd.IsZero() {
+				if !report.SealTimeChecked {
+					report.SealTimeChecked, report.SealTimeOK = true, true
+				}
+				valid := !report.SealInfo.ValidStart.IsZero() && !report.SealInfo.ValidEnd.IsZero() && timeInRange(earliestSign, report.SealInfo.ValidStart, report.SealInfo.ValidEnd)
+				if !report.SealInfo.CreateTime.IsZero() && earliestSign.Before(report.SealInfo.CreateTime) {
+					valid = false
+				}
+				report.SealTimeOK = report.SealTimeOK && valid
 			}
 		}
-		if report.TimestampOK {
-			for _, result := range report.Timestamps {
-				if result.Valid && result.CertTrustChecked && result.CertTrustOK && !result.Time.IsZero() {
-					if trustedTime == nil || result.Time.Before(*trustedTime) {
-						t := result.Time
-						trustedTime = &t
-					}
-				}
-			}
+		if !report.TimestampOK {
+			trustedSignTime, trustedSealTime = nil, nil
 		}
-	}
-	if !report.SealTimeChecked && (!report.SealInfo.ValidStart.IsZero() || !report.SealInfo.ValidEnd.IsZero()) {
-		report.SealTimeChecked, report.SealTimeOK = true, false
 	}
 	if options.Required && !report.TimestampChecked {
-		report.PolicyChecked, report.PolicyOK = true, false
-		report.PolicyError = "required timestamp evidence missing"
+		report.appendSignaturePolicyError("required timestamp evidence missing")
 	}
-	return trustedTime
+	return trustedSignTime, trustedSealTime
 }

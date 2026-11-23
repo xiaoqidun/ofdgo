@@ -63,16 +63,16 @@ type sesSignature struct {
 
 // sesSeal SES电子印章
 type sesSeal struct {
-	TimestampRaw []byte
-	Raw          []byte
-	SignData     []byte
-	Cert         []byte
-	SignAlg      string
-	Signature    []byte
-	PicType      string
-	PicData      []byte
-	CertList     sesCertList
-	Info         SignatureSealInfo
+	Timestamp []byte
+	Raw       []byte
+	SignData  []byte
+	Cert      []byte
+	SignAlg   string
+	Signature []byte
+	PicType   string
+	PicData   []byte
+	CertList  sesCertList
+	Info      SignatureSealInfo
 }
 
 // sesCertList SES印章证书列表
@@ -187,6 +187,9 @@ func parseSESSignature(data []byte) (*sesSignature, error) {
 	if err != nil || version != seal.Info.Version {
 		return nil, fmt.Errorf("invalid ses version")
 	}
+	if version != 2 && version != 4 && version != 5 {
+		return nil, fmt.Errorf("unsupported ses version: %d", version)
+	}
 	signatureTime, err := asn1Time(tbsItems[2])
 	if err != nil {
 		return nil, fmt.Errorf("invalid ses signature time: %w", err)
@@ -195,18 +198,20 @@ func parseSESSignature(data []byte) (*sesSignature, error) {
 	if err != nil {
 		return nil, err
 	}
-	if version != 4 && version != 5 {
-		return nil, fmt.Errorf("unsupported ses version: %d", version)
+	if tbsItems[4].Class != asn1.ClassUniversal || tbsItems[4].Tag != asn1.TagIA5String || tbsItems[4].IsCompound {
+		return nil, fmt.Errorf("invalid ses property info")
+	}
+	if strings.TrimSpace(asn1String(tbsItems[4])) == "" {
+		return nil, fmt.Errorf("empty ses property info")
+	}
+	if len(tbsItems) == 6 && (tbsItems[5].Class != asn1.ClassContextSpecific || tbsItems[5].Tag != 0) {
+		return nil, fmt.Errorf("invalid ses extDatas")
 	}
 	var timestamp []byte
 	if len(items) == 5 {
-		value, parseErr := asn1Explicit(items[4])
-		if parseErr != nil {
-			return nil, fmt.Errorf("invalid ses timestamp tag: %w", parseErr)
-		}
-		timestamp, err = asn1BitStringBytes(value)
-		if err != nil || len(timestamp) == 0 {
-			return nil, fmt.Errorf("invalid ses timestamp")
+		timestamp, err = parseSESTimestampField(items[4])
+		if err != nil {
+			return nil, err
 		}
 	}
 	return &sesSignature{
@@ -221,7 +226,56 @@ func parseSESSignature(data []byte) (*sesSignature, error) {
 	}, nil
 }
 
-// parseSESSignatureV1 解析SES V1签章值
+// parseSESTimestampField 统一解析SES签章和电子印章中的时间戳字段
+// 入参: raw 时间戳ASN.1节点
+// 返回: []byte 定长DER时间戳令牌, error 错误信息
+func parseSESTimestampField(raw asn1.RawValue) ([]byte, error) {
+	if raw.Class != asn1.ClassContextSpecific || raw.Tag != 0 {
+		return nil, fmt.Errorf("invalid ses timestamp tag")
+	}
+	var token []byte
+	var err error
+	if !raw.IsCompound {
+		token, err = asn1BitStringBytes(asn1.RawValue{FullBytes: asn1Wrap(asn1.TagBitString, raw.Bytes)})
+		if err != nil || len(token) == 0 {
+			return nil, fmt.Errorf("invalid ses timestamp")
+		}
+	} else {
+		value, parseErr := asn1Explicit(raw)
+		if parseErr != nil {
+			return nil, fmt.Errorf("invalid ses timestamp tag: %w", parseErr)
+		}
+		if value.Class != asn1.ClassUniversal {
+			return nil, fmt.Errorf("invalid ses timestamp")
+		}
+		switch value.Tag {
+		case asn1.TagBitString:
+			token, err = asn1BitStringBytes(value)
+		case asn1.TagOctetString:
+			token, err = asn1OctetString(value)
+		case asn1.TagSequence:
+			if !value.IsCompound {
+				return nil, fmt.Errorf("invalid ses timestamp")
+			}
+			token = bytes.Clone(value.FullBytes)
+		default:
+			return nil, fmt.Errorf("invalid ses timestamp")
+		}
+		if err != nil || len(token) == 0 {
+			return nil, fmt.Errorf("invalid ses timestamp")
+		}
+	}
+	var check asn1.RawValue
+	rest, unmarshalErr := asn1.Unmarshal(token, &check)
+	if unmarshalErr != nil || len(rest) != 0 || hasBERIndefiniteOrConstructedOctet(token) {
+		if der, berErr := berToDefinite(token); berErr == nil {
+			token = der
+		}
+	}
+	return token, nil
+}
+
+// parseSESSignatureV1 解析SES V1及V2两元组签章值
 // 入参: items ASN.1子元素
 // 返回: *sesSignature SES签章值, error 错误信息
 func parseSESSignatureV1(items []asn1.RawValue) (*sesSignature, error) {
@@ -230,15 +284,18 @@ func parseSESSignatureV1(items []asn1.RawValue) (*sesSignature, error) {
 		return nil, err
 	}
 	tbsItems, ok := asn1Children(items[0].Bytes)
-	if !ok || len(tbsItems) != 7 {
+	if !ok || (len(tbsItems) != 7 && len(tbsItems) != 8) {
 		return nil, fmt.Errorf("invalid ses v1 toSign")
+	}
+	if len(tbsItems) == 8 && (tbsItems[7].Class != asn1.ClassContextSpecific || tbsItems[7].Tag != 0) {
+		return nil, fmt.Errorf("invalid ses v1 extDatas")
 	}
 	seal, err := parseSESSeal(tbsItems[1])
 	if err != nil {
 		return nil, err
 	}
 	version, err := asn1Integer(tbsItems[0])
-	if err != nil || version != seal.Info.Version || version != 1 {
+	if err != nil || version != seal.Info.Version || (version != 1 && version != 2) {
 		return nil, fmt.Errorf("invalid ses version")
 	}
 	signatureTime, timestamp, err := parseSESSignatureTimeV1(tbsItems[2])
@@ -344,16 +401,27 @@ func verifySESSignature(data, signedData []byte, options *signatureVerifyOptions
 	if err != nil {
 		return nil, err
 	}
+	result := &sesVerifyResult{
+		SignatureMethod: sig.SignAlg,
+		SignCert:        signatureCertInfo(sig.Cert),
+		SealCert:        signatureCertInfo(sig.Seal.Cert),
+		SignCertRaw:     sig.Cert,
+		SealCertRaw:     sig.Seal.Cert,
+		SealRaw:         sig.Seal.Raw,
+		SealType:        sig.Seal.PicType,
+		SealInfo:        sig.Seal.Info,
+		SignatureTime:   sig.Time,
+	}
+	result.Certs = append(result.Certs, sig.Seal.CertList.Certs...)
+	result.Certs = append(result.Certs, options.SignCerts...)
 	if !isSM2SignatureMethod(sig.SignAlg) || !isSM2SignatureMethod(sig.Seal.SignAlg) {
-		return nil, fmt.Errorf("unsupported signature method")
+		return result, fmt.Errorf("unsupported signature method")
 	}
 	for _, method := range []string{sig.SignAlg, sig.Seal.SignAlg} {
 		if err := signatureAlgorithmPolicy(options.Policy, method, "SM3"); err != nil {
-			return nil, err
+			return result, err
 		}
 	}
-	result := &sesVerifyResult{}
-	result.SignatureMethod = sig.SignAlg
 	if len(sig.Timestamp) != 0 {
 		if sig.TimestampInTBS {
 			result.Timestamps = append(result.Timestamps, signatureTimestampEvidence{Token: sig.Timestamp, Data: signedData, AltData: [][]byte{sig.DataHash}})
@@ -361,16 +429,9 @@ func verifySESSignature(data, signedData []byte, options *signatureVerifyOptions
 			result.Timestamps = append(result.Timestamps, signatureTimestampEvidence{Token: sig.Timestamp, Data: sig.Signature})
 		}
 	}
-	result.SignCert = signatureCertInfo(sig.Cert)
-	result.SealCert = signatureCertInfo(sig.Seal.Cert)
-	result.SignCertRaw = sig.Cert
-	result.SealCertRaw = sig.Seal.Cert
-	result.SealRaw = sig.Seal.Raw
-	result.Certs = append(result.Certs, sig.Seal.CertList.Certs...)
-	result.Certs = append(result.Certs, options.SignCerts...)
-	result.SealType = sig.Seal.PicType
-	result.SealInfo = sig.Seal.Info
-	result.SignatureTime = sig.Time
+	if len(sig.Seal.Timestamp) != 0 {
+		result.Timestamps = append(result.Timestamps, signatureTimestampEvidence{Token: sig.Seal.Timestamp, Data: sig.Seal.Signature, ForSeal: true})
+	}
 	result.DataHashChecked = true
 	result.DataHashOK = bytes.Equal(sig.DataHash, signSM3(signedData))
 	sealPub, sealErr := parseSM2PublicKeyFromCert(sig.Seal.Cert)
@@ -387,7 +448,7 @@ func verifySESSignature(data, signedData []byte, options *signatureVerifyOptions
 	if err := cmp.Or(signErr, sealErr); err != nil {
 		return result, err
 	}
-	result.CertOK = sesCertInList(sig.Cert, sig.Seal.CertList)
+	result.CertOK = sesCertInListPolicy(sig.Cert, sig.Seal.CertList, options.Policy)
 	return result, nil
 }
 
@@ -425,28 +486,34 @@ func parseSESSeal(raw asn1.RawValue) (*sesSeal, error) {
 	if err != nil {
 		return nil, err
 	}
-	var timestampRaw []byte
+	if info.Version != 2 && info.Version != 4 && info.Version != 5 {
+		return nil, fmt.Errorf("unexpected ses seal version %d", info.Version)
+	}
+	var timestamp []byte
 	if len(items) == 5 {
 		if info.Version != 5 {
 			return nil, fmt.Errorf("unexpected timestamp in ses seal version %d", info.Version)
 		}
-		timestampRaw = append([]byte(nil), items[4].FullBytes...)
+		timestamp, err = parseSESTimestampField(items[4])
+		if err != nil {
+			return nil, err
+		}
 	}
 	picType, picData, err := parseSESPicture(infoItems[3])
 	if err != nil {
 		return nil, err
 	}
 	return &sesSeal{
-		TimestampRaw: timestampRaw,
-		Raw:          append([]byte(nil), raw.FullBytes...),
-		SignData:     append([]byte(nil), items[0].FullBytes...),
-		Cert:         cert,
-		SignAlg:      alg,
-		Signature:    signature,
-		PicType:      picType,
-		PicData:      picData,
-		CertList:     certList,
-		Info:         info,
+		Timestamp: timestamp,
+		Raw:       append([]byte(nil), raw.FullBytes...),
+		SignData:  append([]byte(nil), items[0].FullBytes...),
+		Cert:      cert,
+		SignAlg:   alg,
+		Signature: signature,
+		PicType:   picType,
+		PicData:   picData,
+		CertList:  certList,
+		Info:      info,
 	}, nil
 }
 
@@ -477,6 +544,9 @@ func parseSESSealV1(raw asn1.RawValue, items []asn1.RawValue) (*sesSeal, error) 
 	info, certList, err := parseSESSealInfo(infoItems)
 	if err != nil {
 		return nil, err
+	}
+	if info.Version != 1 && info.Version != 2 {
+		return nil, fmt.Errorf("unexpected ses seal version %d", info.Version)
 	}
 	picType, picData, err := parseSESPicture(infoItems[3])
 	if err != nil {
@@ -593,7 +663,19 @@ func parseSESCertListV1(raw asn1.RawValue) (sesCertList, error) {
 	}
 	list := sesCertList{Certs: make([][]byte, 0, len(certs))}
 	for _, item := range certs {
-		list.Certs = append(list.Certs, append([]byte(nil), item.FullBytes...))
+		if item.Class == asn1.ClassUniversal && item.Tag == asn1.TagOctetString {
+			cert, err := asn1OctetString(item)
+			if err != nil {
+				return sesCertList{}, err
+			}
+			list.Certs = append(list.Certs, cert)
+			continue
+		}
+		if item.Class == asn1.ClassUniversal && item.Tag == asn1.TagSequence {
+			list.Certs = append(list.Certs, append([]byte(nil), item.FullBytes...))
+			continue
+		}
+		return sesCertList{}, fmt.Errorf("invalid ses cert list item")
 	}
 	return list, nil
 }
@@ -631,7 +713,16 @@ func parseSESCertDigestList(raw asn1.RawValue) (sesCertList, error) {
 		if !ok || len(fields) != 2 {
 			return sesCertList{}, fmt.Errorf("invalid ses cert digest")
 		}
-		method := strings.TrimSpace(asn1String(fields[0]))
+		var method string
+		if fields[0].Class == asn1.ClassUniversal && fields[0].Tag == asn1.TagOID {
+			oid, err := asn1OIDString(fields[0])
+			if err != nil {
+				return sesCertList{}, err
+			}
+			method = oid
+		} else {
+			method = strings.TrimSpace(asn1String(fields[0]))
+		}
 		if method == "" {
 			return sesCertList{}, fmt.Errorf("invalid ses cert digest")
 		}
@@ -693,7 +784,7 @@ func signSM3(data []byte) []byte {
 // 返回: bool 是否为SM2签名算法
 func isSM2SignatureMethod(method string) bool {
 	switch signatureMethodText(method) {
-	case signMethodSM2SM3, signMethodSM2SM3B, signMethodSM2Sign, "SM2", "SM2SM3", "SM3SM2", "SM2WITHSM3", "SM3WITHSM2":
+	case signMethodSM2SM3, signMethodSM2SM3B, signMethodSM2Sign, "1.2.156.10197.1.301", "SM2", "SM2SM3", "SM3SM2", "SM2WITHSM3", "SM3WITHSM2":
 		return true
 	default:
 		return false
@@ -716,12 +807,22 @@ func isSM3DigestMethod(method string) bool {
 // 入参: cert DER编码证书, list 证书列表
 // 返回: bool 是否存在
 func sesCertInList(cert []byte, list sesCertList) bool {
+	return sesCertInListPolicy(cert, list, nil)
+}
+
+// sesCertInListPolicy 按可选摘要策略判断证书是否在印章证书列表中
+// 入参: cert DER编码证书, list 证书列表, policy 签名策略
+// 返回: bool 是否存在
+func sesCertInListPolicy(cert []byte, list sesCertList, policy *SignaturePolicy) bool {
 	for _, item := range list.Certs {
 		if bytes.Equal(cert, item) {
 			return true
 		}
 	}
 	for _, item := range list.Digests {
+		if policy != nil && signatureAlgorithmPolicy(policy, "", item.Method) != nil {
+			continue
+		}
 		digest, err := signatureDigest(item.Method, cert)
 		if err != nil {
 			continue

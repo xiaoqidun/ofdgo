@@ -51,6 +51,9 @@ func verifySignatureCRLs(raws [][]byte, cert, issuer *smx509.Certificate, at tim
 		if !lists[i].list.ThisUpdate.Equal(lists[j].list.ThisUpdate) {
 			return lists[i].list.ThisUpdate.Before(lists[j].list.ThisUpdate)
 		}
+		if lists[i].list.Number == nil || lists[j].list.Number == nil {
+			return lists[i].list.Number == nil && lists[j].list.Number != nil
+		}
 		return lists[i].list.Number.Cmp(lists[j].list.Number) < 0
 	})
 	versions := make(map[struct {
@@ -58,16 +61,20 @@ func verifySignatureCRLs(raws [][]byte, cert, issuer *smx509.Certificate, at tim
 		delta  bool
 	}]*smx509.RevocationList, len(lists))
 	bases := make(map[string][]*signatureCRL)
+	var previousNumbered *smx509.RevocationList
 	for n := range lists {
 		item := &lists[n]
-		if n != 0 {
-			previous := lists[n-1].list
-			order := item.list.Number.Cmp(previous.Number)
-			if order < 0 || order == 0 && !item.list.ThisUpdate.Equal(previous.ThisUpdate) {
+		if item.list.Number == nil {
+			continue
+		}
+		if previousNumbered != nil {
+			order := item.list.Number.Cmp(previousNumbered.Number)
+			if order < 0 || order == 0 && !item.list.ThisUpdate.Equal(previousNumbered.ThisUpdate) {
 				result.Error = "inconsistent CRL numbering"
 				return result
 			}
 		}
+		previousNumbered = item.list
 		key := struct {
 			number string
 			delta  bool
@@ -104,9 +111,15 @@ func verifySignatureCRLs(raws [][]byte, cert, issuer *smx509.Certificate, at tim
 				entry = candidates[index-1].entry
 			}
 		}
-		if selected != nil && item.list.Number.Cmp(selected.list.Number) == 0 && !signatureCRLStatusEqual(entry, selectedEntry) {
-			result.Error = "conflicting complete and delta CRL status"
-			return result
+		if selected != nil && !signatureCRLStatusEqual(entry, selectedEntry) {
+			if item.list.Number != nil && selected.list.Number != nil && item.list.Number.Cmp(selected.list.Number) == 0 {
+				result.Error = "conflicting complete and delta CRL status"
+				return result
+			}
+			if (item.list.Number == nil || selected.list.Number == nil) && selected.list.ThisUpdate.Equal(item.list.ThisUpdate) {
+				result.Error = "conflicting CRL status"
+				return result
+			}
 		}
 		selected, selectedEntry = item, entry
 	}
@@ -173,18 +186,35 @@ func readSignatureCRL(raw []byte, cert, issuer *smx509.Certificate, at time.Time
 			}
 			item.baseNumber = number
 		case "2.5.29.28":
-			return signatureCRL{}, fmt.Errorf("scoped CRL not supported")
+			var idp struct {
+				DistributionPoint          asn1.RawValue  `asn1:"optional,tag:0"`
+				OnlyContainsUserCerts      bool           `asn1:"optional,tag:1"`
+				OnlyContainsCACerts        bool           `asn1:"optional,tag:2"`
+				OnlySomeReasons            asn1.BitString `asn1:"optional,tag:3"`
+				IndirectCRL                bool           `asn1:"optional,tag:4"`
+				OnlyContainsAttributeCerts bool           `asn1:"optional,tag:5"`
+			}
+			rest, err := asn1.Unmarshal(ext.Value, &idp)
+			if err != nil || len(rest) != 0 || len(idp.DistributionPoint.FullBytes) != 0 || idp.IndirectCRL || idp.OnlySomeReasons.BitLength != 0 || idp.OnlyContainsAttributeCerts || idp.OnlyContainsUserCerts && cert.IsCA || idp.OnlyContainsCACerts && !cert.IsCA {
+				return signatureCRL{}, fmt.Errorf("scoped CRL not supported")
+			}
 		default:
 			if ext.Critical {
 				return signatureCRL{}, fmt.Errorf("unsupported critical CRL extension")
 			}
 		}
 	}
-	if crl.Number == nil || item.baseNumber != nil && item.baseNumber.Cmp(crl.Number) >= 0 {
+	if item.baseNumber != nil && (crl.Number == nil || item.baseNumber.Cmp(crl.Number) >= 0) {
 		return signatureCRL{}, fmt.Errorf("invalid CRL numbering")
 	}
 	for n := range crl.RevokedCertificateEntries {
 		entry := &crl.RevokedCertificateEntries[n]
+		if entry.SerialNumber.Cmp(cert.SerialNumber) != 0 {
+			continue
+		}
+		if item.entry != nil {
+			return signatureCRL{}, fmt.Errorf("duplicate CRL certificate entry")
+		}
 		for m, ext := range entry.Extensions {
 			for _, previous := range entry.Extensions[:m] {
 				if ext.Id.Equal(previous.Id) {
@@ -208,12 +238,7 @@ func readSignatureCRL(raw []byte, cert, issuer *smx509.Certificate, at time.Time
 		if entry.RevocationTime.After(crl.ThisUpdate) {
 			return signatureCRL{}, fmt.Errorf("CRL revocation time is in the future")
 		}
-		if entry.SerialNumber.Cmp(cert.SerialNumber) == 0 {
-			if item.entry != nil {
-				return signatureCRL{}, fmt.Errorf("duplicate CRL certificate entry")
-			}
-			item.entry = entry
-		}
+		item.entry = entry
 	}
 	return item, nil
 }

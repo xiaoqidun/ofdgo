@@ -42,9 +42,9 @@ type SignatureRevocationRequest struct {
 
 // SignatureRevocationOptions 离线吊销检查选项
 // 检查签署者及制章者证书, 不代表整条证书链或TSA的吊销状态
-// CRL支持直接完整列表及增量合并, 尚不支持间接或带作用域列表
+// CRL支持直接完整列表及增量合并, 仅接受完整作用域常规IDP, 不支持分片、间接或部分原因列表
 // Fetch仅提供DER证据, 本库不主动联网, 缺少NextUpdate时必须显式设置MaxAge
-// VerifyTime缺省取验签指定时间或当前时间, 不采用签名自报时间
+// VerifyTime缺省优先使用可信时间戳锚点或当前时间, 不采用签名或印章自报时间
 type SignatureRevocationOptions struct {
 	SignatureRevocationEvidence
 	Certificates [][]byte
@@ -79,6 +79,17 @@ func VerifySignatureRevocation(cert, issuer []byte, options SignatureRevocationO
 // 入参: ctx 取消上下文，nil使用后台上下文, cert 证书DER, issuer 直接颁发者DER, options 吊销选项
 // 返回: SignatureRevocationReport 验证结果
 func VerifySignatureRevocationContext(ctx context.Context, cert, issuer []byte, options SignatureRevocationOptions) SignatureRevocationReport {
+	at := time.Now()
+	if options.VerifyTime != nil {
+		at = *options.VerifyTime
+	}
+	return verifySignatureRevocationAt(ctx, cert, issuer, options, at, at)
+}
+
+// verifySignatureRevocationAt 按状态锚点时间与证据检验时间验证单张证书离线吊销证据
+// 入参: ctx 取消上下文, cert 证书DER, issuer 直接颁发者DER, options 吊销选项, statusAt 状态锚点时间, evidenceAt 证据新鲜度时间
+// 返回: SignatureRevocationReport 验证结果
+func verifySignatureRevocationAt(ctx context.Context, cert, issuer []byte, options SignatureRevocationOptions, statusAt, evidenceAt time.Time) SignatureRevocationReport {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -102,50 +113,124 @@ func VerifySignatureRevocationContext(ctx context.Context, cert, issuer []byte, 
 		result.Error = "certificate issuer signature mismatch"
 		return result
 	}
-	at := time.Now()
-	if options.VerifyTime != nil {
-		at = *options.VerifyTime
+	if !evidenceAt.After(statusAt) {
+		if !timeInRange(statusAt, i.NotBefore, i.NotAfter) || len(i.UnhandledCriticalExtensions) != 0 {
+			result.Error = "invalid revocation issuer validity"
+			return result
+		}
 	}
+	evidence := options.SignatureRevocationEvidence
+	var fetchErr error
+	if options.Fetch != nil {
+		fetched, err := options.Fetch(ctx, SignatureRevocationRequest{Certificate: bytes.Clone(cert), Issuer: bytes.Clone(issuer), VerifyTime: statusAt})
+		if err != nil {
+			if ctx.Err() != nil || !evidenceAt.After(statusAt) {
+				result.Error = err.Error()
+				return result
+			}
+			fetchErr = err
+		} else {
+			evidence.CRLs = append(cloneSignatureEvidence(evidence.CRLs), fetched.CRLs...)
+			evidence.OCSPResponses = append(cloneSignatureEvidence(evidence.OCSPResponses), fetched.OCSPResponses...)
+		}
+	}
+	first := verifySignatureRevocationEvidence(c, i, cert, issuer, evidence, statusAt, statusAt, options.MaxAge)
+	if first.Checked && (first.OK || first.Status == "revoked") || !evidenceAt.After(statusAt) {
+		return first
+	}
+	second := verifySignatureRevocationEvidence(c, i, cert, issuer, evidence, evidenceAt, statusAt, options.MaxAge)
+	if second.Checked && (second.OK || second.Status == "revoked") {
+		return second
+	}
+	if options.Fetch != nil {
+		if err := ctx.Err(); err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		fetched, err := options.Fetch(ctx, SignatureRevocationRequest{Certificate: bytes.Clone(cert), Issuer: bytes.Clone(issuer), VerifyTime: evidenceAt})
+		if err != nil {
+			if ctx.Err() != nil {
+				result.Error = err.Error()
+				return result
+			}
+			if second.Error == "" {
+				second.Error = err.Error()
+			}
+		} else if len(fetched.CRLs) != 0 || len(fetched.OCSPResponses) != 0 {
+			merged := SignatureRevocationEvidence{
+				CRLs:          append(cloneSignatureEvidence(options.CRLs), fetched.CRLs...),
+				OCSPResponses: append(cloneSignatureEvidence(options.OCSPResponses), fetched.OCSPResponses...),
+			}
+			third := verifySignatureRevocationEvidence(c, i, cert, issuer, merged, evidenceAt, statusAt, options.MaxAge)
+			if third.Checked && (third.OK || third.Status == "revoked") {
+				return third
+			}
+			if third.Checked && !second.Checked || third.Error != "" {
+				second = third
+			}
+		}
+	}
+	if second.Checked {
+		return second
+	}
+	if first.Checked {
+		return first
+	}
+	if second.Error != "" && second.Error != "usable revocation evidence not found" {
+		return second
+	}
+	if fetchErr != nil && first.Error == "usable revocation evidence not found" {
+		first.Error = fetchErr.Error()
+	}
+	return first
+}
+
+// verifySignatureRevocationEvidence 在指定证据检验时间验证CRL与OCSP并按锚点时间判定吊销结论
+// 入参: c 目标证书, i 颁发者证书, cert 目标证书DER, issuer 颁发者DER, evidence 吊销证据, at 证据检验时间, statusAt 状态锚点时间, maxAge 最大年龄
+// 返回: SignatureRevocationReport 验证结果
+func verifySignatureRevocationEvidence(c, i *smx509.Certificate, cert, issuer []byte, evidence SignatureRevocationEvidence, at, statusAt time.Time, maxAge time.Duration) SignatureRevocationReport {
+	result := SignatureRevocationReport{Certificate: signatureCertInfo(cert), Status: "unknown"}
 	if !timeInRange(at, i.NotBefore, i.NotAfter) || len(i.UnhandledCriticalExtensions) != 0 {
 		result.Error = "invalid revocation issuer validity"
 		return result
 	}
-	evidence := options.SignatureRevocationEvidence
-	if options.Fetch != nil {
-		fetched, err := options.Fetch(ctx, SignatureRevocationRequest{Certificate: bytes.Clone(cert), Issuer: bytes.Clone(issuer), VerifyTime: at})
-		if err != nil {
-			result.Error = err.Error()
-			return result
-		}
-		evidence.CRLs = append(cloneSignatureEvidence(evidence.CRLs), fetched.CRLs...)
-		evidence.OCSPResponses = append(cloneSignatureEvidence(evidence.OCSPResponses), fetched.OCSPResponses...)
-	}
 	var good *SignatureRevocationReport
-	if len(evidence.CRLs) != 0 {
-		item := verifySignatureCRLs(evidence.CRLs, c, i, at, options.MaxAge)
+	applyItem := func(item SignatureRevocationReport) *SignatureRevocationReport {
 		if item.Checked && item.Status == "revoked" {
-			return item
+			if !item.RevokedAt.IsZero() && item.RevokedAt.After(statusAt) {
+				item.OK = true
+				item.Status = "good"
+				copy := item
+				if good == nil || good.RevokedAt.IsZero() {
+					good = &copy
+				}
+				return nil
+			}
+			return &item
 		}
 		if item.OK {
 			copy := item
-			good = &copy
-		} else if item.Error != "" {
-			result.Error = item.Error
-		}
-	}
-	for _, raw := range evidence.OCSPResponses {
-		item := verifySignatureOCSP(raw, cert, issuer, at, options.MaxAge)
-		if item.Checked && item.Status == "revoked" {
-			return item
-		}
-		if item.OK {
-			copy := item
-			good = &copy
+			if good == nil {
+				good = &copy
+			}
 		} else if item.Error != "" {
 			result.Error = item.Error
 		}
 		if item.Checked && item.Status == "unknown" && !result.Checked {
 			result = item
+		}
+		return nil
+	}
+	if len(evidence.CRLs) != 0 {
+		if i.KeyUsage != 0 && i.KeyUsage&smx509.KeyUsageCRLSign == 0 {
+			result.Error = "revocation issuer lacks CRLSign usage"
+		} else if revoked := applyItem(verifySignatureCRLs(evidence.CRLs, c, i, at, maxAge)); revoked != nil {
+			return *revoked
+		}
+	}
+	for _, raw := range evidence.OCSPResponses {
+		if revoked := applyItem(verifySignatureOCSP(raw, cert, issuer, at, maxAge)); revoked != nil {
+			return *revoked
 		}
 	}
 	if good != nil {
@@ -498,8 +583,8 @@ func ocspIssuerHashes(method string, rawSubject, keyBytes []byte) ([]byte, []byt
 }
 
 // applySignatureRevocation 检查签署者及制章者的离线吊销证据
-// 入参: ctx 取消上下文, o 验签选项, certs 目标证书, extra 辅助证书
-func (report *SignatureVerifyReport) applySignatureRevocation(ctx context.Context, o *signatureVerifyOptions, certs, extra [][]byte) {
+// 入参: ctx 取消上下文, o 验签选项, signerCerts 签署证书列表, sealCert 制章证书, extra 辅助证书, trustedTime 可信签署时间戳时间, trustedSealTime 可信制章时间戳时间
+func (report *SignatureVerifyReport) applySignatureRevocation(ctx context.Context, o *signatureVerifyOptions, signerCerts [][]byte, sealCert []byte, extra [][]byte, trustedTime, trustedSealTime *time.Time) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -513,27 +598,55 @@ func (report *SignatureVerifyReport) applySignatureRevocation(ctx context.Contex
 	if o.Revocation == nil && !options.Required {
 		return
 	}
-	at := time.Now()
+	evidenceAt := time.Now()
 	if o.VerifyTime != nil {
-		at = *o.VerifyTime
+		evidenceAt = *o.VerifyTime
 	}
 	if options.VerifyTime != nil {
-		at = *options.VerifyTime
+		evidenceAt = *options.VerifyTime
 	}
-	options.VerifyTime = &at
+	signAt := evidenceAt
+	if options.VerifyTime == nil && o.VerifyTime == nil && trustedTime != nil {
+		signAt = *trustedTime
+	}
+	sealAt := evidenceAt
+	if options.VerifyTime == nil && o.VerifyTime == nil {
+		if trustedSealTime != nil {
+			sealAt = *trustedSealTime
+		} else if trustedTime != nil {
+			sealAt = *trustedTime
+		}
+	}
+	type revocationTarget struct {
+		raw      []byte
+		statusAt time.Time
+	}
+	signerCerts = compactSignatureCerts(signerCerts)
+	targets := make([]revocationTarget, 0, len(signerCerts)+1)
+	sealDuplicate := false
+	for _, raw := range signerCerts {
+		targets = append(targets, revocationTarget{raw: raw, statusAt: signAt})
+		if len(sealCert) != 0 && bytes.Equal(raw, sealCert) && signAt.Equal(sealAt) {
+			sealDuplicate = true
+		}
+	}
+	if len(sealCert) != 0 && !sealDuplicate {
+		targets = append(targets, revocationTarget{raw: sealCert, statusAt: sealAt})
+	}
 	pool := appendSignatureCerts(nil, options.Certificates...)
 	pool = append(pool, extra...)
 	pool = append(pool, o.SignCerts...)
 	pool = append(pool, o.TrustCerts...)
 	pool = compactSignatureCerts(pool)
-	for _, raw := range compactSignatureCerts(certs) {
+	for _, target := range targets {
 		if err := ctx.Err(); err != nil {
-			report.Revocations = append(report.Revocations, SignatureRevocationReport{Certificate: signatureCertInfo(raw), Status: "unknown", Error: err.Error()})
+			report.Revocations = append(report.Revocations, SignatureRevocationReport{Certificate: signatureCertInfo(target.raw), Status: "unknown", Error: err.Error()})
 			break
 		}
-		result := SignatureRevocationReport{Certificate: signatureCertInfo(raw), Status: "unknown", Error: "revocation issuer not found"}
-		cert, err := parseSignatureCertificate(raw)
+		result := SignatureRevocationReport{Certificate: signatureCertInfo(target.raw), Status: "unknown", Error: "revocation issuer not found"}
+		cert, err := parseSignatureCertificate(target.raw)
 		if err == nil {
+			var primary, secondary, fallback [][]byte
 			for _, issuerRaw := range pool {
 				issuer, err := parseSignatureCertificate(issuerRaw)
 				if err != nil || !bytes.Equal(cert.RawIssuer, issuer.RawSubject) {
@@ -543,8 +656,29 @@ func (report *SignatureVerifyReport) applySignatureRevocation(ctx context.Contex
 				if err != nil || !ok {
 					continue
 				}
-				result = VerifySignatureRevocationContext(ctx, raw, issuerRaw, options)
-				break
+				if timeInRange(target.statusAt, issuer.NotBefore, issuer.NotAfter) {
+					primary = append(primary, issuerRaw)
+				} else if evidenceAt.After(target.statusAt) && timeInRange(evidenceAt, issuer.NotBefore, issuer.NotAfter) {
+					secondary = append(secondary, issuerRaw)
+				} else {
+					fallback = append(fallback, issuerRaw)
+				}
+			}
+			candidates := append(primary, secondary...)
+			candidates = append(candidates, fallback...)
+			for _, issuerRaw := range candidates {
+				if err := ctx.Err(); err != nil {
+					result = SignatureRevocationReport{Certificate: signatureCertInfo(target.raw), Status: "unknown", Error: err.Error()}
+					break
+				}
+				candidate := verifySignatureRevocationAt(ctx, target.raw, issuerRaw, options, target.statusAt, evidenceAt)
+				if candidate.Checked && (candidate.OK || candidate.Status == "revoked") {
+					result = candidate
+					break
+				}
+				if !result.Checked && (candidate.Checked || result.Error == "revocation issuer not found" || candidate.Error != "invalid revocation issuer validity" && candidate.Error != "usable revocation evidence not found") {
+					result = candidate
+				}
 			}
 		}
 		report.Revocations = append(report.Revocations, result)
@@ -556,6 +690,6 @@ func (report *SignatureVerifyReport) applySignatureRevocation(ctx context.Contex
 		}
 	}
 	if options.Required && !report.RevocationChecked {
-		report.PolicyChecked, report.PolicyOK, report.PolicyError = true, false, "required revocation evidence missing"
+		report.appendSignaturePolicyError("required revocation evidence missing")
 	}
 }

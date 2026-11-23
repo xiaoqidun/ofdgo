@@ -44,7 +44,7 @@ type SignType string
 // Signatures 签名列表
 type Signatures struct {
 	XMLName   xml.Name    `xml:"Signatures"`
-	MaxSignID string      `xml:"MaxSignId"`
+	MaxSignID string      `xml:"MaxSignId,omitempty"`
 	List      []Signature `xml:"Signature"`
 }
 
@@ -75,8 +75,8 @@ type SignedInfo struct {
 // SignatureProvider 签名提供者信息
 type SignatureProvider struct {
 	ProviderName string `xml:"ProviderName,attr"`
-	Company      string `xml:"Company,attr"`
-	Version      string `xml:"Version,attr"`
+	Company      string `xml:"Company,attr,omitempty"`
+	Version      string `xml:"Version,attr,omitempty"`
 }
 
 // SignatureSeal 签名印章引用
@@ -89,7 +89,7 @@ type SignatureStamp struct {
 	ID       string `xml:"ID,attr"`
 	PageRef  string `xml:"PageRef,attr"`
 	Boundary string `xml:"Boundary,attr"`
-	Clip     string `xml:"Clip,attr"`
+	Clip     string `xml:"Clip,attr,omitempty"`
 }
 
 // SignatureStampPosition 签名外观位置信息，Page为从1开始的页码
@@ -150,6 +150,21 @@ type parsedStampEntry struct {
 	pageID string
 	box    Box
 	clip   *Box
+}
+
+// normalizeSignType 规范化签名类型，空值按印章签名处理
+// 入参: t 原始签名类型
+// 返回: SignType 规范化签名类型
+func normalizeSignType(t SignType) SignType {
+	raw := strings.TrimSpace(string(t))
+	switch {
+	case raw == "" || strings.EqualFold(raw, string(SignTypeSeal)):
+		return SignTypeSeal
+	case strings.EqualFold(raw, string(SignTypeSign)):
+		return SignTypeSign
+	default:
+		return SignType(raw)
+	}
 }
 
 // newStampSealCache 按共享资源策略创建有界印章媒体缓存
@@ -768,8 +783,7 @@ func (r *Reader) parseSignatures(ctx context.Context, doc *Document) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		sigType := strings.TrimSpace(string(sigRef.Type))
-		if sigType != "" && !strings.EqualFold(sigType, string(SignTypeSeal)) {
+		if normalizeSignType(sigRef.Type) != SignTypeSeal {
 			continue
 		}
 		if err := func(sigRef Signature) error {

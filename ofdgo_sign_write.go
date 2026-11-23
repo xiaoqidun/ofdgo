@@ -47,14 +47,16 @@ var ErrSignatureDependency = errors.New("signature dependency conflict")
 type SignatureWriteMode uint8
 
 // SignatureWriteOptions 最终包签署选项，不修改Editor或调用方的原件
-// SM2数字签名使用GB/T35275-2017消息结构；RSA/ECDSA使用裸签名，验签需WithSignatureCert
+// SM2数字签名使用GB/T35275-2017 Detached SignedData，RSA/ECDSA使用RFC5652 Detached CMS SignedData
+// 数字签名内嵌签署证书及中间证书链，验签无需额外提供签署证书
 // Seal仅接受已有合法SES v4电子印章，使用SM2/SM3，不声明GM/T0031-2025兼容
 // TrustRoots必须显式指定；证书吊销状态和外部业务授权由调用方在签署前检查
 // Time为签署方声明的时间，不是可信时间戳，零值取当前时间；Lock保护签名列表，禁止后续追加签署
 // ExistingVerifyOptions用于追加签署前和写出后的验证，可提供已有裸签名的验证证书
 // ReaderOptions用于打开加密包；Encryption为空时继承阅读器的加密策略
 // Compression在计算签名前优化图像，不改写已有签名保护的资源
-// PrepareAllDocuments在多文档包首次签章且OFD.xml未受保护时，为包内其他尚无Signatures声明的文档预先声明空签名列表
+// PrepareAllDocuments在多文档包且OFD.xml未受保护时，为包内其他尚无Signatures声明的文档预先声明空签名列表
+// OnProgress接收签署与加密阶段进度回调，返回非nil错误时中止流程
 type SignatureWriteOptions struct {
 	Signer                crypto.Signer
 	Certificate           []byte
@@ -71,6 +73,7 @@ type SignatureWriteOptions struct {
 	ReaderOptions         []ReaderOption
 	Encryption            *EncryptionOptions
 	Compression           CompressionOptions
+	OnProgress            func(stage string, completed, total int) error
 	progress              editorProgress
 }
 
@@ -101,16 +104,20 @@ func SignPackage(data []byte, options SignatureWriteOptions) ([]byte, error) {
 }
 
 // SignPackageContext 签署独立包并响应取消，不修改输入
-// 入参: ctx 取消上下文, data 包字节, options 签署选项
+// 入参: ctx 取消上下文，nil使用后台上下文, data 包字节, options 签署选项
 // 返回: []byte 签署后的完整包, error 签署或取消错误
 func SignPackageContext(ctx context.Context, data []byte, options SignatureWriteOptions) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	r, err := NewReader(&Input{reader: bytes.NewReader(data), size: int64(len(data))}, options.ReaderOptions...)
+	r, err := NewReaderContext(ctx, &Input{reader: bytes.NewReader(data), size: int64(len(data))}, options.ReaderOptions...)
 	if err != nil {
 		return nil, err
 	}
+	defer r.Close()
 	var output bytes.Buffer
 	if _, err := r.SignToContext(ctx, &output, options); err != nil {
 		return nil, err
@@ -173,7 +180,7 @@ func prepareDocumentSignatureEntries(ctx context.Context, r *Reader, ofdData []b
 func signatureDocumentDirectory(ctx context.Context, r *Reader, index int, body DocBody) string {
 	if body.DocRoot != "" {
 		dir := path.Dir(cleanPackagePath(resolveResourcePath("OFD.xml", "", body.DocRoot)))
-		if dir != "" && dir != "." {
+		if dir != "" && dir != "." && validPackagePath(dir) {
 			return dir
 		}
 	}
@@ -182,7 +189,7 @@ func signatureDocumentDirectory(ctx context.Context, r *Reader, index int, body 
 		if view.initRootContext(ctx) == nil {
 			if root, err := view.DocumentRootContext(ctx); err == nil {
 				dir := path.Dir(cleanPackagePath(root))
-				if dir != "" && dir != "." {
+				if dir != "" && dir != "." && validPackagePath(dir) {
 					return dir
 				}
 			}
@@ -195,6 +202,9 @@ func signatureDocumentDirectory(ctx context.Context, r *Reader, index int, body 
 // 入参: ctx 取消上下文, r 阅读器, writer 输出目标, options 签署选项
 // 返回: int64 写出字节数, error 签署、输出或取消错误
 func signatureWriteOutput(ctx context.Context, r *Reader, writer io.Writer, options SignatureWriteOptions) (int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if r == nil {
 		return 0, fmt.Errorf("nil signature reader")
 	}
@@ -312,6 +322,9 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 	if options.Mode != SignatureAppend && options.Mode != SignatureReplace {
 		return fmt.Errorf("unsupported signature write mode")
 	}
+	if len(options.Seal) == 0 && len(options.Stamps) != 0 {
+		return fmt.Errorf("digital signature cannot contain stamp annotations")
+	}
 	r := &Reader{zip: baseZip, encrypted: encSource, files: overlay, documentIndex: index, selectedVersion: selectedVersion, resources: resources}
 	if err := r.initRootContext(ctx); err != nil {
 		return err
@@ -354,6 +367,7 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 			return err
 		}
 		optimizer := &Editor{backends: defaultRenderBackends(), runtimeResources: resources, source: &editorSource{reader: r}, output: &outputOptimization{ctx: ctx, options: options.Compression, sizes: sizes, images: images}}
+		defer optimizer.output.release()
 		optimizer.OnWriteProgress = func(stage string, completed, total int) error {
 			return options.progress.report(stage, completed, total)
 		}
@@ -427,10 +441,6 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 		currentEntries = slices.Clone(list.List)
 	}
 	oldCount := len(currentEntries)
-	previousList, err := signatureWriteXML("Signatures", list)
-	if err != nil {
-		return err
-	}
 	currentProtected := make(map[string]bool)
 	if options.Mode == SignatureAppend && oldCount > 0 {
 		reports, err := r.VerifyDocumentSignaturesContext(ctx, index, existingVerifyOptions...)
@@ -439,8 +449,11 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 		}
 		ids := make(map[string]bool)
 		for _, report := range reports {
-			if !report.Valid || report.StampPositionError != "" || ids[report.ID] || report.ID == "" {
-				return fmt.Errorf("existing signature %s is invalid: %s", report.ID, report.Error)
+			if report.ID == "" || ids[report.ID] {
+				return fmt.Errorf("existing signature %s is invalid: empty or duplicate signature ID", report.ID)
+			}
+			if !report.Valid {
+				return fmt.Errorf("existing signature %s is invalid: %s", report.ID, signatureVerifyReportReason(report))
 			}
 			ids[report.ID] = true
 			for _, ref := range report.References {
@@ -461,7 +474,11 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 	replacedListFrom := ""
 	originalListPath := listPath
 	if bodySignatures == "" {
-		listPath = signatureWriteAvailableInView(r, overlay, path.Join(r.rootDir, "Signs", "Signatures.xml"))
+		candidate := cleanPackagePath(path.Join(r.rootDir, "Signs", "Signatures.xml"))
+		if !validPackagePath(candidate) {
+			candidate = path.Join("Doc_"+strconv.Itoa(index), "Signs", "Signatures.xml")
+		}
+		listPath = signatureWriteAvailableInView(r, overlay, candidate)
 		if options.PrepareAllDocuments && len(r.ofd.DocBody) > 1 && !protected["OFD.xml"] {
 			updatedOFD, err := prepareDocumentSignatureEntries(ctx, r, originalOFDData, overlay, map[int]string{index: listPath})
 			if err != nil {
@@ -495,7 +512,10 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 			if err != nil {
 				return err
 			}
-			if listShared && !protected["OFD.xml"] && !currentProtected["OFD.xml"] {
+			if listShared {
+				if protected["OFD.xml"] || currentProtected["OFD.xml"] {
+					return fmt.Errorf("%w: cannot isolate shared signature list while OFD.xml is protected", ErrSignatureDependency)
+				}
 				replacedListFrom = listPath
 				listPath = signatureWriteAvailableInView(r, overlay, listPath)
 				root, err := parseEditorXML(originalOFDData)
@@ -531,8 +551,13 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 			}
 		}
 	}
+	var removedIDs map[string]bool
 	var removedSigFiles map[string]bool
 	if options.Mode == SignatureReplace {
+		removedIDs = make(map[string]bool, len(currentEntries))
+		for _, entry := range currentEntries {
+			removedIDs[entry.ID] = true
+		}
 		if r.versionInfo != nil && len(currentEntries) != 0 {
 			removedSigFiles = make(map[string]bool)
 			for _, entry := range currentEntries {
@@ -559,7 +584,7 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 	}
 	directory := ""
 	for n := 1; ; n++ {
-		directory = path.Join(path.Dir(listPath), "Sign_"+strconv.Itoa(n))
+		directory = cleanPackagePath(path.Join(path.Dir(listPath), "Sign_"+strconv.Itoa(n)))
 		occupied := false
 		for name := range r.fileNames {
 			if name == directory || strings.HasPrefix(name, directory+"/") {
@@ -585,22 +610,20 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 		kind = SignTypeSeal
 		overlay[sealPath] = bytes.Clone(options.Seal)
 	}
-	list.List = append(list.List, Signature{ID: id, Type: kind, BaseLoc: "/" + sigPath})
-	updatedList, err := signatureWriteXML("Signatures", list)
-	if err != nil {
-		return err
-	}
+	addedEntry := Signature{ID: id, Type: kind, BaseLoc: "/" + sigPath}
+	list.List = append(list.List, addedEntry)
+	var updatedList []byte
 	if len(originalListData) != 0 && replacedListFrom == "" {
-		root, err := parseEditorXML(originalListData)
+		updatedList, err = signaturePatchListXML(originalListData, removedIDs, list.MaxSignID, addedEntry)
 		if err != nil {
 			return err
 		}
-		updated, err := editorXMLMerge(originalListData, root, previousList, updatedList)
-		if err != nil {
-			return err
-		}
-		updatedList = editorPatchXML(originalListData, []editorXMLPatch{{root.start, root.end, updated}})
 		modifiedNames[listPath] = originalListData
+	} else {
+		updatedList, err = signatureWriteXML("Signatures", list)
+		if err != nil {
+			return err
+		}
 	}
 	overlay[listPath] = updatedList
 	deleteSignatureDigestCachePath(digestCache, listPath)
@@ -678,7 +701,7 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 	if provider.ProviderName == "" {
 		provider.ProviderName = "ofdgo"
 	}
-	info := signatureWriteInfo{Provider: provider, SignatureMethod: identity.method, SignatureDateTime: options.Time.Format(time.RFC3339), References: refs, Stamps: stamps}
+	info := signatureWriteInfo{Provider: provider, SignatureMethod: identity.method, SignatureDateTime: options.Time.UTC().Format("20060102150405Z"), References: refs, Stamps: stamps}
 	if kind == SignTypeSeal {
 		info.Seal = &SignatureSeal{BaseLoc: "/" + sealPath}
 	}
@@ -694,7 +717,12 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 	if err := check.initRootContext(ctx); err != nil {
 		return err
 	}
-	reports, err := check.VerifyDocumentSignaturesContext(ctx, index, verifyOptions...)
+	needNewVerifyTime := len(parsedExisting.TrustCerts) != 0 && len(options.TrustRoots) != 0 && parsedExisting.VerifyTime == nil
+	postVerifyOptions := verifyOptions
+	if needNewVerifyTime && oldCount == 0 {
+		postVerifyOptions = append(slices.Clone(verifyOptions), WithSignatureVerifyTime(options.Time))
+	}
+	reports, err := check.VerifyDocumentSignaturesContext(ctx, index, postVerifyOptions...)
 	if err != nil {
 		return err
 	}
@@ -702,11 +730,125 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 		return fmt.Errorf("signature verification count mismatch")
 	}
 	for _, report := range reports {
-		if !report.Valid || report.StampPositionError != "" {
-			return fmt.Errorf("written signature %s failed verification: %s", report.ID, report.Error)
+		if needNewVerifyTime && oldCount > 0 && report.ID == id {
+			var newOpts signatureVerifyOptions
+			for _, opt := range append(slices.Clone(verifyOptions), WithSignatureVerifyTime(options.Time)) {
+				if opt != nil {
+					opt(&newOpts)
+				}
+			}
+			newOpts.DocIndex = index
+			report = check.verifySignature(ctx, listPath, &list, addedEntry, &newOpts)
+		}
+		if !report.Valid {
+			return fmt.Errorf("written signature %s failed verification: %s", report.ID, signatureVerifyReportReason(report))
 		}
 	}
 	return ctx.Err()
+}
+
+// signaturePatchListXML 保留原签名列表根壳、注释与扩展节点，按ID删除旧节点并更新上限与新条目
+// 入参: original 原Signatures.xml字节, removedIDs 待删除旧签名ID集合, maxSignID 新最大签名编号, added 新增签名条目
+// 返回: []byte 修补后的XML, error 解析或编码错误
+func signaturePatchListXML(original []byte, removedIDs map[string]bool, maxSignID string, added Signature) ([]byte, error) {
+	root, err := parseEditorXML(original)
+	if err != nil {
+		return nil, err
+	}
+	attrs := ofdAttrs{
+		{Name: xml.Name{Local: "ID"}, Value: added.ID},
+		{Name: xml.Name{Local: "BaseLoc"}, Value: added.BaseLoc},
+	}
+	if added.Type != "" {
+		attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "Type"}, Value: string(added.Type)})
+	}
+	sigFragment, err := root.containerXML("Signature", attrs, nil)
+	if err != nil {
+		return nil, err
+	}
+	if root.open == root.end {
+		inner := append(root.textXML("MaxSignId", maxSignID), sigFragment...)
+		return editorPatchXML(original, []editorXMLPatch{editorXMLContent(original, root, inner)}), nil
+	}
+	var patches []editorXMLPatch
+	var maxNode *editorXML
+	var firstSig *editorXML
+	for _, node := range root.children {
+		if node.matchesOFD("MaxSignId") && maxNode == nil {
+			maxNode = node
+			continue
+		}
+		if node.matchesOFD("Signature") {
+			if firstSig == nil {
+				firstSig = node
+			}
+			if removedIDs[node.attr("ID")] {
+				patches = append(patches, editorXMLPatch{start: node.start, end: node.end})
+			}
+		}
+	}
+	if maxNode != nil {
+		updatedMax, err := editorXMLTextValue(original, maxNode, editorImportText(original, maxNode), maxSignID)
+		if err != nil {
+			return nil, err
+		}
+		patches = append(patches, editorXMLPatch{start: maxNode.start, end: maxNode.end, data: updatedMax})
+		patches = append(patches, editorXMLPatch{start: root.close, end: root.close, data: sigFragment})
+		return editorPatchXML(original, patches), nil
+	}
+	maxFragment := root.textXML("MaxSignId", maxSignID)
+	if firstSig != nil {
+		patches = append(patches, editorXMLPatch{start: firstSig.start, end: firstSig.start, data: maxFragment})
+		patches = append(patches, editorXMLPatch{start: root.close, end: root.close, data: sigFragment})
+	} else {
+		patches = append(patches, editorXMLPatch{start: root.close, end: root.close, data: append(maxFragment, sigFragment...)})
+	}
+	return editorPatchXML(original, patches), nil
+}
+
+// signatureVerifyReportReason 聚合签名验证报告中的失败原因，避免返回空详情
+// 入参: report 签名验证报告
+// 返回: string 非空失败原因
+func signatureVerifyReportReason(report SignatureVerifyReport) string {
+	var reasons []string
+	for _, item := range []string{report.Error, report.StampPositionError, report.PolicyError, report.CoverageError, report.CertTrustError} {
+		if text := strings.TrimSpace(item); text != "" && !slices.Contains(reasons, text) {
+			reasons = append(reasons, text)
+		}
+	}
+	if len(reasons) != 0 {
+		return strings.Join(reasons, "; ")
+	}
+	switch {
+	case !report.DigestOK:
+		return "reference digest mismatch"
+	case report.CoverageChecked && !report.CoverageOK:
+		return "incomplete document coverage"
+	case report.DataHashChecked && !report.DataHashOK:
+		return "signature data hash mismatch"
+	case report.SignedValueChecked && !report.SignedValueOK:
+		return "signed value verification failed"
+	case report.SealChecked && !report.SealOK:
+		return "seal verification failed"
+	case report.SealMatchChecked && !report.SealMatchOK:
+		return "external seal mismatch"
+	case report.CertChecked && !report.CertOK:
+		return "signer certificate mismatch"
+	case report.SignatureTimeChecked && !report.SignatureTimeOK:
+		return "certificate invalid at signature time"
+	case report.SealTimeChecked && !report.SealTimeOK:
+		return "seal invalid at signature time"
+	case report.SealCertTimeChecked && !report.SealCertTimeOK:
+		return "seal maker certificate invalid at seal creation time"
+	case report.CertTimeChecked && !report.CertTimeOK:
+		return "certificate invalid at verify time"
+	case report.TimestampChecked && !report.TimestampOK:
+		return "timestamp verification failed"
+	case report.RevocationChecked && !report.RevocationOK:
+		return "revocation check failed"
+	default:
+		return "signature verification failed"
+	}
 }
 
 // signatureTargetFiles 按当前文档或版本的真实依赖闭包汇总本次签章应保护的包内文件
@@ -769,11 +911,9 @@ func signatureTargetFiles(ctx context.Context, scoped *Reader, index int, listPa
 			return nil, err
 		}
 		docDir := path.Dir(docRoot)
-		if docDir != "." {
-			for name := range scoped.fileNames {
-				if strings.HasPrefix(name, docDir+"/") && !otherDeps[name] {
-					allowed[name] = true
-				}
+		for name := range scoped.fileNames {
+			if (docDir == "." || strings.HasPrefix(name, docDir+"/")) && !otherDeps[name] {
+				allowed[name] = true
 			}
 		}
 	}
@@ -959,11 +1099,7 @@ func signatureWriteProtectedNames(ctx context.Context, r *Reader, baseZip *zip.R
 		}
 		for _, report := range reports {
 			if !report.Valid {
-				reason := report.Error
-				if reason == "" {
-					reason = "signature verification failed"
-				}
-				return fmt.Errorf("cannot preserve document %d signature %s: %s", index, report.ID, reason)
+				return fmt.Errorf("cannot preserve document %d signature %s: %s", index, report.ID, signatureVerifyReportReason(report))
 			}
 			sigPath := signatureRefPath(listPath, report.BaseLoc)
 			if !validPackagePath(sigPath) {
@@ -1060,7 +1196,15 @@ func signatureWriteProtectedNames(ctx context.Context, r *Reader, baseZip *zip.R
 func signatureWriteIDsInView(ctx context.Context, list *Signatures, listPath string, view *Reader, stamps []SignatureStamp) (string, []SignatureStamp, error) {
 	var sequence signatureIDSequence
 	sequence.observe(list.MaxSignID)
-	add := func(used map[string]bool, id string) error {
+	addExisting := func(used map[string]bool, id string) error {
+		if id == "" || used[id] {
+			return fmt.Errorf("invalid or duplicate signature ID: %s", id)
+		}
+		used[id] = true
+		sequence.observe(id)
+		return nil
+	}
+	addNew := func(used map[string]bool, id string) error {
 		if !ofdXMLIDValid(id) || used[id] {
 			return fmt.Errorf("invalid or duplicate signature ID: %s", id)
 		}
@@ -1070,7 +1214,7 @@ func signatureWriteIDsInView(ctx context.Context, list *Signatures, listPath str
 	}
 	listUsed := make(map[string]bool, len(list.List))
 	for _, ref := range list.List {
-		if err := add(listUsed, ref.ID); err != nil {
+		if err := addExisting(listUsed, ref.ID); err != nil {
 			return "", nil, err
 		}
 		sigLoc := signatureRefPath(listPath, ref.BaseLoc)
@@ -1087,7 +1231,7 @@ func signatureWriteIDsInView(ctx context.Context, list *Signatures, listPath str
 		}
 		sigUsed := make(map[string]bool, len(file.SignedInfo.StampAnnot))
 		for _, stamp := range file.SignedInfo.StampAnnot {
-			if err := add(sigUsed, stamp.ID); err != nil {
+			if err := addExisting(sigUsed, stamp.ID); err != nil {
 				return "", nil, err
 			}
 		}
@@ -1095,7 +1239,7 @@ func signatureWriteIDsInView(ctx context.Context, list *Signatures, listPath str
 	newUsed := make(map[string]bool, len(stamps))
 	for _, stamp := range stamps {
 		if stamp.ID != "" {
-			if err := add(newUsed, stamp.ID); err != nil {
+			if err := addNew(newUsed, stamp.ID); err != nil {
 				return "", nil, err
 			}
 		}
@@ -1269,6 +1413,9 @@ func (e *Editor) PrepareDocumentSignatures() error {
 // 入参: ctx 取消上下文
 // 返回: error 依赖冲突、读取、结构或取消错误
 func (e *Editor) PrepareDocumentSignaturesContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1361,9 +1508,12 @@ func (r *Reader) SignTo(writer io.Writer, options SignatureWriteOptions) (int64,
 }
 
 // SignToContext 签署并回验独立包快照后写出，支持准备和输出阶段取消
-// 入参: ctx 取消上下文, writer 独立输出目标, options 签署选项
+// 入参: ctx 取消上下文，nil使用后台上下文, writer 独立输出目标, options 签署选项
 // 返回: int64 写出字节数, error 签署、输出或取消错误
 func (r *Reader) SignToContext(ctx context.Context, writer io.Writer, options SignatureWriteOptions) (int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if r == nil {
 		return 0, fmt.Errorf("nil signature reader")
 	}
@@ -1376,14 +1526,20 @@ func (r *Reader) SignToContext(ctx context.Context, writer io.Writer, options Si
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
+	if options.OnProgress != nil {
+		options.progress = editorProgress(options.OnProgress)
+	}
 	options.progress = options.progress.withContext(ctx)
 	return signatureWriteOutput(ctx, r, writer, options)
 }
 
 // SignToOutput 通过输出事务签署并原子提交文档，取消或失败时自动中止事务
-// 入参: ctx 取消上下文, output 输出目标, options 签署选项
+// 入参: ctx 取消上下文，nil使用后台上下文, output 输出目标, options 签署选项
 // 返回: int64 写出字节数, error 签署、输出事务或取消错误
 func (r *Reader) SignToOutput(ctx context.Context, output Output, options SignatureWriteOptions) (n int64, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if r == nil {
 		return 0, fmt.Errorf("nil signature reader")
 	}
@@ -1450,7 +1606,7 @@ func (e *Editor) SignToContext(ctx context.Context, writer io.Writer, options Si
 	if _, err := snapshot.writePlaintext(&plain); err != nil {
 		return 0, err
 	}
-	r, err := NewReaderContext(ctx, &Input{reader: &plain, size: plain.size})
+	r, err := NewReaderContext(ctx, &Input{reader: &plain, size: plain.size}, WithResources(e.runtimeResources))
 	if err != nil {
 		return 0, err
 	}
@@ -1473,7 +1629,9 @@ func (e *Editor) SignToContext(ctx context.Context, writer io.Writer, options Si
 	}
 	r.encryption = e.encryption
 	r.bindEncryptionHold()
-	options.progress = editorProgress(e.OnWriteProgress)
+	if options.OnProgress == nil {
+		options.progress = editorProgress(e.OnWriteProgress)
+	}
 	return r.SignToContext(ctx, writer, options)
 }
 
@@ -1500,6 +1658,9 @@ func (s *signatureIDSequence) next() (string, error) {
 // 入参: ctx 取消上下文, id 签名标识，空值清空
 // 返回: error 标识、依赖、结构或取消错误
 func (e *Editor) removeSignatures(ctx context.Context, id string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1626,7 +1787,14 @@ func (e *Editor) removeSignatures(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		node := ofd.childAt("DocBody", reader.documentIndex).child("Signatures")
+		body := ofd.childAt("DocBody", reader.documentIndex)
+		if body == nil {
+			return fmt.Errorf("missing document body")
+		}
+		node := body.child("Signatures")
+		if node == nil {
+			return fmt.Errorf("missing document signatures entry")
+		}
 		if remaining == 0 {
 			parts["OFD.xml"] = editorPatchXML(entry, []editorXMLPatch{{start: node.start, end: node.end}})
 			candidates[name] = true

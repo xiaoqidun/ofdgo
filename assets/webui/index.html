@@ -682,6 +682,7 @@
 				</div>
 				<div class="form-row"><label for="signMode">方式</label><select id="signMode"><option value="append">追加</option><option value="replace">替换</option></select></div>
 				<div class="form-row"><label for="signLock">禁止追加</label><input id="signLock" type="checkbox"></div>
+				<div id="signPrepareAllRow" class="form-row" hidden><span>多文档</span><div class="form-options"><label><input id="signPrepareAll" type="checkbox" checked><span>预先声明其他文档签名入口</span></label></div></div>
 				<div id="signEncryptionFields" hidden>
 					<div class="form-row"><label for="signEncryptionType">加密</label><select id="signEncryptionType"><option value="none">明文</option><option value="password">口令</option><option value="certificate">证书</option></select></div>
 					<div id="signEncryptionUserRow" class="form-row" hidden><label for="signEncryptionUser">用户</label><input id="signEncryptionUser" type="text" placeholder="可选" autocomplete="off" spellcheck="false"></div>

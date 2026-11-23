@@ -75,6 +75,8 @@ const el = {
 	signHeight: document.querySelector("#signHeight"),
 	signMode: document.querySelector("#signMode"),
 	signLock: document.querySelector("#signLock"),
+	signPrepareAllRow: document.querySelector("#signPrepareAllRow"),
+	signPrepareAll: document.querySelector("#signPrepareAll"),
 	signEncryptionFields: document.querySelector("#signEncryptionFields"),
 	signEncryptionType: document.querySelector("#signEncryptionType"),
 	signEncryptionUserRow: document.querySelector("#signEncryptionUserRow"),
@@ -1946,6 +1948,7 @@ el.signButton.addEventListener("click", () => {
 	el.signPages.value = state.editing && state.pageSelection.size ? selectedPageRange() : String(state.pageIndex + 1);
 	el.signStatus.textContent = "";
 	updateSignPlacement();
+	updateSignPrepareAll();
 	updateSignEncryption();
 	el.signPanel.showModal();
 });
@@ -1960,6 +1963,7 @@ el.signPanel.addEventListener("close", () => {
 	if (!el.signPanel.open && !sealPreview) {
 		releaseFormFiles(el.signForm);
 		el.signForm.reset();
+		updateSignPrepareAll();
 		updateSignEncryption();
 	}
 });
@@ -10777,6 +10781,12 @@ function updateSignPlacement() {
 	document.querySelector('label[for="signX"]').textContent = el.signPlacement.value === "seam" ? "右侧内缩" : "横向";
 }
 
+function updateSignPrepareAll() {
+	const multi = (state.doc?.documents?.length || 0) > 1;
+	el.signPrepareAllRow.hidden = !multi;
+	el.signPrepareAll.disabled = !multi;
+}
+
 function updateSignEncryption() {
 	const required = Boolean(state.doc?.encryption?.policyRequired);
 	el.signEncryptionFields.hidden = !required;
@@ -10833,6 +10843,7 @@ async function signDocument(event) {
 		return;
 	}
 	if (el.signMode.value === "replace" && !await requestConfirmation("替换现有签名，是否继续？")) return;
+	if (!active() || !state.doc) return;
 	let key;
 	let file = null;
 	const keyPassword = new TextEncoder().encode(el.signKeyPassword.value);
@@ -10843,6 +10854,7 @@ async function signDocument(event) {
 	const options = { keyPassword, pages:el.signPages.value.trim(), placement:el.signPlacement.value,
 		x:Number(el.signX.value), y:Number(el.signY.value), width:Number(el.signWidth.value), height:Number(el.signHeight.value),
 		mode:el.signMode.value, lock:el.signLock.checked, compression:compressionOptions(el.outputCompression.value) };
+	if ((state.doc.documents?.length || 0) > 1) options.prepareAllDocuments = el.signPrepareAll.checked;
 	if (policyRequired) options.encryptionMode = encryptionMode;
 	const name = `${baseFileName()}_签章.ofd`;
 	el.signKeyPassword.value = "";
@@ -10897,6 +10909,7 @@ async function signDocument(event) {
 			el.signCancel.disabled = false;
 			if (state.signCanceled) el.signStatus.textContent = "签署已取消";
 			updateSignPlacement();
+			updateSignPrepareAll();
 			updateSignEncryption();
 			el.cancelExportButton.hidden = true;
 		});
@@ -14071,6 +14084,9 @@ function renderSignatures() {
 		checksTitle.textContent = "校验详情";
 		checks.append(checksTitle);
 		appendSignatureCheck(checks, "原文", signature.dataHashChecked, signature.dataHashOK);
+		for (const [index, ref] of (signature.failedReferences || []).entries()) {
+			appendInfoLine(checks, index === 0 ? "异常文件" : "", ref.error ? `${ref.path}：${ref.error}` : ref.path, "fail");
+		}
 		appendSignatureCheck(checks, "签名", signature.signedValueChecked, signature.signedValueOK);
 		appendSignatureCheck(checks, "证书", signature.certChecked, signature.certOK);
 		appendSignaturePolicy(checks, "证书期限", signature.certTimeChecked, signature.certTimeOK);
@@ -14095,9 +14111,13 @@ function renderSignatures() {
 		for (const timestamp of signature.timestamps || []) {
 			const details = document.createElement("details");
 			const title = document.createElement("summary");
-			title.textContent = timestamp.valid ? "可信时间戳" : "时间戳详情";
+			const trustedTimestamp = timestamp.valid && timestamp.certTrustChecked && timestamp.certTrustOK;
+			title.textContent = trustedTimestamp ? "可信时间戳" : timestamp.valid && !timestamp.certTrustChecked ? "时间戳（未验信任）" : "时间戳详情";
 			details.append(title);
-			appendInfoLine(details, timestamp.valid ? "时间" : "声明时间", formatDocumentTime(timestamp.time));
+			appendInfoLine(details, trustedTimestamp ? "时间" : "声明时间", formatDocumentTime(timestamp.time));
+			appendInfoLine(details, "签署机构", timestamp.signer);
+			appendInfoLine(details, "策略", timestamp.policyOID);
+			appendInfoLine(details, "序列号", timestamp.serialNumber);
 			appendSignatureCheck(details, "绑定", timestamp.bindingChecked, timestamp.bindingOK);
 			appendSignatureCheck(details, "签名", timestamp.signedValueChecked, timestamp.signedValueOK);
 			appendSignatureCheck(details, "信任", timestamp.certTrustChecked, timestamp.certTrustOK);
@@ -14126,14 +14146,20 @@ function renderSignatures() {
 		details.append(title);
 		appendInfoLine(details, "编号", signature.id);
 		appendInfoLine(details, "文档", signature.docRoot);
+		appendInfoLine(details, "所属版本", signature.versionId);
 		appendInfoLine(details, "算法", signature.signatureMethod);
 		appendInfoLine(details, "摘要", signature.digestMethod);
 		appendInfoLine(details, "证书主体", signature.signSubject);
 		appendInfoLine(details, "颁发者", signature.signIssuer);
 		appendInfoLine(details, "序列号", signature.signSerial);
+		appendInfoLine(details, "证书期限", formatTimeRange(signature.signNotBefore, signature.signNotAfter));
 		appendInfoLine(details, "章号", signature.sealId);
 		appendInfoLine(details, "章图", signature.sealType);
+		appendInfoLine(details, "印章版本", signature.sealVersion ? `v${signature.sealVersion}` : "");
+		appendInfoLine(details, "制章时间", formatDocumentTime(signature.sealCreateTime));
+		appendInfoLine(details, "印章期限", formatTimeRange(signature.sealValidStart, signature.sealValidEnd));
 		appendInfoLine(details, "制章证书", signature.sealSubject);
+		appendInfoLine(details, "制章期限", formatTimeRange(signature.sealNotBefore, signature.sealNotAfter));
 		appendInfoLine(details, "印章厂商", signature.sealVendor);
 		appendInfoLine(details, "组件版本", signature.version);
 		row.append(details);
@@ -14203,7 +14229,7 @@ function signatureReferenceText(signature) {
 	const passed = signature.referencePassed || 0;
 	const count = signature.referenceCount || 0;
 	if (!count) {
-		return "";
+		return "失败 0 / 0";
 	}
 	const status = signatureReferenceStatus(signature);
 	return `${status === "ok" ? "通过" : status === "fail" ? "失败" : "未验"} ${passed} / ${count}`;
@@ -14211,8 +14237,8 @@ function signatureReferenceText(signature) {
 
 function signatureReferenceStatus(signature) {
 	const count = signature.referenceCount || 0;
-	if (!count) {
-		return "";
+	if (signature.digestOK === false || !count || signature.failedReferences?.length) {
+		return "fail";
 	}
 	if (signature.referencePassed < signature.referenceChecked) {
 		return "fail";
@@ -14221,8 +14247,42 @@ function signatureReferenceStatus(signature) {
 }
 
 function formatDocumentTime(value) {
-	const text = String(value || "").trim().replace(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/, "$1-$2-$3 $4:$5:$6$7$8").replace("T", " ");
-	return /^0001[-/]0?1[-/]0?1(?: 0{1,2}:00:00(?:\.0+)?(?:Z|[+-]00:?00)?)?$/.test(text) ? "" : text;
+	const raw = String(value || "").trim();
+	if (!raw) {
+		return "";
+	}
+	const text = raw.replace(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\.\d+)?([Zz]|[+-]\d{2}:?\d{2})?$/, "$1-$2-$3 $4:$5:$6$7$8").replace(/^(\d{4}-\d{2}-\d{2})[Tt](\d{2}:\d{2}:\d{2})/, "$1 $2");
+	if (/^0001[-/]0?1[-/]0?1(?: 0{1,2}:00:00(?:\.0+)?(?:[Zz]|[+-]00:?00)?)?$/.test(text)) {
+		return "";
+	}
+	const match = text.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|([+-])(\d{2}):?(\d{2}))$/);
+	if (!match) {
+		return text;
+	}
+	const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+	const hour = Number(match[4]), minute = Number(match[5]), second = Number(match[6]);
+	const tzHour = match[10] ? Number(match[10]) : 0, tzMin = match[11] ? Number(match[11]) : 0;
+	if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59 || tzHour > 23 || tzMin > 59) {
+		return text;
+	}
+	const frac = match[7] ? `.${match[7].slice(1, 4).padEnd(3, "0")}` : "";
+	const tz = match[8].toUpperCase().replace(/^([+-]\d{2})(\d{2})$/, "$1:$2");
+	const date = new Date(`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}${frac}${tz}`);
+	const offsetMinutes = match[9] ? (match[9] === "+" ? 1 : -1) * (tzHour * 60 + tzMin) : 0;
+	const check = new Date(date.getTime() + offsetMinutes * 60000);
+	if (Number.isNaN(date.getTime()) || check.getUTCFullYear() !== year || check.getUTCMonth() + 1 !== month || check.getUTCDate() !== day || check.getUTCHours() !== hour || check.getUTCMinutes() !== minute || check.getUTCSeconds() !== second) {
+		return text;
+	}
+	const pad = n => String(n).padStart(2, "0");
+	return `${String(date.getFullYear()).padStart(4, "0")}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function formatTimeRange(start, end) {
+	const from = formatDocumentTime(start), to = formatDocumentTime(end);
+	if (from && to) {
+		return `${from} ~ ${to}`;
+	}
+	return from || to;
 }
 
 function appendInfoLine(row, label, value, status = "") {
