@@ -1963,6 +1963,7 @@ el.signPanel.addEventListener("close", () => {
 	if (!el.signPanel.open && !sealPreview) {
 		releaseFormFiles(el.signForm);
 		el.signForm.reset();
+		updateSignPlacement();
 		updateSignPrepareAll();
 		updateSignEncryption();
 	}
@@ -4482,7 +4483,10 @@ function openObjectPicker(items = canvasEditor.pageItems(state.pageIndex)) {
 		const button = document.createElement("button");
 		button.className = "button";
 		button.type = "button";
-		button.textContent = `${kinds[item.annotationType] || labels[item.type] || "对象"} · ${item.text || item.remark || item.id.replace("annotation:", "")}`;
+		const labelID = item.id.startsWith("signature:")
+			? item.id.slice(10).split(":").map(part => { try { return decodeURIComponent(part.replaceAll("+", " ")); } catch { return part; } }).join(" / ")
+			: item.id.replace("annotation:", "");
+		button.textContent = `${kinds[item.annotationType] || labels[item.type] || "对象"} · ${item.text || item.remark || labelID}`;
 		button.title = button.textContent;
 		button.addEventListener("click", () => {
 			el.objectPicker.close();
@@ -14108,36 +14112,52 @@ function renderSignatures() {
 		appendSignatureCheck(checks, "时间戳", signature.timestampChecked, signature.timestampOK);
 		appendSignatureCheck(checks, "撤销", signature.revocationChecked, signature.revocationOK);
 		row.append(checks);
-		for (const timestamp of signature.timestamps || []) {
+		if (signature.timestamps?.length) {
 			const details = document.createElement("details");
 			const title = document.createElement("summary");
-			const trustedTimestamp = timestamp.valid && timestamp.certTrustChecked && timestamp.certTrustOK;
-			title.textContent = trustedTimestamp ? "可信时戳" : "时戳详情";
+			const allTrusted = signature.timestamps.every(item => item.valid && item.certTrustChecked && item.certTrustOK);
+			title.textContent = allTrusted ? "可信时戳" : "时戳详情";
 			details.append(title);
-			appendInfoLine(details, trustedTimestamp ? "时间" : "声明时间", formatDocumentTime(timestamp.time));
-			appendInfoLine(details, "签署机构", timestamp.signer);
-			appendInfoLine(details, "策略", timestamp.policyOID);
-			appendInfoLine(details, "序列号", timestamp.serialNumber);
-			appendSignatureCheck(details, "绑定", timestamp.bindingChecked, timestamp.bindingOK);
-			appendSignatureCheck(details, "签名", timestamp.signedValueChecked, timestamp.signedValueOK);
-			appendSignatureCheck(details, "信任", timestamp.certTrustChecked, timestamp.certTrustOK);
-			appendSignatureCheck(details, "时效", timestamp.certTimeChecked, timestamp.certTimeOK);
-			appendInfoLine(details, "错误", timestamp.error, "fail");
+			for (const timestamp of signature.timestamps) {
+				const group = document.createElement("div");
+				group.className = "signature-detail-group";
+				const trustedTimestamp = timestamp.valid && timestamp.certTrustChecked && timestamp.certTrustOK;
+				appendInfoLine(group, trustedTimestamp ? "时间" : "声明时间", formatDocumentTime(timestamp.time));
+				appendInfoLine(group, "签署机构", timestamp.signer);
+				appendInfoLine(group, "策略", timestamp.policyOID);
+				appendInfoLine(group, "序列号", timestamp.serialNumber);
+				appendSignatureCheck(group, "绑定", timestamp.bindingChecked, timestamp.bindingOK);
+				appendSignatureCheck(group, "签名", timestamp.signedValueChecked, timestamp.signedValueOK);
+				appendSignatureCheck(group, "信任", timestamp.certTrustChecked, timestamp.certTrustOK);
+				appendSignatureCheck(group, "时效", timestamp.certTimeChecked, timestamp.certTimeOK);
+				appendInfoLine(group, "错误", timestamp.error, "fail");
+				details.append(group);
+			}
 			row.append(details);
 		}
-		for (const revocation of signature.revocations || []) {
+		if (signature.revocations?.length) {
 			const details = document.createElement("details");
 			const title = document.createElement("summary");
 			title.textContent = "撤销详情";
 			details.append(title);
-			appendInfoLine(details, "证书", revocation.subject);
-			appendInfoLine(details, "来源", revocation.source);
-			const valid = revocation.checked && revocation.ok && revocation.status === "good";
-			appendInfoLine(details, "状态", !revocation.checked ? "未验" : valid ? "未撤销" : revocation.status === "revoked" ? "已撤销" : "未知", valid ? "ok" : revocation.checked ? "fail" : "");
-			appendInfoLine(details, "更新", formatDocumentTime(revocation.thisUpdate));
-			appendInfoLine(details, "截止", formatDocumentTime(revocation.nextUpdate));
-			appendInfoLine(details, "撤销时间", formatDocumentTime(revocation.revokedAt));
-			appendInfoLine(details, "错误", revocation.error, "fail");
+			const splitRevocation = signature.revocations.length > 1 && signature.sealSubject && signature.signSubject && signature.sealSubject !== signature.signSubject;
+			for (const revocation of signature.revocations) {
+				const group = document.createElement("div");
+				group.className = "signature-detail-group";
+				if (splitRevocation) {
+					const role = revocation.subject === signature.sealSubject ? "制章证书" : revocation.subject === signature.signSubject ? "签署证书" : "";
+					appendInfoLine(group, "对象", role);
+				}
+				appendInfoLine(group, "证书", revocation.subject);
+				appendInfoLine(group, "来源", revocation.source);
+				const valid = revocation.checked && revocation.ok && revocation.status === "good";
+				appendInfoLine(group, "状态", !revocation.checked ? "未验" : valid ? "未撤销" : revocation.status === "revoked" ? "已撤销" : "未知", valid ? "ok" : revocation.checked ? "fail" : "");
+				appendInfoLine(group, "更新", formatDocumentTime(revocation.thisUpdate));
+				appendInfoLine(group, "截止", formatDocumentTime(revocation.nextUpdate));
+				appendInfoLine(group, "撤销时间", formatDocumentTime(revocation.revokedAt));
+				appendInfoLine(group, "错误", revocation.error, "fail");
+				details.append(group);
+			}
 			row.append(details);
 		}
 		const details = document.createElement("details");

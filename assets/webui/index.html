@@ -672,7 +672,7 @@
 				<div class="form-row"><label for="signIntermediates">中间证书</label><input id="signIntermediates" type="file" accept=".pem,.cer,.crt,.der" multiple></div>
 				<div class="form-row"><label for="signSeal">电子印章</label><input id="signSeal" type="file" accept=".esl,.ses,.der"></div>
 				<div id="signPlacementFields" hidden>
-					<div class="form-row"><span>预览</span><div class="seal-position-options"><button id="signPick" class="button" type="button">定位</button><label><input id="signKeepRatio" type="checkbox" checked>等比</label></div></div>
+					<div class="form-row"><span>预览</span><div class="seal-position-options"><button id="signPick" class="button" type="button">定位</button><label class="form-check"><input id="signKeepRatio" type="checkbox" checked>等比</label></div></div>
 					<div class="form-row"><label for="signPlacement">位置</label><select id="signPlacement"><option value="normal">页面</option><option value="seam">骑缝</option></select></div>
 					<div class="form-row"><label for="signPages">页码</label><input id="signPages" type="text" autocomplete="off" spellcheck="false"></div>
 					<div class="form-row"><label for="signX">横向</label><div class="form-unit"><input id="signX" type="number" min="0" step="any" value="10"><span>mm</span></div></div>
@@ -682,7 +682,7 @@
 				</div>
 				<div class="form-row"><label for="signMode">方式</label><select id="signMode"><option value="append">追加</option><option value="replace">替换</option></select></div>
 				<div class="form-row"><label for="signLock">禁止追加</label><input id="signLock" type="checkbox"></div>
-				<div id="signPrepareAllRow" class="form-row" hidden><span>多文档</span><div class="form-options"><label><input id="signPrepareAll" type="checkbox" checked><span>预先声明其他文档签名入口</span></label></div></div>
+				<div id="signPrepareAllRow" class="form-row" hidden><span>多文档</span><label class="form-check" title="为其他文档预先声明签名入口"><input id="signPrepareAll" type="checkbox" checked>预置签名入口</label></div>
 				<div id="signEncryptionFields" hidden>
 					<div class="form-row"><label for="signEncryptionType">加密</label><select id="signEncryptionType"><option value="none">明文</option><option value="password">口令</option><option value="certificate">证书</option></select></div>
 					<div id="signEncryptionUserRow" class="form-row" hidden><label for="signEncryptionUser">用户</label><input id="signEncryptionUser" type="text" placeholder="可选" autocomplete="off" spellcheck="false"></div>

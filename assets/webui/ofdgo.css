@@ -538,6 +538,10 @@ a:focus-visible {
 }
 
 .object-picker-list .button {
+	display: block;
+	width: 100%;
+	min-width: 0;
+	line-height: calc(var(--control-height) - 2px);
 	text-align: left;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -1605,8 +1609,7 @@ button:not(:disabled):hover {
 	}
 }
 
-.seal-position-options,
-.seal-position-options label {
+.seal-position-options {
 	display: flex;
 	align-items: center;
 	gap: 12px;
@@ -1654,8 +1657,7 @@ button:not(:disabled):hover {
 	grid-template-columns: 5em minmax(0, 1fr);
 }
 
-.security-dialog .form-row > label,
-.security-dialog .form-row > span {
+.security-dialog .form-row > :first-child {
 	text-align-last: justify;
 }
 
@@ -4568,6 +4570,7 @@ audio.page-media {
 .signature-badges {
 	display: flex;
 	flex-wrap: wrap;
+	align-items: center;
 	justify-content: flex-end;
 	gap: 4px;
 	float: right;
@@ -4588,7 +4591,9 @@ audio.page-media {
 }
 
 .doc-font-head .font-badge,
-.font-binding-action {
+.font-binding-action,
+.signature-head .font-badge,
+.signature-remove {
 	width: 36px;
 	height: 24px;
 	padding: 0;
@@ -4647,8 +4652,15 @@ audio.page-media {
 	color: var(--accent-strong);
 }
 
-.signature-row details[open] > .info-line {
+.signature-row details[open] > .info-line,
+.signature-detail-group > .info-line {
 	margin-top: 6px;
+}
+
+.signature-detail-group + .signature-detail-group {
+	margin-top: 8px;
+	padding-top: 2px;
+	border-top: 1px solid var(--line);
 }
 
 .info-value {
@@ -5423,6 +5435,7 @@ select:not(:disabled):hover {
 }
 
 select:not([multiple]):not([size]) {
+	-webkit-appearance: none;
 	appearance: none;
 	background-image: var(--dropdown-arrow);
 	background-position: right 6px center;
