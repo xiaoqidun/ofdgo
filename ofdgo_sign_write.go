@@ -50,9 +50,7 @@ var ErrOFDEntryProtected = fmt.Errorf("%w: OFD.xml protected", ErrSignatureDepen
 type SignatureWriteMode uint8
 
 // SignatureWriteOptions 最终包签署选项，不修改Editor或调用方的原件
-// Signer用于执行底层签名；SM2/SM3签署时库直接传入待签原文与gmsm/sm2的SM2SignerOption(true, nil)，
-// 要求SM2签署器支持该选项并在内部以默认用户标识计算Z_A及SM3(Z_A||M)摘要（如ParseSignatureIdentity返回的密钥）；
-// RSA与ECDSA签署时库先预计算SHA-256/384/512摘要，再将摘要与对应crypto.Hash传给Signer.Sign
+// Signer用于底层签名，SM2需支持默认用户标识签名，RSA/ECDSA接收预计算摘要
 // SM2数字签名使用GB/T35275-2017 Detached SignedData，RSA/ECDSA使用RFC5652 Detached CMS SignedData
 // 数字签名内嵌签署证书及中间证书链，验签无需额外提供签署证书
 // Seal仅接受已有合法SES v4电子印章，使用SM2/SM3，不声明GM/T0031-2025兼容

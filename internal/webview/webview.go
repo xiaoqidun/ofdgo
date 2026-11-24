@@ -57,8 +57,6 @@ const (
 	svgStreamMaxBytes      = 256 << 20
 	svgStreamTTL           = 60 * time.Second
 	engineCacheMaxBytes    = 192 << 20
-	webviewAppCSP          = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' blob: data:; media-src 'self' blob: data:; connect-src 'self' blob: data:; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
-	nativeDataCSP          = "sandbox; default-src 'none'"
 )
 
 // host 连接桌面系统能力和共用文档业务
@@ -288,42 +286,7 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 	return guigo.Run(ctx, options)
 }
 
-// setAppSecurityHeaders 为桌面主界面及应用静态资源写入同源安全响应头
-// 入参: header 目标响应头
-func setAppSecurityHeaders(header http.Header) {
-	header.Set("Content-Security-Policy", webviewAppCSP)
-	header.Set("X-Content-Type-Options", "nosniff")
-	header.Set("X-Frame-Options", "DENY")
-	header.Set("Referrer-Policy", "no-referrer")
-}
-
-// setNativeDataSecurityHeaders 为用户文档衍生资源端点写入沙箱与防嗅探安全响应头
-// 入参: header 目标响应头, attachment 是否附加下载处置头
-func setNativeDataSecurityHeaders(header http.Header, attachment bool) {
-	header.Set("Content-Security-Policy", nativeDataCSP)
-	header.Set("X-Content-Type-Options", "nosniff")
-	header.Set("Referrer-Policy", "no-referrer")
-	if attachment {
-		header.Set("Content-Disposition", "attachment")
-	}
-}
-
-// safeNativeResourceMIME 拦截可能触发同源脚本执行的响应媒体类型
-// 入参: mimeType 原始媒体类型
-// 返回: string 安全的媒体类型
-func safeNativeResourceMIME(mimeType string) string {
-	mediaType := strings.TrimSpace(strings.ToLower(mimeType))
-	if cut, _, ok := strings.Cut(mediaType, ";"); ok {
-		mediaType = strings.TrimSpace(cut)
-	}
-	switch mediaType {
-	case "", "text/html", "application/xhtml+xml", "text/javascript", "application/javascript", "application/x-javascript", "text/ecmascript", "application/ecmascript":
-		return "application/octet-stream"
-	}
-	return mimeType
-}
-
-// httpHandler 创建桌面端内置HTTP处理器并统一附加安全响应头
+// httpHandler 创建桌面端内置HTTP处理器
 // 返回: http.Handler HTTP处理器
 func (h *host) httpHandler() http.Handler {
 	static := http.FileServerFS(webuiassets.NativeFS)
@@ -336,30 +299,25 @@ func (h *host) httpHandler() http.Handler {
 				h.files.serve(w, r)
 				return
 			}
-			setNativeDataSecurityHeaders(w.Header(), true)
 			http.NotFound(w, r)
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, ".wasm") || strings.HasSuffix(r.URL.Path, "wasm_exec.js") || strings.HasSuffix(r.URL.Path, "ofdgo_work.js") {
-			setAppSecurityHeaders(w.Header())
 			http.NotFound(w, r)
 			return
 		}
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
 			data, err := h.themeIndex()
 			if err != nil {
-				setAppSecurityHeaders(w.Header())
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			setAppSecurityHeaders(w.Header())
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("X-OFDGo-Build-Version", build.Version)
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = w.Write(data)
 			return
 		}
-		setAppSecurityHeaders(w.Header())
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-OFDGo-Build-Version", build.Version)
 		static.ServeHTTP(w, r)
@@ -1604,7 +1562,6 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 	var svgRelease func(bool)
 	cacheControl := "no-store"
 	nativeData := false
-	attachment := false
 	transferred := false
 	defer func() {
 		if !transferred {
@@ -1631,7 +1588,7 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 			return nil, nil
 		}
 		reader, size = bytes.NewReader(item.data), int64(len(item.data))
-		contentType = safeNativeResourceMIME(item.mime)
+		contentType = item.mime
 		cacheControl = "private, max-age=3600"
 		nativeData = true
 	} else if strings.HasPrefix(r.URL.Path, "/__native/svg/") {
@@ -1647,7 +1604,6 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 		contentType = "image/svg+xml; charset=utf-8"
 		svgRelease = releaseSVG
 		nativeData = true
-		attachment = true
 	} else if strings.HasPrefix(r.URL.Path, "/__native/data/") {
 		if h.files == nil {
 			return nil, nil
@@ -1659,7 +1615,6 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 		}
 		contentType = "application/octet-stream"
 		nativeData = true
-		attachment = true
 	} else {
 		name := strings.TrimPrefix(r.URL.Path, "/")
 		if name == "" {
@@ -1688,15 +1643,11 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 		}
 		contentType = http.DetectContentType(header)
 	}
-	if nativeData {
-		contentType = safeNativeResourceMIME(contentType)
-	}
 	headers := http.Header{"Content-Type": {contentType}, "Content-Length": {strconv.FormatInt(size, 10)}, "Cache-Control": {cacheControl}, "Accept-Ranges": {"bytes"}}
 	headers.Set("X-OFDGo-Build-Version", build.Version)
 	if nativeData {
-		setNativeDataSecurityHeaders(headers, attachment)
-	} else {
-		setAppSecurityHeaders(headers)
+		headers.Set("Content-Security-Policy", "sandbox")
+		headers.Set("X-Content-Type-Options", "nosniff")
 	}
 	start, length, status := int64(0), size, http.StatusOK
 	if value := r.Header.Get("Range"); value != "" && r.Method == http.MethodGet {
@@ -1730,7 +1681,6 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 // 返回: bool 是否已由内存资源通道处理
 func (h *host) serveMemoryResource(w http.ResponseWriter, r *http.Request) bool {
 	if strings.HasPrefix(r.URL.Path, "/__native/resource/") {
-		setNativeDataSecurityHeaders(w.Header(), false)
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return true
@@ -1755,7 +1705,8 @@ func (h *host) serveMemoryResource(w http.ResponseWriter, r *http.Request) bool 
 		if contentType == "" {
 			contentType = http.DetectContentType(item.data[:min(len(item.data), 512)])
 		}
-		contentType = safeNativeResourceMIME(contentType)
+		w.Header().Set("Content-Security-Policy", "sandbox")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Cache-Control", "private, max-age=3600")
 		w.Header().Set("X-OFDGo-Build-Version", build.Version)
@@ -1763,7 +1714,6 @@ func (h *host) serveMemoryResource(w http.ResponseWriter, r *http.Request) bool 
 		return true
 	}
 	if strings.HasPrefix(r.URL.Path, "/__native/svg/") {
-		setNativeDataSecurityHeaders(w.Header(), true)
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return true
@@ -1782,6 +1732,8 @@ func (h *host) serveMemoryResource(w http.ResponseWriter, r *http.Request) bool 
 			remove := shouldDeleteSVGStream(r, int64(len(data)))
 			defer releaseSVG(remove)
 		}
+		w.Header().Set("Content-Security-Policy", "sandbox")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-OFDGo-Build-Version", build.Version)

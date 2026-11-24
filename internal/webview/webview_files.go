@@ -1290,7 +1290,6 @@ func (s *fileStore) remove(id, name string, recursive bool) error {
 // 入参: w 响应写入器, r 资源请求
 func (s *fileStore) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	setNativeDataSecurityHeaders(w.Header(), true)
 	if !strings.HasPrefix(r.URL.Path, "/__native/data/") || r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.NotFound(w, r)
 		return
@@ -1309,6 +1308,8 @@ func (s *fileStore) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	w.Header().Set("Content-Security-Policy", "sandbox")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Type", "application/octet-stream")
 	http.ServeContent(w, r, name, time.Time{}, io.NewSectionReader(reader, 0, size))
 }
