@@ -224,7 +224,7 @@ func (r *Reader) documentDependencies(ctx context.Context, indexes ...int) (map[
 		if !r.fileNames[actual] {
 			continue
 		}
-		if err := r.documentFileReferences(ctx, actual, true, add); err != nil {
+		if err := r.documentFileReferences(ctx, actual, false, add); err != nil {
 			return nil, nil, err
 		}
 	}

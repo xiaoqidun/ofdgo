@@ -364,12 +364,80 @@ func (e *Editor) ImportDocumentsContext(ctx context.Context, source *Reader, ind
 		if err != nil {
 			return 0, err
 		}
+		usedVersionIDs := make(map[string]bool)
+		for _, existingBody := range targetRoot.children {
+			if !existingBody.matchesOFD("DocBody") {
+				continue
+			}
+			if versions := existingBody.child("Versions"); versions != nil {
+				for _, ver := range versions.children {
+					if ver.matchesOFD("Version") {
+						if vid := ver.attr("ID"); vid != "" {
+							usedVersionIDs[vid] = true
+						}
+					}
+				}
+			}
+		}
+		nextVersionID := func(base string) string {
+			if base == "" {
+				base = "v1"
+			}
+			if !usedVersionIDs[base] {
+				usedVersionIDs[base] = true
+				return base
+			}
+			for n := 1; ; n++ {
+				candidate := base + "_" + strconv.Itoa(n)
+				if !usedVersionIDs[candidate] {
+					usedVersionIDs[candidate] = true
+					return candidate
+				}
+			}
+		}
 		var inserted bytes.Buffer
 		for _, index := range indexes {
 			body := updatedRoot.childAt("DocBody", index)
 			content, err := editorXMLStandaloneContext(ctx, updated[body.start:body.end], body)
 			if err != nil {
 				return 0, err
+			}
+			bodyRoot, err := parseEditorXMLContext(ctx, content)
+			if err != nil {
+				return 0, err
+			}
+			if versions := bodyRoot.child("Versions"); versions != nil {
+				var verPatches []editorXMLPatch
+				for _, ver := range versions.children {
+					if !ver.matchesOFD("Version") {
+						continue
+					}
+					oldID := ver.attr("ID")
+					newID := nextVersionID(oldID)
+					if newID == oldID {
+						continue
+					}
+					patch, err := editorXMLAttributePatch(content, ver, "ID", newID)
+					if err != nil {
+						return 0, err
+					}
+					verPatches = append(verPatches, patch)
+					verLoc := cleanPackagePath(resolveResourcePath("OFD.xml", "", ver.attr("BaseLoc")))
+					if verData, ok := reader.files[verLoc]; ok {
+						verRoot, parseErr := parseEditorXMLContext(ctx, verData)
+						if parseErr != nil {
+							return 0, parseErr
+						}
+						verUpdated, attrErr := editorXMLAttribute(verData, verRoot, "ID", newID)
+						if attrErr != nil {
+							return 0, attrErr
+						}
+						reader.files[verLoc] = verUpdated
+					}
+				}
+				if len(verPatches) != 0 {
+					content = editorPatchXML(content, verPatches)
+				}
 			}
 			inserted.Write(content)
 		}

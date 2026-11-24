@@ -357,8 +357,7 @@ func (d *fontDir) Stat() (fs.FileInfo, error) {
 }
 
 // Read 字体目录不提供字节内容，始终返回EOF
-// 入参: []byte 读取缓冲区，不使用
-// 返回: int 始终为0, error 始终为io.EOF
+// 返回: int 恒为0, error 目录不可按文件读取错误
 func (d *fontDir) Read([]byte) (int, error) {
 	return 0, io.EOF
 }

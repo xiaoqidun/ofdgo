@@ -566,8 +566,8 @@ func editorPreservedObject(before, after GraphicObject) bool {
 	case "ImageObject":
 		a, b := &before.ImageObject, after.ImageObject
 		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
-	case "CompositeObject", "CompositeGraphicUnit":
-		a, b := &before.CompositeGraphicUnit, after.CompositeGraphicUnit
+	case "CompositeObject":
+		a, b := &before.CompositeObject, after.CompositeObject
 		a.ID, a.Boundary, a.CTM, a.Alpha = b.ID, b.Boundary, b.CTM, b.Alpha
 	default:
 		return false
@@ -611,8 +611,8 @@ func editorGeometry(object GraphicObject) (string, string) {
 		return object.PathObject.Boundary, object.PathObject.CTM
 	case "ImageObject":
 		return object.ImageObject.Boundary, object.ImageObject.CTM
-	case "CompositeObject", "CompositeGraphicUnit":
-		return object.CompositeGraphicUnit.Boundary, object.CompositeGraphicUnit.CTM
+	case "CompositeObject":
+		return object.CompositeObject.Boundary, object.CompositeObject.CTM
 	}
 	return "", ""
 }
@@ -657,8 +657,8 @@ func validateEditorGeometry(object GraphicObject) error {
 		alpha = object.PathObject.Alpha
 	case "ImageObject":
 		alpha = object.ImageObject.Alpha
-	case "CompositeObject", "CompositeGraphicUnit":
-		alpha = object.CompositeGraphicUnit.Alpha
+	case "CompositeObject":
+		alpha = object.CompositeObject.Alpha
 	}
 	if alpha != nil && (*alpha < 0 || *alpha > 255) {
 		return fmt.Errorf("alpha must be between 0 and 255")
@@ -746,7 +746,7 @@ func (r *Reader) EditorContext(ctx context.Context) (*Editor, error) {
 	if r.pageReady != nil {
 		return nil, ErrIncompleteDocument
 	}
-	_, err := r.DocContext(ctx)
+	_, err := r.docContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -832,6 +832,13 @@ func (e *Editor) PageCapabilitiesContext(ctx context.Context, index int) (PageCa
 		return PageCapabilities{}, err
 	}
 	return PageCapabilities{Insert: insert, Copy: true, Delete: true, Move: true, Resize: true}, nil
+}
+
+// PageCapabilitiesBatch 批量获取页面操作范围
+// 入参: indexes 页面索引列表
+// 返回: []PageCapabilities 对应页面的操作能力列表, error 索引或读取错误
+func (e *Editor) PageCapabilitiesBatch(indexes []int) ([]PageCapabilities, error) {
+	return e.PageCapabilitiesBatchContext(context.Background(), indexes)
 }
 
 // PageCapabilitiesBatchContext 批量获取页面操作范围并响应取消，默认无DefaultCS时直接批量返回
@@ -1582,7 +1589,7 @@ func (e *Editor) objectCapabilities(object GraphicObject, orderable map[*editorX
 		all.Order = editorContainerOrderable(node.parent)
 		orderable[node.parent] = all.Order
 	}
-	all.Ungroup = all.Order && e.compositeUngroupable(node) && (object.CompositeGraphicUnit.ResourceID != "" || len(object.CompositeGraphicUnit.Objects) != 0)
+	all.Ungroup = all.Order && e.compositeUngroupable(node) && object.CompositeObject.ResourceID != ""
 	all.Copy = editorXMLCopyable(node) && (origin.reason == nil || object.Type == "PathObject" && editReason(origin.reason) == EditUnsupportedColor)
 	if origin.reason != nil {
 		all.Update, all.Reflow, all.ReplaceFont, all.Paint = false, false, false, false
@@ -1699,8 +1706,8 @@ func (v *editorValidation) prepareCopiedObject(id string, object GraphicObject) 
 		result.PathObject.ID = id
 	case "ImageObject":
 		result.ImageObject.ID = id
-	case "CompositeObject", "CompositeGraphicUnit":
-		result.CompositeGraphicUnit.ID = id
+	case "CompositeObject":
+		result.CompositeObject.ID = id
 	}
 	return result, nil
 }

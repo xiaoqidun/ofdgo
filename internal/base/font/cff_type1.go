@@ -100,5 +100,5 @@ func normalizeCFFType1(data []byte, dict cffDict) ([]byte, error) {
 		}
 	}
 	dict[1206], dict[18] = []float64{2}, []float64{0, 0}
-	return replaceCFFCharstrings(data, dict, topStart, topSize, charStart, charEnd-charStart, converted, nil), nil
+	return replaceCFFCharstrings(data, dict, topStart, topSize, charStart, charEnd-charStart, converted, nil)
 }

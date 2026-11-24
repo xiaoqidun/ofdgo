@@ -284,12 +284,6 @@ func encodePermissionsXML(ctx *editorXML, p *Permissions) ([]byte, error) {
 		}
 		content = append(content, periodNode...)
 	}
-	if !p.Copy {
-		content = append(content, ctx.textXML("CopyText", "false")...)
-	}
-	if !p.ContentRegist {
-		content = append(content, ctx.textXML("ContentRegist", "false")...)
-	}
 	return ctx.containerXML("Permissions", nil, content)
 }
 

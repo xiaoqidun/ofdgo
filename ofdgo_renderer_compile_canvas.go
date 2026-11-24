@@ -19,6 +19,9 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math"
+	"runtime"
+	"sync"
 
 	"github.com/tdewolff/canvas"
 	baseimage "github.com/xiaoqidun/ofdgo/internal/base/image"
@@ -84,7 +87,7 @@ func rasterPoint(p canvas.Point) RasterPoint { return RasterPoint{X: p.X, Y: p.Y
 // CompilePage 使用Canvas页面解释器和配置的字体、几何后端生成独立绘制数据
 // 入参: ctx 取消上下文, r 渲染器, page 页面内容
 // 返回: *RasterPage 绘制页面, error 编译或取消错误
-func (CanvasBackend) CompilePage(ctx context.Context, r *Renderer, page *PageContent) (*RasterPage, error) {
+func (DefaultBackend) CompilePage(ctx context.Context, r *Renderer, page *PageContent) (*RasterPage, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -106,6 +109,13 @@ func (CanvasBackend) CompilePage(ctx context.Context, r *Renderer, page *PageCon
 	if err != nil {
 		return nil, err
 	}
+	prevEdges := r.transparentEdges
+	if prevEdges == nil {
+		r.transparentEdges = make(map[image.Image]transparentEdgeResult)
+		defer func() { r.transparentEdges = prevEdges }()
+	}
+	prefetch := &pageImagePrefetch{}
+	r.pageContext = context.WithValue(ctx, pageImagePrefetchKey{}, prefetch)
 	compiler := &canvasPageCompiler{page: result, geometry: geometry}
 	if err := r.renderCanvasContext(canvas.NewContext(compiler), page); err != nil {
 		return nil, err
@@ -114,6 +124,187 @@ func (CanvasBackend) CompilePage(ctx context.Context, r *Renderer, page *PageCon
 		return nil, compiler.err
 	}
 	return result, nil
+}
+
+// pageImagePrefetchKey 标识页面编译期间并发预解码图像的上下文键
+type pageImagePrefetchKey struct{}
+
+// pagePrefetchedImage 保存单张并发预解码完成的原始像素与透明补边结果
+type pagePrefetchedImage struct {
+	raw     image.Image
+	edge    image.Image
+	pad     int
+	hasEdge bool
+}
+
+// pagePrefetchedAlphaKey 标识单页内复用的预解码图像透明变体键
+type pagePrefetchedAlphaKey struct {
+	path  string
+	alpha uint8
+}
+
+// pageImagePrefetch 保存当前页面并发预解码与复用的图像资源映射
+type pageImagePrefetch struct {
+	ready   bool
+	byPath  map[string]pagePrefetchedImage
+	byAlpha map[pagePrefetchedAlphaKey]image.Image
+}
+
+// prefetchPageEncodedImages 在页面光栅编译前去重并并发预解码惰性编码图像及透明补边结果
+// 入参: ctx 取消上下文, r 渲染器, page 页面内容
+func prefetchPageEncodedImages(ctx context.Context, r *Renderer, page *PageContent) {
+	if r == nil || r.reader == nil || page == nil || !r.decodeImages || r.textOnly {
+		return
+	}
+	pf, ok := ctx.Value(pageImagePrefetchKey{}).(*pageImagePrefetch)
+	if !ok || pf == nil || pf.ready {
+		return
+	}
+	pf.ready = true
+	type prefetchItem struct {
+		path   string
+		enc    *baseimage.EncodedImage
+		source image.Image
+		padded image.Image
+		pad    int
+		hasEdg bool
+	}
+	var pending []prefetchItem
+	pathCount := make(map[string]int)
+	hasReused := false
+	inStack := make(map[string]bool)
+	addResource := func(id string) {
+		if id == "" {
+			return
+		}
+		resolved, ok := r.reader.resolveResPathScoped(r.pageResources, id)
+		if !ok {
+			return
+		}
+		cleanPath := cleanPackagePath(r.reader.ResPath(resolved))
+		pathCount[cleanPath]++
+		if pathCount[cleanPath] > 1 {
+			hasReused = true
+			return
+		}
+		if len(pending) >= 64 {
+			return
+		}
+		img, err := r.ImageResource(id)
+		if err != nil {
+			return
+		}
+		if enc, ok := unwrapEncodedImage(img).(*baseimage.EncodedImage); ok {
+			pending = append(pending, prefetchItem{path: cleanPath, enc: enc})
+		}
+	}
+	var walkSeq func(seq func(func(GraphicObject) bool))
+	walkSeq = func(seq func(func(GraphicObject) bool)) {
+		for obj := range seq {
+			switch obj.Type {
+			case "ImageObject":
+				imgObj := obj.ImageObject
+				if imgObj.Visible != nil && !*imgObj.Visible || imgObj.ImageMask != "" {
+					continue
+				}
+				primary := imgObj.ResourceID
+				if imgObj.Substitution != "" && !sameResourceID(imgObj.Substitution, imgObj.ResourceID) && (r.printing || r.dpi >= 300) {
+					primary = imgObj.Substitution
+				}
+				addResource(primary)
+			case "CompositeObject":
+				id := obj.CompositeObject.ResourceID
+				if id == "" || inStack[id] {
+					continue
+				}
+				inStack[id] = true
+				if unit := r.compositeDefinition(id); unit != nil {
+					walkSeq(unit.objects())
+				}
+				delete(inStack, id)
+			}
+		}
+	}
+	for i := range page.Content.Layer {
+		walkSeq(func(yield func(GraphicObject) bool) {
+			for _, obj := range page.Content.Layer[i].Objects {
+				if !yield(obj) {
+					return
+				}
+			}
+		})
+	}
+	if r.reader.doc != nil {
+		for _, ref := range page.Template {
+			if tpl := r.loadTemplate(ref.TemplateID); tpl != nil {
+				restoreTpl := r.bindParsedResources(tpl.pageResources)
+				for i := range tpl.Content.Layer {
+					walkSeq(func(yield func(GraphicObject) bool) {
+						for _, obj := range tpl.Content.Layer[i].Objects {
+							if !yield(obj) {
+								return
+							}
+						}
+					})
+				}
+				restoreTpl()
+			}
+		}
+	}
+	if len(pending) == 0 || (len(pending) == 1 && !hasReused) {
+		return
+	}
+	decodeOne := func(idx int) {
+		if ctx.Err() != nil {
+			return
+		}
+		decoded, err := pending[idx].enc.ImageContext(ctx)
+		if err != nil || decoded == nil {
+			return
+		}
+		pending[idx].source = decoded
+		padded, pad, err := baseimage.WithTransparentEdge(ctx, decoded)
+		if err != nil {
+			return
+		}
+		pending[idx].hasEdg = true
+		if padded == decoded {
+			pending[idx].padded, pending[idx].pad = decoded, 0
+		} else {
+			pending[idx].padded, pending[idx].pad = wrapEncodedImage(padded), pad
+		}
+	}
+	workers := min(runtime.GOMAXPROCS(0), 8, len(pending))
+	if workers <= 1 {
+		for i := range pending {
+			decodeOne(i)
+		}
+	} else {
+		jobs := make(chan int, len(pending))
+		for i := range pending {
+			jobs <- i
+		}
+		close(jobs)
+		var wg sync.WaitGroup
+		for range workers {
+			wg.Go(func() {
+				for idx := range jobs {
+					decodeOne(idx)
+				}
+			})
+		}
+		wg.Wait()
+	}
+	pf.byPath = make(map[string]pagePrefetchedImage, len(pending))
+	for i := range pending {
+		item := pending[i]
+		if item.source != nil {
+			pf.byPath[item.path] = pagePrefetchedImage{raw: item.source, edge: item.padded, pad: item.pad, hasEdge: item.hasEdg}
+			if r.transparentEdges != nil && item.hasEdg && isPointerImage(item.source) {
+				r.transparentEdges[item.source] = transparentEdgeResult{img: item.padded, pad: item.pad}
+			}
+		}
+	}
 }
 
 // Size 返回物理页面尺寸
@@ -165,7 +356,7 @@ func (c *canvasPageCompiler) RenderImage(img image.Image, m canvas.Matrix) {
 		c.err = err
 		return
 	}
-	if (m[0][1] != 0 || m[1][0] != 0) && (m[0][0] != 0 || m[1][1] == 0) {
+	if (math.Abs(m[0][1]) > 1e-12 || math.Abs(m[1][0]) > 1e-12) && (math.Abs(m[0][0]) > 1e-12 || math.Abs(m[1][1]) > 1e-12) {
 		bounds := img.Bounds()
 		img = &rasterPaddedImage{source: img, rect: image.Rect(0, 0, bounds.Dx()+8, bounds.Dy()+8)}
 		m = m.Translate(-4, -4)

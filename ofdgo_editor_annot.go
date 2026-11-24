@@ -89,7 +89,7 @@ func NewImageStampAnnotation(options ImageStampOptions) (Annotation, error) {
 		Type:    "Stamp",
 		Creator: options.Creator,
 		Remark:  options.Remark,
-		Appearance: Appearance{
+		Appearance: &Appearance{
 			Boundary: editorBoxString(options.Box),
 			Objects:  []GraphicObject{object},
 		},
@@ -185,7 +185,7 @@ func (e *Editor) Annotations(index int) ([]AnnotationInfo, error) {
 	if e.source == nil {
 		return nil, nil
 	}
-	if _, err := e.source.reader.Doc(); err != nil {
+	if _, err := e.source.reader.docInternal(); err != nil {
 		return nil, err
 	}
 	return e.source.reader.annotationInfos(index, e.pages[index].ID), nil
@@ -314,12 +314,14 @@ func (e *Editor) CaptureAnnotations(page int, ids []string) (*AnnotationSelectio
 		if err != nil {
 			return nil, err
 		}
-		snapshot, err := e.captureRichTextSnapshot(page, GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: CompositeGraphicUnit{Objects: annotation.Appearance.Objects}})
-		if err != nil {
-			return nil, err
-		}
-		if snapshot != nil {
-			selection.richText[len(selection.data)] = snapshot
+		if annotation.Appearance != nil {
+			snapshot, err := e.captureRichTextSnapshotObjects(page, annotation.Appearance.Objects)
+			if err != nil {
+				return nil, err
+			}
+			if snapshot != nil {
+				selection.richText[len(selection.data)] = snapshot
+			}
 		}
 		selection.data = append(selection.data, data)
 		selection.states[key] = maps.Clone(e.source.annotationStates[e.pages[page].ID+"/"+key])
@@ -414,8 +416,10 @@ func (e *Editor) PasteAnnotations(page int, selection *AnnotationSelection, dx, 
 				if err != nil {
 					return err
 				}
-				if err := edit.putRichTextSnapshot(page, GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: CompositeGraphicUnit{Objects: annotation.Appearance.Objects}}, snapshot); err != nil {
-					return err
+				if annotation.Appearance != nil {
+					if err := edit.putRichTextSnapshotObjects(page, annotation.Appearance.Objects, snapshot); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -447,6 +451,9 @@ func (e *Editor) TransformAnnotations(page int, ids []string, matrix Matrix) err
 			}
 			if matrix == IdentityMatrix() {
 				continue
+			}
+			if annotation.Appearance == nil {
+				return fmt.Errorf("annotation has no appearance")
 			}
 			box, err := ParseBox(annotation.Appearance.Boundary)
 			if err != nil {
@@ -513,8 +520,8 @@ func (e *Editor) ReplaceAnnotationText(page int, id, old, value string, style Te
 							return err
 						}
 						count++
-					} else if member.Object.Type == "CompositeObject" || member.Object.Type == "CompositeGraphicUnit" {
-						resource := member.Object.CompositeGraphicUnit.ResourceID
+					} else if member.Object.Type == "CompositeObject" {
+						resource := member.Object.CompositeObject.ResourceID
 						if id := editorResourceID(resource); id != "" {
 							resource = id
 						}

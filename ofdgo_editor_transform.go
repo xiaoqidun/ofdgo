@@ -70,8 +70,8 @@ func transformEditorMatrix(object GraphicObject, matrix Matrix) GraphicObject {
 		boundary, ctm = &object.PathObject.Boundary, &object.PathObject.CTM
 	case "ImageObject":
 		boundary, ctm = &object.ImageObject.Boundary, &object.ImageObject.CTM
-	case "CompositeObject", "CompositeGraphicUnit":
-		boundary, ctm = &object.CompositeGraphicUnit.Boundary, &object.CompositeGraphicUnit.CTM
+	case "CompositeObject":
+		boundary, ctm = &object.CompositeObject.Boundary, &object.CompositeObject.CTM
 	}
 	before, _ := ParseBox(*boundary)
 	after := matrix.TransformBox(before)
@@ -503,11 +503,11 @@ func (e *Editor) transformMatrix(object GraphicObject, matrix Matrix) (GraphicOb
 	return e.transformImageResource(object, matrix, origin, renderer)
 }
 
-// objectStretchable 允许图片及纯图片资源独立调整宽高，内联组合仍保持比例
+// objectStretchable 允许图片及纯图片资源独立调整宽高
 // 入参: object 对象, visiting 当前资源链
 // 返回: bool 是否支持独立宽高
 func (e *Editor) objectStretchable(object GraphicObject, visiting map[string]bool) bool {
-	if object.Type != "ImageObject" && (object.CompositeGraphicUnit.ResourceID == "" || len(object.CompositeGraphicUnit.Objects) != 0) {
+	if object.Type != "ImageObject" && (object.Type != "CompositeObject" || object.CompositeObject.ResourceID == "") {
 		return false
 	}
 	return e.objectImagesOnly(object, visiting)
@@ -520,29 +520,25 @@ func (e *Editor) objectImagesOnly(object GraphicObject, visiting map[string]bool
 	if object.Type == "ImageObject" {
 		return true
 	}
-	if object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
+	if object.Type != "CompositeObject" {
 		return false
 	}
-	group := object.CompositeGraphicUnit
-	found := len(group.Objects) != 0
-	if id := group.ResourceID; id != "" {
-		if visiting[id] {
-			return false
-		}
-		visiting[id] = true
-		resource, err := e.compositeDefinition(id)
-		if err != nil || !e.objectImagesOnly(resource.object, visiting) {
-			return false
-		}
-		delete(visiting, id)
-		found = true
+	id := object.CompositeObject.ResourceID
+	if id == "" || visiting[id] {
+		return false
 	}
-	for _, child := range group.Objects {
+	visiting[id] = true
+	defer delete(visiting, id)
+	resource, err := e.compositeDefinition(id)
+	if err != nil || resource.unit == nil || len(resource.unit.Objects) == 0 {
+		return false
+	}
+	for _, child := range resource.unit.Objects {
 		if !e.objectImagesOnly(child, visiting) {
 			return false
 		}
 	}
-	return found
+	return true
 }
 
 // transformImageResource 将图片封装为复合资源，保留边框、裁剪及动作
@@ -607,7 +603,7 @@ func (e *Editor) transformImageResource(object GraphicObject, matrix Matrix, ori
 	}
 	resource.states = map[string]editorCompositeState{child.ImageObject.ID: object.state}
 	e.resources = append(e.resources, resource)
-	object = GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: CompositeGraphicUnit{ID: object.ImageObject.ID, ResourceID: id, Boundary: editorBoxString(extent)}}
+	object = GraphicObject{Type: "CompositeObject", CompositeObject: CompositeObject{ID: object.ImageObject.ID, ResourceID: id, Boundary: editorBoxString(extent)}}
 	return transformEditorMatrix(object, matrix), nil
 }
 

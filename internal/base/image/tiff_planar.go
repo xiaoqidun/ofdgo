@@ -579,9 +579,6 @@ func (layout TIFFLayout) DecodedPixelBytes() uint64 {
 		}
 		return 16 + profile
 	}
-	if !layout.needsSampleView() {
-		return 8 + profile
-	}
 	bytes := uint64(1)
 	if layout.depth == 2 || layout.depth == 4 {
 		bytes = uint64(layout.depth)
@@ -808,5 +805,5 @@ func (p *planarTIFFImage) inksAt(x, y int) [5]uint16 {
 // needsSampleView 判断是否需通过分量视图处理存储布局，供尺寸读取和像素解码共用
 // 返回: bool 是否需要分量视图
 func (layout TIFFLayout) needsSampleView() bool {
-	return layout.mask || layout.auxiliary || layout.photometric == 5 || layout.Planar && layout.Samples > 1 || layout.Samples == 2 || layout.depth < 8 && (layout.Samples > 1 || layout.depth > 1 || layout.predictor == 2)
+	return layout.mask || layout.auxiliary || layout.photometric == 5 || layout.Planar && layout.Samples > 1 || layout.Samples == 2 || (layout.lowDepth || layout.depth < 8) && (layout.Samples > 1 || layout.depth > 1 || layout.predictor == 2)
 }

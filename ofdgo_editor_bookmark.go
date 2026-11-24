@@ -261,7 +261,7 @@ func editorBookmarkDefinition(data []byte, name string, next *Bookmark, add bool
 			}
 			patches = append(patches, patch)
 		}
-		if current.Dest != next.Dest {
+		if !destEqual(current.Dest, next.Dest) {
 			dest := node.child("Dest")
 			if dest == nil {
 				return nil, fmt.Errorf("bookmark %q has no destination", name)
@@ -574,7 +574,7 @@ func (e *Editor) commitBookmarkSnapshot(reader *Reader) error {
 				previous := states[editorObjectID(*object)]
 				object.state = previous.state
 				object.TextObject.layout = previous.TextObject.layout
-				object.CompositeGraphicUnit.states = previous.CompositeGraphicUnit.states
+				object.CompositeObject.states = previous.CompositeObject.states
 			}
 		}
 	}

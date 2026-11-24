@@ -33,6 +33,10 @@ const (
 	sceneEnd
 	// sceneSkip 跳过不可见对象计数
 	sceneSkip
+	// sceneBeginTransparencyGroup 开始透明组隔离
+	sceneBeginTransparencyGroup
+	// sceneEndTransparencyGroup 结束透明组隔离
+	sceneEndTransparencyGroup
 )
 
 // PageScene 保存后端无关的页面语义与绘制顺序，不提前展开文字或重新编码图片
@@ -53,7 +57,14 @@ type sceneCommand struct {
 	stamp         Stamp
 	annotation    string
 	count         int
+	alpha         uint8
 	pageResources []*parsedRes
+}
+
+// sceneTransparencyState 记录场景重放期间透明组开启状态与待回退透明度
+type sceneTransparencyState struct {
+	active bool
+	alpha  uint8
 }
 
 // sceneCommandKind 区分场景中的绘制和分组事件
@@ -68,6 +79,16 @@ func closeSceneGroups(groups PageGroups, stack []bool) {
 	for i := len(stack) - 1; i >= 0; i-- {
 		if stack[i] {
 			groups.EndObject()
+		}
+	}
+}
+
+// closeSceneTransparencyGroups 在访问器失败时配对结束已建立的透明组
+// 入参: groups 透明组访问器, stack 透明组状态
+func closeSceneTransparencyGroups(groups PageTransparencyGroups, stack []sceneTransparencyState) {
+	for i := len(stack) - 1; i >= 0; i-- {
+		if stack[i].active {
+			groups.EndTransparencyGroup()
 		}
 	}
 }
@@ -92,7 +113,9 @@ func (s *PageScene) Walk(visitor PageVisitor) error {
 		}()
 	}
 	groups, grouped := visitor.(PageGroups)
+	tgroups, hasTGroup := visitor.(PageTransparencyGroups)
 	var stack []bool
+	var tgStack []sceneTransparencyState
 	for _, command := range s.commands {
 		if s.renderer != nil && !slices.Equal(activeResources, command.pageResources) {
 			s.renderer.bindParsedResources(command.pageResources)
@@ -100,12 +123,31 @@ func (s *PageScene) Walk(visitor PageVisitor) error {
 		}
 		switch command.kind {
 		case sceneObject:
-			if err := visitor.DrawObject(command.object, command.state); err != nil {
+			object := command.object
+			var merged GraphicObject
+			mergedSet := false
+			for _, st := range tgStack {
+				if st.active {
+					continue
+				}
+				if !mergedSet {
+					merged = *object
+					mergedSet = true
+				}
+				a := int(st.alpha)
+				merged = mergeGraphicObjectAlpha(merged, &a)
+			}
+			if mergedSet {
+				object = &merged
+			}
+			if err := visitor.DrawObject(object, command.state); err != nil {
+				closeSceneTransparencyGroups(tgroups, tgStack)
 				closeSceneGroups(groups, stack)
 				return err
 			}
 		case sceneStamp:
 			if err := visitor.DrawStamp(command.stamp); err != nil {
+				closeSceneTransparencyGroups(tgroups, tgStack)
 				closeSceneGroups(groups, stack)
 				return err
 			}
@@ -127,6 +169,16 @@ func (s *PageScene) Walk(visitor PageVisitor) error {
 		case sceneSkip:
 			if grouped {
 				groups.SkipObjects(command.count)
+			}
+		case sceneBeginTransparencyGroup:
+			active := hasTGroup && tgroups.BeginTransparencyGroup(command.alpha)
+			tgStack = append(tgStack, sceneTransparencyState{active: active, alpha: command.alpha})
+		case sceneEndTransparencyGroup:
+			if len(tgStack) > 0 {
+				if tgStack[len(tgStack)-1].active {
+					tgroups.EndTransparencyGroup()
+				}
+				tgStack = tgStack[:len(tgStack)-1]
 			}
 		}
 	}
@@ -208,4 +260,17 @@ func (s *sceneRecorder) EndObject() {
 // 入参: count 对象数量
 func (s *sceneRecorder) SkipObjects(count int) {
 	s.commands = append(s.commands, sceneCommand{kind: sceneSkip, count: count, pageResources: s.renderer.pageResources})
+}
+
+// BeginTransparencyGroup 记录透明组开始事件
+// 入参: alpha 透明组不透明度
+// 返回: bool 是否开启成功
+func (s *sceneRecorder) BeginTransparencyGroup(alpha uint8) bool {
+	s.commands = append(s.commands, sceneCommand{kind: sceneBeginTransparencyGroup, alpha: alpha, pageResources: s.renderer.pageResources})
+	return true
+}
+
+// EndTransparencyGroup 记录透明组结束事件
+func (s *sceneRecorder) EndTransparencyGroup() {
+	s.commands = append(s.commands, sceneCommand{kind: sceneEndTransparencyGroup, pageResources: s.renderer.pageResources})
 }

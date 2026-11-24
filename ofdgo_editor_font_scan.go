@@ -265,7 +265,7 @@ func editorDocumentViewContext(ctx context.Context, reader *Reader, index int) (
 	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}
-	if _, err := next.DocContext(ctx); err != nil {
+	if _, err := next.docContext(ctx); err != nil {
 		return nil, err
 	}
 	next.bindEncryptionHold()

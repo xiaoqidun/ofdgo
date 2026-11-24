@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"syscall/js"
 
 	"github.com/xiaoqidun/ofdgo"
@@ -59,15 +60,26 @@ func RunWASM() {
 // 入参: fn 浏览器回调, args 回调参数
 // 返回: error 写入错误或取消原因
 func awaitExport(fn js.Value, args ...any) error {
-	done := make(chan error)
+	done := make(chan error, 1)
+	var once sync.Once
+	finish := func(err error) {
+		once.Do(func() { done <- err })
+	}
 	callback := js.FuncOf(func(this js.Value, args []js.Value) any {
+		defer func() {
+			if failure := recover(); failure != nil {
+				finish(fmt.Errorf("%v", failure))
+			}
+		}()
 		var err error
-		if args[1].Bool() {
+		if len(args) > 1 && args[1].Bool() {
 			err = context.Canceled
-		} else if message := args[0].String(); message != "" {
-			err = fmt.Errorf("%s", message)
+		} else if len(args) > 0 {
+			if message := args[0].String(); message != "" {
+				err = fmt.Errorf("%s", message)
+			}
 		}
-		done <- err
+		finish(err)
 		return nil
 	})
 	defer callback.Release()
@@ -75,10 +87,27 @@ func awaitExport(fn js.Value, args ...any) error {
 	return <-done
 }
 
+// rejectedPromise 构造携带异常信息的已拒绝Promise对象
+// 入参: failure 捕获的异常值
+// 返回: js.Value 已拒绝的Promise对象
+func rejectedPromise(failure any) js.Value {
+	message := fmt.Sprint(failure)
+	if err, ok := failure.(error); ok {
+		message = err.Error()
+	}
+	return js.Global().Get("Promise").Call("reject", js.Global().Get("Error").New(message))
+}
+
 // registerCallback 注册浏览器回调函数
 // 入参: name 回调名称, fn 回调函数
 func registerCallback(name string, fn func([]js.Value) (any, error)) {
-	cb := js.FuncOf(func(this js.Value, args []js.Value) any {
+	cb := js.FuncOf(func(this js.Value, args []js.Value) (result any) {
+		defer func() {
+			if failure := recover(); failure != nil {
+				message, _ := json.Marshal(failureResult(fmt.Errorf("%v", failure)))
+				result = string(message)
+			}
+		}()
 		return callbackResult(fn, args)
 	})
 	js.Global().Set(name, cb)
@@ -87,15 +116,30 @@ func registerCallback(name string, fn func([]js.Value) (any, error)) {
 // registerAsyncCallback 注册异步回调，先同步完成原子状态交接再让出事件循环执行业务
 // 入参: name 回调名称, prepare 同步准备回调，返回异步执行函数或立即错误
 func registerAsyncCallback(name string, prepare func([]js.Value) (func() (any, error), error)) {
-	cb := js.FuncOf(func(this js.Value, args []js.Value) any {
+	cb := js.FuncOf(func(this js.Value, args []js.Value) (result any) {
+		defer func() {
+			if failure := recover(); failure != nil {
+				result = rejectedPromise(failure)
+			}
+		}()
 		run, err := prepare(args)
 		executor := js.FuncOf(func(this js.Value, callbacks []js.Value) any {
-			resolve := callbacks[0]
+			resolve, reject := callbacks[0], callbacks[1]
+			defer func() {
+				if failure := recover(); failure != nil {
+					reject.Invoke(js.Global().Get("Error").New(fmt.Sprint(failure)))
+				}
+			}()
 			if err != nil {
 				resolve.Invoke((&businessEngine{}).encodeResult(failureResult(err)))
 				return nil
 			}
 			go func() {
+				defer func() {
+					if failure := recover(); failure != nil {
+						reject.Invoke(js.Global().Get("Error").New(fmt.Sprint(failure)))
+					}
+				}()
 				resolve.Invoke(callbackResult(func([]js.Value) (any, error) { return run() }, nil))
 			}()
 			return nil
@@ -214,7 +258,9 @@ func (w *wasmEngines) prepareCall(args []js.Value) (func() (any, error), error) 
 			defer func() { _ = snapshot.Close() }()
 			output := &businessEngine{resources: resources, ctx: context.Background()}
 			if checkpoint.Type() == js.TypeFunction {
-				output.ctx = output.newOutputContext(checkpoint)
+				operation := output.newOutputContext(checkpoint)
+				defer operation.cancel()
+				output.ctx = operation
 			}
 			if err := output.ctx.Err(); err != nil {
 				return nil, err
@@ -240,7 +286,9 @@ func (w *wasmEngines) executeCall(e *businessEngine, name string, checkpoint js.
 	}
 	e.ctx = context.Background()
 	if checkpoint.Type() == js.TypeFunction {
-		e.ctx = e.newOutputContext(checkpoint)
+		operation := e.newOutputContext(checkpoint)
+		defer operation.cancel()
+		e.ctx = operation
 	}
 	ctx := e.ctx
 	if e.currentSession != nil {
@@ -296,17 +344,28 @@ func (w *wasmEngines) close(args []js.Value) (any, error) {
 // 返回: []byte 字体内容, error 读取错误或取消原因
 func (e *businessEngine) loadConversionFont(load js.Value, name string) ([]byte, error) {
 	done := make(chan error, 1)
+	var once sync.Once
 	var data []byte
+	finish := func(err error) {
+		once.Do(func() { done <- err })
+	}
 	callback := js.FuncOf(func(this js.Value, args []js.Value) any {
+		defer func() {
+			if failure := recover(); failure != nil {
+				finish(fmt.Errorf("%v", failure))
+			}
+		}()
 		var err error
-		if args[2].Bool() {
+		if len(args) > 2 && args[2].Bool() {
 			err = context.Canceled
-		} else if message := args[1].String(); message != "" {
-			err = fmt.Errorf("%s", message)
-		} else {
+		} else if len(args) > 1 && args[1].String() != "" {
+			err = fmt.Errorf("%s", args[1].String())
+		} else if len(args) > 0 {
 			data, err = e.bytesFromJS(args[0])
+		} else {
+			err = fmt.Errorf("missing font data")
 		}
-		done <- err
+		finish(err)
 		return nil
 	})
 	defer callback.Release()

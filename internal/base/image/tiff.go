@@ -40,6 +40,7 @@ type TIFFLayout struct {
 	auxiliary     bool
 	Samples       uint32
 	depth         uint32
+	lowDepth      bool
 	fillOrder     uint32
 	compression   uint32
 	predictor     uint32
@@ -188,7 +189,7 @@ func readTIFFDirectory(ctx context.Context, input io.Reader, order binary.ByteOr
 	}
 	count := int(order.Uint16(header[:2]))
 	result.Orientation, result.Offset, result.Samples, result.fillOrder = 1, uint32(offset), 1, 1
-	result.depth = 1
+	result.depth, result.lowDepth = 1, true
 	result.compression = 1
 	result.predictor = 1
 	var entry [12]byte
@@ -196,6 +197,9 @@ func readTIFFDirectory(ctx context.Context, input io.Reader, order binary.ByteOr
 	var subfile, legacy uint32
 	var hasSubfile bool
 	var invalidMaskDepth bool
+	var bitsOffset int64
+	var bitsCount uint32
+	var hasMultiBits bool
 	for i := range count {
 		if err := ctx.Err(); err != nil {
 			return result, position, err
@@ -220,8 +224,16 @@ func readTIFFDirectory(ctx context.Context, input io.Reader, order binary.ByteOr
 		}
 		if tag == 258 {
 			invalidMaskDepth = kind != 3 || number != 1
-			if !invalidMaskDepth {
-				result.depth = uint32(order.Uint16(entry[8:10]))
+			if kind == 3 {
+				if number == 1 {
+					result.depth = uint32(order.Uint16(entry[8:10]))
+					result.lowDepth = result.depth < 8
+				} else if number == 2 {
+					d0, d1 := uint32(order.Uint16(entry[8:10])), uint32(order.Uint16(entry[10:12]))
+					result.depth, result.lowDepth = max(d0, d1), min(d0, d1) < 8
+				} else if number > 2 {
+					bitsOffset, bitsCount, hasMultiBits = int64(order.Uint32(entry[8:12])), number, true
+				}
 			}
 		}
 		if tag != 254 && tag != 255 && tag != 256 && tag != 257 && tag != 259 && tag != 262 && tag != 266 && tag != 274 && tag != 277 && tag != 284 && tag != 292 && tag != 293 && tag != 317 && tag != 322 && tag != 323 {
@@ -298,10 +310,94 @@ func readTIFFDirectory(ctx context.Context, input io.Reader, order binary.ByteOr
 	if (result.TileWidth == 0) != (result.TileHeight == 0) || result.TileWidth%16 != 0 || result.TileHeight%16 != 0 {
 		return result, position, fmt.Errorf("invalid TIFF tile dimensions")
 	}
+	end := offset + 6 + int64(count)*12
+	if hasMultiBits {
+		if bitsCount > 65535 || bitsOffset < 8 {
+			return result, end, fmt.Errorf("invalid TIFF bits per sample")
+		}
+		maxDepth, minDepth, ok, err := readTIFFBitsPerSample(ctx, input, order, bitsOffset, bitsCount, end)
+		if err != nil {
+			return result, end, err
+		}
+		if ok {
+			result.depth, result.lowDepth = maxDepth, minDepth < 8
+		} else {
+			result.depth, result.lowDepth = 16, false
+		}
+	}
 	if result.mask && (invalidMaskDepth || result.photometric != 4 || result.Samples != 1 || result.depth != 1) {
 		return result, position, fmt.Errorf("invalid TIFF transparency mask")
 	}
-	return result, offset + 6 + int64(count)*12, nil
+	return result, end, nil
+}
+
+// readTIFFBitsPerSample 读取多通道BitsPerSample数组的最大和最小位深，非随机流返回false保留流位置
+// 入参: ctx 取消上下文, input 输入流, order 字节序, offset 数组偏移, count 通道数, restore 恢复的流位置
+// 返回: uint32 最大位深, uint32 最小位深, bool 是否完成读取, error 读取或取消错误
+func readTIFFBitsPerSample(ctx context.Context, input io.Reader, order binary.ByteOrder, offset int64, count uint32, restore int64) (uint32, uint32, bool, error) {
+	var buf [512]byte
+	var maxDepth, minDepth uint32
+	if ra, ok := input.(io.ReaderAt); ok {
+		var read uint32
+		for read < count {
+			if err := ctx.Err(); err != nil {
+				return 0, 0, false, err
+			}
+			chunk := min(count-read, uint32(len(buf)/2))
+			slice := buf[:chunk*2]
+			var done int
+			for done < len(slice) {
+				n, err := ra.ReadAt(slice[done:], offset+int64(read)*2+int64(done))
+				done += n
+				if err != nil && (err != io.EOF || done < len(slice)) {
+					return 0, 0, false, err
+				}
+			}
+			for i := uint32(0); i < chunk; i++ {
+				d := uint32(order.Uint16(slice[i*2:]))
+				if read == 0 && i == 0 || d < minDepth {
+					minDepth = d
+				}
+				if d > maxDepth {
+					maxDepth = d
+				}
+			}
+			read += chunk
+		}
+		return maxDepth, minDepth, true, nil
+	}
+	seeker, ok := input.(io.Seeker)
+	if !ok {
+		return 0, 0, false, nil
+	}
+	if _, err := seeker.Seek(offset, io.SeekStart); err != nil {
+		return 0, 0, false, err
+	}
+	var read uint32
+	for read < count {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, false, err
+		}
+		chunk := min(count-read, uint32(len(buf)/2))
+		slice := buf[:chunk*2]
+		if _, err := io.ReadFull(input, slice); err != nil {
+			return 0, 0, false, err
+		}
+		for i := uint32(0); i < chunk; i++ {
+			d := uint32(order.Uint16(slice[i*2:]))
+			if read == 0 && i == 0 || d < minDepth {
+				minDepth = d
+			}
+			if d > maxDepth {
+				maxDepth = d
+			}
+		}
+		read += chunk
+	}
+	if _, err := seeker.Seek(restore, io.SeekStart); err != nil {
+		return 0, 0, false, err
+	}
+	return maxDepth, minDepth, true, nil
 }
 
 // DisplaySize 返回同时保留主图和透明蒙版分辨率的显示尺寸

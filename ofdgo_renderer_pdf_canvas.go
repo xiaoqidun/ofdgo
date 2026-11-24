@@ -74,20 +74,33 @@ type pdfTemplateFormKey struct {
 	highRes       bool
 }
 
-// pdfStampFormKey 按印章OFD内容摘要与打印模式复用PDF印章Form集合
+// pdfStampFormKey 按印章OFD内容摘要、打印配置、注释开关、分辨率档位与页面缩放复用PDF印章Form集合
 type pdfStampFormKey struct {
-	digest   [32]byte
-	printing bool
-}
-
-// pdfCompositeFormKey 按复合图元定义指针、打印模式、分辨率、缩放档位与透明组隔离属性复用PDF Form
-type pdfCompositeFormKey struct {
-	unit          *CompositeGraphicUnit
+	digest        [32]byte
 	printing      bool
 	printContents string
+	annotations   bool
 	highRes       bool
 	scaleStep     int
-	group         bool
+}
+
+// pdfPageScopeNode 链式驻留页面局部资源作用域序列，确保多页并发缓存隔离且不被回收复用
+type pdfPageScopeNode struct {
+	res  *parsedRes
+	prev *pdfPageScopeNode
+}
+
+// pdfCompositeFormKey 按复合图元定义、页面资源作用域、图案页变换、打印模式、分辨率、缩放档位与透明组隔离复用PDF Form
+type pdfCompositeFormKey struct {
+	unit           *CompositeGraphicUnit
+	pageScope      *pdfPageScopeNode
+	hasPatternPage bool
+	patternPage    [6]float64
+	printing       bool
+	printContents  string
+	highRes        bool
+	scaleStep      int
+	group          bool
 }
 
 // pdfEncodedImageEntry 保存并发去重编码后的PDF图像XObject待写出状态
@@ -155,6 +168,7 @@ type pdfStreamSession struct {
 	templateForms map[pdfTemplateFormKey]*pdfFormEntry
 	stampForms    map[pdfStampFormKey]*pdfStampFormGroup
 	compForms     map[pdfCompositeFormKey]*pdfFormEntry
+	pageScopes    map[pdfPageScopeNode]*pdfPageScopeNode
 	pendingForms  []*pdfFormEntry
 	contentRefs   map[[32]byte]pdfgo.Reference
 	templateHits  atomic.Int64
@@ -259,6 +273,7 @@ func newPDFStreamSession(writer *codecpdf.StreamWriter, compression CompressionO
 		templateForms: make(map[pdfTemplateFormKey]*pdfFormEntry),
 		stampForms:    make(map[pdfStampFormKey]*pdfStampFormGroup),
 		compForms:     make(map[pdfCompositeFormKey]*pdfFormEntry),
+		pageScopes:    make(map[pdfPageScopeNode]*pdfPageScopeNode),
 		contentRefs:   make(map[[32]byte]pdfgo.Reference),
 	}
 	s.fonts = codecpdf.NewFontRegistry(writer.AllocRef, true, true, level)
@@ -375,19 +390,24 @@ func pdfSourceRect(box Box, pageH float64) canvas.Rect {
 // 入参: dest OFD跳转目标, box 目标页面物理区域
 // 返回: pdfgo.Destination 待关联输出页的目标, error 目标参数错误
 func pdfDestination(dest Dest, box Box) (pdfgo.Destination, error) {
-	dest = dest.effective()
 	if _, err := dest.attributes(); err != nil {
 		return pdfgo.Destination{}, err
 	}
-	left := dest.Left - box.X
-	top := dest.Top - box.Y
-	right := dest.Right - box.X
-	bottom := dest.Bottom - box.Y
+	val := func(p *float64) float64 {
+		if p == nil {
+			return 0
+		}
+		return *p
+	}
+	left := val(dest.Left) - box.X
+	top := val(dest.Top) - box.Y
+	right := val(dest.Right) - box.X
+	bottom := val(dest.Bottom) - box.Y
 	const scale = 72.0 / 25.4
 	result := pdfgo.Destination{Mode: pdfgo.Name(dest.Type)}
 	switch dest.Type {
 	case "XYZ":
-		result.Parameters = pdfgo.Array{pdfgo.Real(left * scale), pdfgo.Real((box.H - top) * scale), pdfgo.Real(dest.Zoom)}
+		result.Parameters = pdfgo.Array{pdfgo.Real(left * scale), pdfgo.Real((box.H - top) * scale), pdfgo.Real(val(dest.Zoom))}
 	case "FitH":
 		result.Parameters = pdfgo.Array{pdfgo.Real((box.H - top) * scale)}
 	case "FitV":
@@ -571,6 +591,11 @@ func tryPDFRawImage(ctx context.Context, data []byte) *pdfRawImage {
 		}
 		raw := &codecpdf.RawImage{Filter: "JPXDecode", Width: w, Height: h, Data: data}
 		if !isJP2Container(data) {
+			switch bpc {
+			case 1, 2, 4, 8, 16:
+			default:
+				return nil
+			}
 			switch len(info.Components) {
 			case 1:
 				raw.ColorSpace = "DeviceGray"
@@ -858,9 +883,9 @@ func (s *pdfStreamSession) registerImage(ctx context.Context, img image.Image, r
 	if rawPass != nil {
 		rawCopy := *rawPass
 		rawCopy.Interpolate = interpolate
-		encoded, err = codecpdf.EncodeRawImageStream(ctx, &rawCopy, s.compression, target)
+		encoded, err = codecpdf.EncodeRawImageStream(ctx, &rawCopy, s.compression.pdfOptions(), target)
 	} else {
-		encoded, err = codecpdf.EncodePDFImageStreamInterpolate(ctx, unwrapped, s.compression, target, s.compressLevel, interpolate)
+		encoded, err = codecpdf.EncodePDFImageStreamInterpolate(ctx, unwrapped, s.compression.pdfOptions(), target, s.compressLevel, interpolate)
 	}
 	if err == nil && len(encoded.SMaskData) > 0 {
 		entry.smaskRef = s.writer.AllocRef()
@@ -1175,6 +1200,9 @@ func (r *pdfRenderer) rawImageResource(renderer *Renderer, obj ImageObject) *pdf
 	}
 	r.session.rawMu.Unlock()
 	raw := tryPDFRawImage(ctx, data)
+	if raw == nil && ctx.Err() != nil {
+		return nil
+	}
 	if raw != nil {
 		raw.raw.Key = raw
 	}
@@ -1551,7 +1579,33 @@ func (r *Renderer) drawPDFOFDStamp(pdfOut *pdfRenderer, s Stamp, pageH float64, 
 	if !validBox {
 		return nil
 	}
-	key := pdfStampFormKey{digest: sha256.Sum256(s.Data), printing: r.printing}
+	session, err := r.loadStampOFD(ctx, s.Data)
+	if err != nil {
+		return err
+	}
+	maxScale := 1.0
+	for _, sealBox := range session.boxes {
+		if rasterPositive(sealBox.W) && rasterPositive(sealBox.H) {
+			maxScale = max(maxScale, s.Box.W/sealBox.W, s.Box.H/sealBox.H)
+		}
+	}
+	if pdfOut.imageScale > 1 {
+		maxScale *= pdfOut.imageScale
+	}
+	scaleStep := 0
+	var subScale float64
+	if maxScale > 1 {
+		scaleStep = int(math.Ceil(maxScale * 4))
+		subScale = float64(scaleStep) / 4
+	}
+	key := pdfStampFormKey{
+		digest:        sha256.Sum256(s.Data),
+		printing:      r.printing,
+		printContents: r.printContents,
+		annotations:   r.renderAnnotations,
+		highRes:       r.dpi >= 300,
+		scaleStep:     scaleStep,
+	}
 	pdfOut.session.formMu.Lock()
 	group, exists := pdfOut.session.stampForms[key]
 	if !exists {
@@ -1574,66 +1628,61 @@ func (r *Renderer) drawPDFOFDStamp(pdfOut *pdfRenderer, s Stamp, pageH float64, 
 				}
 				close(group.done)
 			}()
-			session, err := r.loadStampOFD(ctx, s.Data)
-			if err != nil {
-				compileErr = err
-			} else {
-				forms := make([]pdfStampPageForm, 0, len(session.pages))
-				for i, content := range session.pages {
-					sealBox := session.boxes[i]
-					if !rasterPositive(sealBox.W) || !rasterPositive(sealBox.H) {
-						continue
-					}
-					subPDF := newPDFFormRenderer(pdfOut.session, ctx, sealBox.W, sealBox.H, r.reader.resources)
-					subPDF.activeComp = pdfOut.activeComp
-					pageRenderer := session.renderer
-					var renderErr error
-					func() {
-						prevDPI, prevPrinting, prevDecodeImages, prevPageCtx, prevRenderErr := pageRenderer.dpi, pageRenderer.printing, pageRenderer.decodeImages, pageRenderer.pageContext, pageRenderer.renderError
-						pageRenderer.dpi = r.dpi
-						pageRenderer.printing = r.printing
-						pageRenderer.decodeImages = r.decodeImages
-						pageRenderer.pageContext = context.WithValue(ctx, pdfRendererCtxKey{}, subPDF)
-						pageRenderer.renderError = nil
-						defer func() {
-							pageRenderer.dpi, pageRenderer.printing, pageRenderer.decodeImages, pageRenderer.pageContext, pageRenderer.renderError = prevDPI, prevPrinting, prevDecodeImages, prevPageCtx, prevRenderErr
-						}()
-						renderErr = pageRenderer.renderCanvasPageClipped(canvas.NewContext(subPDF), content, false, nil)
-					}()
-					if renderErr != nil {
-						compileErr = renderErr
-						break
-					}
-					if subPDF.imageError != nil {
-						compileErr = subPDF.imageError
-						break
-					}
-					raw := subPDF.content.Bytes()
-					data := raw
-					compressed := false
-					if pdfOut.session.compress {
-						comp, _, compErr := codecpdf.CompressBytes(nil, nil, pdfOut.session.compressLevel, raw)
-						if compErr != nil {
-							compileErr = compErr
-							break
-						}
-						data = comp
-						compressed = true
-					}
-					name, ref := pdfOut.session.allocFormNameRef()
-					pdfOut.session.enqueueForm(&pdfFormEntry{
-						name:       name,
-						ref:        ref,
-						width:      sealBox.W,
-						height:     sealBox.H,
-						resources:  subPDF.content.Resources(),
-						data:       data,
-						compressed: compressed,
-					})
-					forms = append(forms, pdfStampPageForm{name: name, ref: ref, width: sealBox.W, height: sealBox.H})
+			forms := make([]pdfStampPageForm, 0, len(session.pages))
+			for i, content := range session.pages {
+				sealBox := session.boxes[i]
+				if !rasterPositive(sealBox.W) || !rasterPositive(sealBox.H) {
+					continue
 				}
-				group.forms = forms
+				subPDF := newPDFFormRenderer(pdfOut.session, ctx, sealBox.W, sealBox.H, r.reader.resources)
+				subPDF.activeComp = pdfOut.activeComp
+				subPDF.imageScale = subScale
+				pageRenderer := session.renderer
+				var renderErr error
+				func() {
+					restoreState := syncStampRendererState(pageRenderer, r, context.WithValue(ctx, pdfRendererCtxKey{}, subPDF))
+					defer restoreState()
+					if scale := max(s.Box.W/sealBox.W, s.Box.H/sealBox.H); scale > 1 {
+						limit := 4096 * 25.4 / max(sealBox.W, sealBox.H)
+						if pageRenderer.dpi < limit {
+							pageRenderer.dpi = min(pageRenderer.dpi*scale, limit)
+						}
+					}
+					renderErr = pageRenderer.renderCanvasPageClipped(canvas.NewContext(subPDF), content, false, nil)
+				}()
+				if renderErr != nil {
+					compileErr = renderErr
+					break
+				}
+				if subPDF.imageError != nil {
+					compileErr = subPDF.imageError
+					break
+				}
+				raw := subPDF.content.Bytes()
+				data := raw
+				compressed := false
+				if pdfOut.session.compress {
+					comp, _, compErr := codecpdf.CompressBytes(nil, nil, pdfOut.session.compressLevel, raw)
+					if compErr != nil {
+						compileErr = compErr
+						break
+					}
+					data = comp
+					compressed = true
+				}
+				name, ref := pdfOut.session.allocFormNameRef()
+				pdfOut.session.enqueueForm(&pdfFormEntry{
+					name:       name,
+					ref:        ref,
+					width:      sealBox.W,
+					height:     sealBox.H,
+					resources:  subPDF.content.Resources(),
+					data:       data,
+					compressed: compressed,
+				})
+				forms = append(forms, pdfStampPageForm{name: name, ref: ref, width: sealBox.W, height: sealBox.H})
 			}
+			group.forms = forms
 			group.err = compileErr
 			completed = true
 		}()
@@ -1670,6 +1719,102 @@ func (r *Renderer) drawPDFOFDStamp(pdfOut *pdfRenderer, s Stamp, pageH float64, 
 		pdfOut.content.DrawForm(pf.name, pf.ref, m, clip, 255)
 	}
 	return nil
+}
+
+// internPageScopeUnlocked 在formMu持锁期间驻留页面局部资源序列，返回可比较的唯一作用域节点
+// 入参: res 页面局部资源列表
+// 返回: *pdfPageScopeNode 唯一作用域节点
+func (s *pdfStreamSession) internPageScopeUnlocked(res []*parsedRes) *pdfPageScopeNode {
+	var cur *pdfPageScopeNode
+	for _, item := range res {
+		if item == nil {
+			continue
+		}
+		k := pdfPageScopeNode{res: item, prev: cur}
+		if existing, ok := s.pageScopes[k]; ok {
+			cur = existing
+			continue
+		}
+		node := &pdfPageScopeNode{res: item, prev: cur}
+		s.pageScopes[k] = node
+		cur = node
+	}
+	return cur
+}
+
+// compositeUsesPagePattern 检查复合图元或其嵌套成员是否包含相对页面定位的底纹
+// 入参: unit 复合图元定义, outer 外层已访问复合图元集合
+// 返回: bool 是否包含页面相对底纹
+func (r *Renderer) compositeUsesPagePattern(unit *CompositeGraphicUnit, outer map[*CompositeGraphicUnit]bool) bool {
+	if unit == nil {
+		return false
+	}
+	var seen map[*CompositeGraphicUnit]bool
+	var seenPatterns map[*Pattern]bool
+	var hasPagePatternColor func(*FillColor) bool
+	var checkObjects func(func(func(GraphicObject) bool)) bool
+	hasPagePatternColor = func(fc *FillColor) bool {
+		if fc == nil || fc.Pattern == nil {
+			return false
+		}
+		if fc.Pattern.RelativeTo == "Page" {
+			return true
+		}
+		if seenPatterns[fc.Pattern] {
+			return false
+		}
+		if seenPatterns == nil {
+			seenPatterns = make(map[*Pattern]bool)
+		}
+		seenPatterns[fc.Pattern] = true
+		defer delete(seenPatterns, fc.Pattern)
+		return checkObjects(fc.Pattern.CellContent.objects())
+	}
+	checkDrawParam := func(id string) bool {
+		if id == "" {
+			return false
+		}
+		dp := r.drawParamDefaults(id, nil)
+		if dp == nil {
+			return false
+		}
+		return hasPagePatternColor(dp.FillColor) || hasPagePatternColor((*FillColor)(dp.StrokeColor))
+	}
+	checkObjects = func(seq func(func(GraphicObject) bool)) bool {
+		for member := range seq {
+			switch member.Type {
+			case "PathObject":
+				if hasPagePatternColor(member.PathObject.FillColor) || hasPagePatternColor((*FillColor)(member.PathObject.StrokeColor)) || checkDrawParam(member.PathObject.DrawParam) {
+					return true
+				}
+			case "TextObject":
+				if hasPagePatternColor(member.TextObject.FillColor) || hasPagePatternColor((*FillColor)(member.TextObject.StrokeColor)) || checkDrawParam(member.TextObject.DrawParam) {
+					return true
+				}
+			case "ImageObject":
+				if member.ImageObject.Border != nil && hasPagePatternColor((*FillColor)(member.ImageObject.Border.BorderColor)) {
+					return true
+				}
+			case "CompositeObject":
+				if member.CompositeObject.ResourceID != "" {
+					if child := r.compositeDefinition(member.CompositeObject.ResourceID); child != nil && !outer[child] && !seen[child] {
+						if seen == nil {
+							seen = make(map[*CompositeGraphicUnit]bool)
+						}
+						seen[child] = true
+						found := checkObjects(child.objects())
+						delete(seen, child)
+						if found {
+							return true
+						}
+					}
+				}
+			}
+		}
+		return false
+	}
+	seen = map[*CompositeGraphicUnit]bool{unit: true}
+	return checkObjects(unit.objects())
 }
 
 // drawPDFCompositeForm 将文档级复用复合图元编译为全局共享PDF Form XObject并按实例变换调用
@@ -1710,7 +1855,12 @@ func (r *Renderer) drawPDFCompositeForm(pdfOut *pdfRenderer, ref *CompositeGraph
 		}
 	}
 	key := pdfCompositeFormKey{unit: ref, printing: r.printing, printContents: r.printContents, highRes: r.dpi >= 300, scaleStep: scaleStep, group: needGroup}
+	if r.patternPage != nil {
+		key.hasPatternPage = true
+		key.patternPage = r.patternPage.Values()
+	}
 	pdfOut.session.formMu.Lock()
+	key.pageScope = pdfOut.session.internPageScopeUnlocked(r.pageResources)
 	if existing, ok := pdfOut.session.compForms[key]; ok {
 		waitingSet := false
 		if !existing.finished && pdfOut.activeComp != nil {
@@ -1791,10 +1941,8 @@ func (r *Renderer) drawPDFCompositeForm(pdfOut *pdfRenderer, ref *CompositeGraph
 	var subErr error
 	func() {
 		prevCtx, prevErr, prevPattern := r.pageContext, r.renderError, r.patternPage
-		r.pageContext, r.renderError, r.patternPage = context.WithValue(pdfOut.ctx, pdfRendererCtxKey{}, subPDF), nil, nil
-		restoreBase := r.bindParsedResources(nil)
+		r.pageContext, r.renderError = context.WithValue(pdfOut.ctx, pdfRendererCtxKey{}, subPDF), nil
 		defer func() {
-			restoreBase()
 			r.pageContext, r.renderError, r.patternPage = prevCtx, prevErr, prevPattern
 		}()
 		subVisitor := &canvasPageVisitor{renderer: r, ctx: canvas.NewContext(subPDF), height: ref.Height}
@@ -1803,9 +1951,20 @@ func (r *Renderer) drawPDFCompositeForm(pdfOut *pdfRenderer, ref *CompositeGraph
 			nextRefs[k] = v
 		}
 		nextRefs[ref] = true
-		copyUnit := *ref
-		copyUnit.Alpha = nil
-		walkErr = r.walkComposite(copyUnit, RenderState{}, subVisitor, nextRefs)
+		identity := IdentityMatrix()
+		var formClip *GeometryPath
+		if !pageSkipsClips(subVisitor) {
+			formClip, walkErr = r.compositeExtentClip(*ref, identity, nil)
+		}
+		if walkErr == nil {
+			formState := RenderState{Parent: &identity, BoundaryInCTM: true, Clip: formClip}
+			for member := range ref.objects() {
+				if err := r.walkObject(&member, formState, subVisitor, nextRefs); err != nil {
+					walkErr = err
+					break
+				}
+			}
+		}
 		subErr = r.renderError
 	}()
 	if walkErr == nil {

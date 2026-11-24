@@ -123,14 +123,14 @@ func mergeAdjacentTextSpan(runes []rune, prev, cur TextSpan) (TextSpan, bool) {
 // MeasureObject 使用默认解释器度量对象，不分配页面像素
 // 入参: ctx 取消上下文, r 渲染器, object 图形对象, options 度量上下文
 // 返回: ObjectMeasurement 度量结果, error 错误信息
-func (CanvasBackend) MeasureObject(ctx context.Context, r *Renderer, object GraphicObject, options MeasureOptions) (ObjectMeasurement, error) {
+func (DefaultBackend) MeasureObject(ctx context.Context, r *Renderer, object GraphicObject, options MeasureOptions) (ObjectMeasurement, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		return ObjectMeasurement{}, err
 	}
-	if object.Type != "TextObject" && object.Type != "PathObject" && object.Type != "ImageObject" && object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
+	if object.Type != "TextObject" && object.Type != "PathObject" && object.Type != "ImageObject" && object.Type != "CompositeObject" {
 		return ObjectMeasurement{}, fmt.Errorf("unsupported object type %q", object.Type)
 	}
 	boundary, ctm := editorGeometry(object)
@@ -188,8 +188,8 @@ func (CanvasBackend) MeasureObject(ctx context.Context, r *Renderer, object Grap
 		r.renderPath(canvasCtx, obj, 0, defaults, options.Parent, options.BoundaryInCTM, clip)
 	case "ImageObject":
 		r.measureImage(canvasCtx, object.ImageObject, 0, options.Parent, options.BoundaryInCTM, clip)
-	case "CompositeObject", "CompositeGraphicUnit":
-		r.renderCompositeGraphicUnit(canvasCtx, object.CompositeGraphicUnit, 0, defaults, options.Parent, options.BoundaryInCTM, clip)
+	case "CompositeObject":
+		r.renderCompositeObject(canvasCtx, object.CompositeObject, 0, defaults, options.Parent, options.BoundaryInCTM, clip)
 	}
 	return ObjectMeasurement{Bounds: bounds.box, Contours: bounds.contours}, r.renderError
 }
@@ -197,7 +197,7 @@ func (CanvasBackend) MeasureObject(ctx context.Context, r *Renderer, object Grap
 // PageText 使用默认解释器提取原文与字形位置
 // 入参: ctx 取消上下文, r 渲染器, page 页面内容
 // 返回: *PageText 页面文字, error 错误信息
-func (CanvasBackend) PageText(ctx context.Context, r *Renderer, page *PageContent) (*PageText, error) {
+func (DefaultBackend) PageText(ctx context.Context, r *Renderer, page *PageContent) (*PageText, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}

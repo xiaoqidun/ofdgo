@@ -224,7 +224,7 @@ func (p *pdfImporter) compileCoverage(node pdfCompositeNode, stroke bool) (pdfCo
 	}
 	deferredClip := false
 	switch p.editor.Backends().Compiler.(type) {
-	case CanvasBackend, *CanvasBackend:
+	case DefaultBackend, *DefaultBackend:
 	case OFDCompiler, *OFDCompiler:
 		deferredClip = true
 	default:
@@ -241,7 +241,7 @@ func (p *pdfImporter) compileCoverage(node pdfCompositeNode, stroke bool) (pdfCo
 		return pdfCompositeGeometry{}, err
 	}
 	switch geometry.(type) {
-	case CanvasBackend, *CanvasBackend:
+	case DefaultBackend, *DefaultBackend:
 	default:
 		return fallback()
 	}
@@ -882,7 +882,7 @@ func (p *pdfImporter) appendPath(mark pdfgo.PathMark) error {
 	if err != nil {
 		return err
 	}
-	object := PathObject{Boundary: pdfBoundary(box), CTM: ctm, AbbreviatedData: data, Fill: &mark.Fill, Stroke: &mark.Stroke, FillColor: fillColor, StrokeColor: &strokeColor, Alpha: objectAlpha, LineWidth: mark.Style.LineWidth * scale, Cap: []string{"Butt", "Round", "Square"}[mark.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[mark.Style.Join], MiterLimit: mark.Style.MiterLimit, Clips: clips}
+	object := PathObject{Boundary: pdfBoundary(box), CTM: ctm, AbbreviatedData: data, Fill: &mark.Fill, Stroke: &mark.Stroke, FillColor: fillColor, StrokeColor: &strokeColor, Alpha: objectAlpha, LineWidth: mark.Style.LineWidth * scale, Cap: pdfLineCapName(mark.Style.Cap), Join: pdfLineJoinName(mark.Style.Join), MiterLimit: mark.Style.MiterLimit, Clips: clips}
 	object.LineWidthSet = object.LineWidth == 0
 	if mark.Path.EvenOdd {
 		object.Rule = "Even-Odd"
@@ -1002,7 +1002,7 @@ func (p *pdfImporter) sharedClipObjects(objects []GraphicObject) ([]GraphicObjec
 			p.formRecords[id] = pdfFormRecord{objects: saved, width: p.pageWidth, height: p.pageHeight}
 		}
 		mapped.recordOrigin(len(output), p.objects.origin(start))
-		output = append(output, GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: CompositeGraphicUnit{
+		output = append(output, GraphicObject{Type: "CompositeObject", CompositeObject: CompositeObject{
 			Boundary: pdfBoundary(Box{W: p.pageWidth, H: p.pageHeight}), ResourceID: id, Clips: clips,
 		}})
 		start = end
@@ -1053,7 +1053,7 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 			area.Path = encoded.path[:1:1]
 		}
 		for _, mark := range path.Text {
-			objects, ok := p.clipTexts[mark]
+			entry, ok := p.clipTexts[mark]
 			if !ok {
 				count := p.objects.len()
 				textCount := p.report.TextObjects
@@ -1062,12 +1062,17 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 				}
 				p.objects.truncate(count)
 				p.report.TextObjects = textCount
-				objects = p.clipTexts[mark]
+				entry = p.clipTexts[mark]
 			}
-			if len(path.Text) == 1 {
-				area.Text = objects[:len(objects):len(objects)]
-			} else {
-				area.Text = append(area.Text, objects...)
+			if len(entry.paths) != 0 {
+				area.Path = append(area.Path, entry.paths...)
+			}
+			if len(entry.texts) != 0 {
+				if len(path.Text) == 1 && len(area.Text) == 0 {
+					area.Text = entry.texts[:len(entry.texts):len(entry.texts)]
+				} else {
+					area.Text = append(area.Text, entry.texts...)
+				}
 			}
 		}
 		if len(area.Path)+len(area.Text) == 0 {
@@ -1077,4 +1082,32 @@ func (p *pdfImporter) clips(paths []pdfgo.Path, origin Box) (*Clips, error) {
 		clips.Clip = append(clips.Clip, Clip{Area: areas[index : index+1 : index+1]})
 	}
 	return clips, nil
+}
+
+// pdfLineCapName 将PDF线帽编号安全映射为OFD线帽名称
+// 入参: cap PDF线帽编号
+// 返回: string OFD线帽名称
+func pdfLineCapName(cap int) string {
+	switch cap {
+	case 1:
+		return "Round"
+	case 2:
+		return "Square"
+	default:
+		return "Butt"
+	}
+}
+
+// pdfLineJoinName 将PDF线连接编号安全映射为OFD连接名称
+// 入参: join PDF线连接编号
+// 返回: string OFD连接名称
+func pdfLineJoinName(join int) string {
+	switch join {
+	case 1:
+		return "Round"
+	case 2:
+		return "Bevel"
+	default:
+		return "Miter"
+	}
 }

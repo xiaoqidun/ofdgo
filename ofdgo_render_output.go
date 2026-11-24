@@ -129,7 +129,7 @@ func (r *Renderer) RenderToZIPContext(ctx context.Context, writer io.Writer, for
 	if err := r.compression.Validate(); err != nil {
 		return err
 	}
-	doc, err := r.reader.DocContext(ctx)
+	doc, err := r.reader.docContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -203,7 +203,7 @@ func (r *Renderer) RenderToTextContext(ctx context.Context, page *PageContent, w
 	}
 	var canvasCompiler bool
 	switch r.backends.Compiler.(type) {
-	case CanvasBackend, *CanvasBackend:
+	case DefaultBackend, *DefaultBackend:
 		canvasCompiler = true
 	}
 	prevContentOnly := r.textContentOnly
@@ -241,13 +241,13 @@ func (r *Renderer) RenderToMultiPageTextContext(ctx context.Context, writer io.W
 	}
 	var canvasCompiler bool
 	switch r.backends.Compiler.(type) {
-	case CanvasBackend, *CanvasBackend:
+	case DefaultBackend, *DefaultBackend:
 		canvasCompiler = true
 	}
 	prevCtx, prevContentOnly := r.pageContext, r.textContentOnly
 	r.pageContext, r.textContentOnly = ctx, canvasCompiler
 	defer func() { r.pageContext, r.textContentOnly = prevCtx, prevContentOnly }()
-	doc, err := r.reader.DocContext(ctx)
+	doc, err := r.reader.docContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -366,7 +366,7 @@ func (r *Renderer) RenderToPNGContext(ctx context.Context, page *PageContent, wr
 	if r.compression.Mode == CompressionUnchanged {
 		return png.Encode(&imageMetadataWriter{writer: writer, skip: 33, data: chunk}, img)
 	}
-	optimized, err := pdfgo.OptimizeImageFromPixels(ctx, img, r.compression)
+	optimized, err := pdfgo.OptimizeImageFromPixels(ctx, img, r.compression.pdfOptions())
 	if errors.Is(err, io.ErrShortBuffer) {
 		return png.Encode(&imageMetadataWriter{writer: writer, skip: 33, data: chunk}, img)
 	}
@@ -521,7 +521,7 @@ func (r *Renderer) RenderToMultiPagePDFContext(ctx context.Context, writer io.Wr
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	doc, err := r.reader.DocContext(ctx)
+	doc, err := r.reader.docContext(ctx)
 	if err != nil {
 		return err
 	}

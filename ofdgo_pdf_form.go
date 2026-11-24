@@ -170,8 +170,13 @@ func stripFormOuterClips(nodes []pdfCompositeNode, outerCount int) ([]pdfgo.Path
 					}
 				}
 				strip := outerCount
-				if len(style.Clips) > outerCount && len(style.Clips[outerCount].Text) == 0 {
-					strip = outerCount + 1
+				if outerCount > 0 && len(style.Clips) > outerCount && len(style.Clips[outerCount].Text) == 0 {
+					for i := range outer {
+						if sameClipPrefix(outer[i:i+1], style.Clips[outerCount:outerCount+1]) {
+							strip = outerCount + 1
+							break
+						}
+					}
 				}
 				if strip == len(style.Clips) {
 					style.Clips = nil
@@ -246,7 +251,7 @@ func pdfIdentityTransform(m pdfgo.Matrix, box Box) bool {
 // templateCandidateKey 为固定位置复合对象构造模板提升匹配键
 // 入参: ctx 取消上下文, unit 复合对象, area 页面区域, zOrder 目标模板层次
 // 返回: pdfTemplateCandidateKey 模板签名, bool 是否允许提升, error 编码错误
-func templateCandidateKey(ctx context.Context, unit CompositeGraphicUnit, area PageArea, zOrder string) (pdfTemplateCandidateKey, bool, error) {
+func templateCandidateKey(ctx context.Context, unit CompositeObject, area PageArea, zOrder string) (pdfTemplateCandidateKey, bool, error) {
 	if area.PhysicalBox == "" {
 		return pdfTemplateCandidateKey{}, false, nil
 	}
@@ -471,12 +476,12 @@ func canonicalFormObject(object GraphicObject) GraphicObject {
 		img.CTM = canonicalFormNumbers(img.CTM)
 		img.Clips = canonicalFormClips(img.Clips)
 		object.ImageObject = img
-	case "CompositeObject", "CompositeGraphicUnit":
-		c := object.CompositeGraphicUnit
+	case "CompositeObject":
+		c := object.CompositeObject
 		c.Boundary = canonicalFormNumbers(c.Boundary)
 		c.CTM = canonicalFormNumbers(c.CTM)
 		c.Clips = canonicalFormClips(c.Clips)
-		object.CompositeGraphicUnit = c
+		object.CompositeObject = c
 	}
 	return object
 }
@@ -913,7 +918,11 @@ func (p *pdfImporter) shouldReuseGroupForm(mark *pdfgo.GroupMark, childCount int
 	if p.formUseCount(mark.Ref, mark.Stream) >= 2 {
 		return true
 	}
-	return childCount >= 16 && !mark.Knockout && codecpdf.NormalBlend(mark.BlendMode) && mark.SoftMask == nil && (mark.ColorSpace == nil || mark.ColorSpace.SRGBEquivalent()) && (mark.Alpha == 1 || mark.Isolated)
+	space := mark.ColorSpace
+	if space == nil {
+		space = p.compositeSpace
+	}
+	return childCount >= 16 && !mark.Knockout && !mark.AlphaIsShape && codecpdf.NormalBlend(mark.BlendMode) && mark.SoftMask == nil && (space == nil || space.SRGBEquivalent()) && (mark.Alpha == 1 || mark.Isolated)
 }
 
 // probeNeighborFormRefs 在单页首屏转换时探测邻页XObject字典，提前识别跨页小表单
@@ -1071,7 +1080,12 @@ func (p *pdfImporter) compositeGroupForm(node pdfCompositeNode) (bool, error) {
 	if g == nil || g.Page || len(node.children) == 0 {
 		return false, nil
 	}
-	if !g.Knockout && codecpdf.NormalBlend(g.BlendMode) && g.SoftMask == nil && (g.ColorSpace == nil || g.ColorSpace.SRGBEquivalent()) && (g.Alpha == 1 || g.Isolated) {
+	space := g.ColorSpace
+	if space == nil {
+		space = p.compositeSpace
+	}
+	srgbSpace := space == nil || space.SRGBEquivalent()
+	if !g.Knockout && !g.AlphaIsShape && codecpdf.NormalBlend(g.BlendMode) && g.SoftMask == nil && srgbSpace && (g.Alpha == 1 || g.Isolated) {
 		var alphaPtr *int
 		if g.Alpha < 1 {
 			alpha := int(math.Round(g.Alpha * 255))
@@ -1083,7 +1097,7 @@ func (p *pdfImporter) compositeGroupForm(node pdfCompositeNode) (bool, error) {
 			return packed, err
 		}
 	}
-	if g.Isolated && codecpdf.NormalBlend(g.BlendMode) && g.SoftMask == nil && p.warning != nil && p.formUseCount(g.Ref, g.Stream) >= 2 {
+	if g.Isolated && !g.AlphaIsShape && codecpdf.NormalBlend(g.BlendMode) && g.SoftMask == nil && (p.compositeSpace == nil || p.compositeSpace.SRGBEquivalent()) && p.warning != nil && p.formUseCount(g.Ref, g.Stream) >= 2 {
 		return p.compositeIsolatedGroupRaster(node)
 	}
 	return false, nil
@@ -1154,7 +1168,7 @@ func (p *pdfImporter) compositeFormLocal(mark pdfgo.FormMark, nodes []pdfComposi
 	savedScaleBoost := p.imageScaleBoost
 	p.objects = nil
 	p.matrix, p.pageWidth, p.pageHeight = formToLocal, uWidth, uHeight
-	p.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
+	p.clipTexts = make(map[*pdfgo.TextClip]pdfClipTextEntry)
 	if scale := localToPage.MaxScale(); finite(scale) && scale > 1 {
 		p.imageScaleBoost = max(savedScaleBoost, scale)
 	}
@@ -1190,14 +1204,14 @@ func (p *pdfImporter) compositeFormLocal(mark pdfgo.FormMark, nodes []pdfComposi
 	if !pdfIdentityTransform(localToPage, instBox) {
 		ctm = pdfNumbers(localToPage[0], localToPage[1], localToPage[2], localToPage[3], localToPage[4]-instBox.X, localToPage[5]-instBox.Y)
 	}
-	unit := CompositeGraphicUnit{
+	unit := CompositeObject{
 		Boundary:   pdfBoundary(instBox),
 		CTM:        ctm,
 		ResourceID: id,
 		Alpha:      groupAlpha,
 		Clips:      clips,
 	}
-	p.appendSequenceObject(GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: unit}, sequence)
+	p.appendSequenceObject(GraphicObject{Type: "CompositeObject", CompositeObject: unit}, sequence)
 	savedObjects = p.objects
 	return true, nil
 }
@@ -1242,7 +1256,7 @@ func (p *pdfImporter) compositeFormPage(nodes []pdfCompositeNode) (bool, error) 
 		return false, err
 	}
 	p.objects = parent
-	p.appendSequenceObject(GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: CompositeGraphicUnit{
+	p.appendSequenceObject(GraphicObject{Type: "CompositeObject", CompositeObject: CompositeObject{
 		Boundary: pdfBoundary(Box{W: p.pageWidth, H: p.pageHeight}), ResourceID: id,
 	}}, sequence)
 	parent = p.objects
@@ -1388,7 +1402,7 @@ func (p *pdfImporter) compositeIsolatedGroupRaster(node pdfCompositeNode) (bool,
 		p.objects = nil
 		p.matrix, p.pageWidth, p.pageHeight, p.rasterDPI = formToLocal, uWidth, uHeight, effectiveDPI
 		p.compositeCache = nil
-		p.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
+		p.clipTexts = make(map[*pdfgo.TextClip]pdfClipTextEntry)
 		err = p.compositeRegion(nil, localNode, space, false)
 		generated := p.objects
 		p.objects = savedObjects
@@ -1553,10 +1567,10 @@ func (p *pdfImporter) promoteTemplatePages(ctx context.Context) error {
 					pos = 0
 				}
 				obj := objs[pos]
-				if obj.Type != "CompositeObject" && obj.Type != "CompositeGraphicUnit" {
+				if obj.Type != "CompositeObject" {
 					continue
 				}
-				unit := obj.CompositeGraphicUnit
+				unit := obj.CompositeObject
 				if unit.ResourceID == "" || len(unit.Actions) != 0 || boundIDs[unit.ID] {
 					continue
 				}
@@ -1585,7 +1599,7 @@ func (p *pdfImporter) promoteTemplatePages(ctx context.Context) error {
 					pos = 0
 				}
 				sampleObj := cloneEditorData(sampleObjs[pos])
-				sampleObj.CompositeGraphicUnit.ID = ""
+				sampleObj.CompositeObject.ID = ""
 				tplID, err := p.editor.addOwnedTemplatePage(ctx, samplePage.Area, []GraphicObject{sampleObj}, zOrder, "")
 				if err != nil {
 					return err

@@ -45,26 +45,64 @@ type Content struct {
 // Layer 图层
 // Objects非空时按其顺序渲染，图元修改应作用于Objects中的对象
 type Layer struct {
-	ID                   string                 `xml:"ID,attr"`
-	Type                 string                 `xml:"Type,attr"`
-	DrawParam            string                 `xml:"DrawParam,attr"`
-	Objects              []GraphicObject        `xml:"-"`
-	TextObject           []TextObject           `xml:"TextObject"`
-	PathObject           []PathObject           `xml:"PathObject"`
-	ImageObject          []ImageObject          `xml:"ImageObject"`
-	CompositeGraphicUnit []CompositeGraphicUnit `xml:"CompositeGraphicUnit"`
+	ID              string            `xml:"ID,attr"`
+	Type            string            `xml:"Type,attr"`
+	DrawParam       string            `xml:"DrawParam,attr"`
+	Objects         []GraphicObject   `xml:"-"`
+	TextObject      []TextObject      `xml:"TextObject"`
+	PathObject      []PathObject      `xml:"PathObject"`
+	ImageObject     []ImageObject     `xml:"ImageObject"`
+	CompositeObject []CompositeObject `xml:"CompositeObject"`
+	PageBlock       []PageBlock       `xml:"PageBlock"`
+}
+
+// PageBlock 页块对象
+type PageBlock struct {
+	ID              string            `xml:"ID,attr"`
+	Objects         []GraphicObject   `xml:"-"`
+	TextObject      []TextObject      `xml:"TextObject"`
+	PathObject      []PathObject      `xml:"PathObject"`
+	ImageObject     []ImageObject     `xml:"ImageObject"`
+	CompositeObject []CompositeObject `xml:"CompositeObject"`
+	PageBlock       []PageBlock       `xml:"PageBlock"`
 }
 
 // GraphicObject 图形对象
 type GraphicObject struct {
-	Type                 string
-	TextObject           TextObject
-	PathObject           PathObject
-	ImageObject          ImageObject
-	CompositeGraphicUnit CompositeGraphicUnit
-	origin               *editorObjectOrigin
-	state                editorCompositeState
-	richText             *richTextSnapshot
+	Type            string
+	TextObject      TextObject
+	PathObject      PathObject
+	ImageObject     ImageObject
+	CompositeObject CompositeObject
+	origin          *editorObjectOrigin
+	state           editorCompositeState
+	richText        *richTextSnapshot
+	pageBlocks      []string
+}
+
+// CompositeObject 复合图元引用对象
+// MiterLimitSet为true时，零截断值覆盖继承值，否则零值表示未指定
+type CompositeObject struct {
+	ID             string   `xml:"ID,attr"`
+	Name           string   `xml:"Name,attr"`
+	Boundary       string   `xml:"Boundary,attr"`
+	CTM            string   `xml:"CTM,attr"`
+	ResourceID     string   `xml:"ResourceID,attr"`
+	DrawParam      string   `xml:"DrawParam,attr"`
+	LineWidth      float64  `xml:"LineWidth,attr"`
+	Cap            string   `xml:"Cap,attr"`
+	Join           string   `xml:"Join,attr"`
+	MiterLimit     float64  `xml:"MiterLimit,attr"`
+	DashOffset     *float64 `xml:"DashOffset,attr"`
+	DashPattern    string   `xml:"DashPattern,attr"`
+	Alpha          *int     `xml:"Alpha,attr"`
+	Visible        *bool    `xml:"Visible,attr"`
+	Clips          *Clips   `xml:"Clips"`
+	Actions        []Action `xml:"Actions>Action"`
+	LineWidthSet   bool     `xml:"-"`
+	MiterLimitSet  bool     `xml:"-"`
+	DashPatternSet bool     `xml:"-"`
+	states         map[string]editorCompositeState
 }
 
 // Clips 相对于对象外接矩形的裁剪集合
@@ -153,14 +191,15 @@ type Pattern struct {
 }
 
 // PatternContent 图案单元内容
-// Objects非空时保留绘制顺序，否则依次使用文字、路径、图片和复合图元数组
+// Objects非空时保留绘制顺序，否则依次使用文字、路径、图片、复合图元和页块数组
 type PatternContent struct {
-	Thumbnail            string                 `xml:"Thumbnail,attr"`
-	Objects              []GraphicObject        `xml:"-"`
-	TextObject           []TextObject           `xml:"TextObject"`
-	PathObject           []PathObject           `xml:"PathObject"`
-	ImageObject          []ImageObject          `xml:"ImageObject"`
-	CompositeGraphicUnit []CompositeGraphicUnit `xml:"CompositeGraphicUnit"`
+	Thumbnail       string            `xml:"Thumbnail,attr"`
+	Objects         []GraphicObject   `xml:"-"`
+	TextObject      []TextObject      `xml:"TextObject"`
+	PathObject      []PathObject      `xml:"PathObject"`
+	ImageObject     []ImageObject     `xml:"ImageObject"`
+	CompositeObject []CompositeObject `xml:"CompositeObject"`
+	PageBlock       []PageBlock       `xml:"PageBlock"`
 }
 
 // TextCode 文本内容节点
@@ -277,8 +316,7 @@ type ImageObject struct {
 	LineWidthSet   bool         `xml:"-"`
 	MiterLimitSet  bool         `xml:"-"`
 	DashPatternSet bool         `xml:"-"`
-	// Interpolate 仅限内存态图像缩放插值提示，不序列化至OFD XML
-	Interpolate *bool `xml:"-"`
+	interpolate    *bool
 }
 
 // ImageBorder 图像边框

@@ -91,6 +91,13 @@ func resolveShdPaint(ctx *canvas.Context, paint any) (any, *canvas.Path, canvas.
 			return g, clip, s.view
 		}
 		d := g.End.Sub(g.Start)
+		det := d.X*d.X + d.Y*d.Y
+		if !finite(det) || det <= 0 {
+			if clip != nil && clip.Empty() {
+				return g, clip, s.view
+			}
+			return s.sampledRaster(), clip, s.view
+		}
 		axis := canvas.Matrix{{d.X, -d.Y, g.Start.X}, {d.Y, d.X, g.Start.Y}}
 		area := bounds.Transform(axis.Inv())
 		lo, hi := s.rangeLimits(area.X0, area.X1)
@@ -183,6 +190,10 @@ func drawRepeatAxialPath(ctx *canvas.Context, path *canvas.Path, gradient *repea
 	}
 	p = p.Transform(view.Inv())
 	d := gradient.End.Sub(gradient.Start).Mul(gradient.period)
+	det := d.X*d.X + d.Y*d.Y
+	if !finite(det) || det <= 0 {
+		return nil
+	}
 	axis := canvas.Matrix{{d.X, -d.Y, gradient.Start.X}, {d.Y, d.X, gradient.Start.Y}}
 	bounds := p.Bounds().And(shdCanvasBounds(ctx).Transform(view.Inv()))
 	area := bounds.Transform(axis.Inv())
@@ -334,6 +345,10 @@ func axialShdClip(gradient *canvas.LinearGradient, extend int, bounds canvas.Rec
 		return nil
 	}
 	d := gradient.End.Sub(gradient.Start)
+	det := d.X*d.X + d.Y*d.Y
+	if !finite(det) || det <= 0 {
+		return &canvas.Path{}
+	}
 	axis := canvas.Matrix{{d.X, -d.Y, gradient.Start.X}, {d.Y, d.X, gradient.Start.Y}}
 	area := bounds.Transform(axis.Inv())
 	if extend&1 == 0 {

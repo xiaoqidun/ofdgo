@@ -18,7 +18,9 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"runtime"
 	"slices"
+	"sync"
 
 	"golang.org/x/image/draw"
 	"golang.org/x/image/math/f64"
@@ -186,50 +188,135 @@ func drawRasterAxisImage(dst draw.Image, src image.Image, m [6]float64, op draw.
 		pixels = rasterImageSource{src}
 	}
 	width := len(xs)
-	horizontal := make([]rasterImagePixel, width)
-	output := image.NewRGBA64(image.Rect(0, 0, width, 1))
-	var active []rasterImageRow
-	var free [][]rasterImagePixel
-	next := 0
-	for y := ys[0].first; next < len(ys) || len(active) != 0; y++ {
-		if len(active) == 0 && y < ys[next].first {
-			y = ys[next].first
+	drawBand := func(band []rasterAxisSample) {
+		if len(band) == 0 {
+			return
 		}
-		for next < len(ys) && ys[next].first == y {
-			var row []rasterImagePixel
-			if n := len(free); n != 0 {
-				row, free = free[n-1], free[:n-1]
-				clear(row)
-			} else {
-				row = make([]rasterImagePixel, width)
+		horizontal := make([]rasterImagePixel, width)
+		output := image.NewRGBA64(image.Rect(0, 0, width, 1))
+		var active []rasterImageRow
+		var free [][]rasterImagePixel
+		next := 0
+		for y := band[0].first; next < len(band) || len(active) != 0; y++ {
+			if len(active) == 0 && y < band[next].first {
+				y = band[next].first
 			}
-			active = append(active, rasterImageRow{sample: ys[next], values: row})
-			next++
-		}
-		rasterImageHorizontal(horizontal, pixels, xs, y)
-		n := 0
-		for _, row := range active {
-			weight := row.sample.weights[y-row.sample.first]
-			if weight != 0 {
-				for x, value := range horizontal {
-					p := &row.values[x]
-					p.r += value.r * weight
-					p.g += value.g * weight
-					p.b += value.b * weight
-					p.a += value.a * weight
+			for next < len(band) && band[next].first == y {
+				var row []rasterImagePixel
+				if n := len(free); n != 0 {
+					row, free = free[n-1], free[:n-1]
+					clear(row)
+				} else {
+					row = make([]rasterImagePixel, width)
+				}
+				active = append(active, rasterImageRow{sample: band[next], values: row})
+				next++
+			}
+			rasterImageHorizontal(horizontal, pixels, xs, y)
+			n := 0
+			for _, row := range active {
+				weight := row.sample.weights[y-row.sample.first]
+				if weight != 0 {
+					for x, value := range horizontal {
+						p := &row.values[x]
+						p.r += value.r * weight
+						p.g += value.g * weight
+						p.b += value.b * weight
+						p.a += value.a * weight
+					}
+				}
+				if y+1 == row.sample.first+len(row.sample.weights) {
+					rasterImageWriteRow(dst, output, row.values, xs[0].pixel, row.sample.pixel, op)
+					free = append(free, row.values)
+				} else {
+					active[n] = row
+					n++
 				}
 			}
-			if y+1 == row.sample.first+len(row.sample.weights) {
-				rasterImageWriteRow(dst, output, row.values, xs[0].pixel, row.sample.pixel, op)
-				free = append(free, row.values)
-			} else {
-				active[n] = row
-				n++
-			}
+			active = active[:n]
 		}
-		active = active[:n]
 	}
+	workers := 1
+	if rasterParallelSafeDst(dst) && len(ys) >= 2 {
+		spanX := max(xs[0].first+len(xs[0].weights), xs[len(xs)-1].first+len(xs[len(xs)-1].weights)) - min(xs[0].first, xs[len(xs)-1].first)
+		srcY0 := min(ys[0].first, ys[len(ys)-1].first)
+		srcY1 := max(ys[0].first+len(ys[0].weights), ys[len(ys)-1].first+len(ys[len(ys)-1].weights))
+		spanY := srcY1 - srcY0
+		if spanX*spanY >= 65536 {
+			workers = min(runtime.GOMAXPROCS(0), 8, max(len(ys), spanY/16))
+			if workers > 1 && uint64(spanY)*uint64(width)*32 <= 32<<20 {
+				horiz := make([]rasterImagePixel, spanY*width)
+				hWorkers := min(workers, max(1, spanY/8))
+				var wg sync.WaitGroup
+				for worker := range hWorkers {
+					y0 := srcY0 + worker*spanY/hWorkers
+					y1 := srcY0 + (worker+1)*spanY/hWorkers
+					wg.Go(func() {
+						for y := y0; y < y1; y++ {
+							off := (y - srcY0) * width
+							rasterImageHorizontal(horiz[off:off+width], pixels, xs, y)
+						}
+					})
+				}
+				wg.Wait()
+				vWorkers := min(workers, len(ys))
+				for worker := range vWorkers {
+					lo := worker * len(ys) / vWorkers
+					hi := (worker + 1) * len(ys) / vWorkers
+					wg.Go(func() {
+						acc := make([]rasterImagePixel, width)
+						output := image.NewRGBA64(image.Rect(0, 0, width, 1))
+						for _, sample := range ys[lo:hi] {
+							clear(acc)
+							for i, weight := range sample.weights {
+								if weight == 0 {
+									continue
+								}
+								hRow := horiz[(sample.first+i-srcY0)*width : (sample.first+i-srcY0+1)*width]
+								for x, value := range hRow {
+									p := &acc[x]
+									p.r += value.r * weight
+									p.g += value.g * weight
+									p.b += value.b * weight
+									p.a += value.a * weight
+								}
+							}
+							rasterImageWriteRow(dst, output, acc, xs[0].pixel, sample.pixel, op)
+						}
+					})
+				}
+				wg.Wait()
+				return true
+			}
+			workers = min(workers, len(ys))
+		}
+	}
+	if workers <= 1 {
+		drawBand(ys)
+		return true
+	}
+	var wg sync.WaitGroup
+	for worker := range workers {
+		lo := worker * len(ys) / workers
+		hi := (worker + 1) * len(ys) / workers
+		wg.Go(func() {
+			drawBand(ys[lo:hi])
+		})
+	}
+	wg.Wait()
 	return true
+}
+
+// rasterParallelSafeDst 判断目标图像是否允许不同水平行无锁并发写入
+// 入参: dst 目标图像
+// 返回: bool 是否允许按行并发写入
+func rasterParallelSafeDst(dst draw.Image) bool {
+	switch dst.(type) {
+	case *image.RGBA, *image.NRGBA, *image.RGBA64, *image.NRGBA64, *image.Gray:
+		return true
+	default:
+		return false
+	}
 }
 
 // rasterImageAxis 按连续源坐标生成CatmullRom权重，亚像素细轴使用面积覆盖权重
@@ -452,6 +539,166 @@ func rasterImageFootprintAxis(first, end, source, limit int, scale, offset float
 	return result
 }
 
+// rasterImageAccumulate 将非零预乘源像素累加到覆盖当前列的全部目标像素
+// 入参: row 横向缓冲, samples 采样表, x 源列坐标, active 活跃采样起点, next 活跃采样终点, reversed 采样表是否逆序, r 红色预乘分量, g 绿色预乘分量, b 蓝色预乘分量, a 透明度分量
+func rasterImageAccumulate(row []rasterImagePixel, samples []rasterAxisSample, x, active, next int, reversed bool, r, g, b, a float64) {
+	if !reversed {
+		for index := active; index < next; index++ {
+			sample := samples[index]
+			if weight := sample.weights[x-sample.first]; weight != 0 {
+				value := &row[index]
+				value.r += r * weight
+				value.g += g * weight
+				value.b += b * weight
+				value.a += a * weight
+			}
+		}
+		return
+	}
+	last := len(samples) - 1
+	for column := active; column < next; column++ {
+		index := last - column
+		sample := samples[index]
+		if weight := sample.weights[x-sample.first]; weight != 0 {
+			value := &row[index]
+			value.r += r * weight
+			value.g += g * weight
+			value.b += b * weight
+			value.a += a * weight
+		}
+	}
+}
+
+// rasterImageHorizontalTransparentEdgeNRGBA 对透明补边NRGBA源执行无虚派发逐行滤波
+// 入参: row 横向缓冲, te 透明补边源包装, img 原始NRGBA图像, samples 采样表, y 源行坐标, start 起始源列, end 结束源列, reversed 采样表是否逆序
+func rasterImageHorizontalTransparentEdgeNRGBA(row []rasterImagePixel, te *transparentEdgeImage, img *image.NRGBA, samples []rasterAxisSample, y, start, end int, reversed bool) {
+	rect := te.rect
+	if y < rect.Min.Y || y >= rect.Max.Y {
+		return
+	}
+	b := img.Bounds()
+	bw, bh := b.Dx(), b.Dy()
+	if bw <= 0 || bh <= 0 {
+		return
+	}
+	sy := min(max(y-1, 0), bh-1)
+	borderY := y == 0 || y == rect.Max.Y-1
+	pix := img.Pix
+	stride := img.Stride
+	curRowOff := sy * stride
+	prevRowOff := max(sy-1, 0) * stride
+	nextRowOff := min(sy+1, bh-1) * stride
+	curRow := pix[curRowOff : curRowOff+bw*4]
+	prevRow := pix[prevRowOff : prevRowOff+bw*4]
+	nextRow := pix[nextRowOff : nextRowOff+bw*4]
+	hasPrevY := sy > 0
+	hasNextY := sy+1 < bh
+	maxX := rect.Max.X - 1
+	active, next := 0, 0
+	for x := start; x < end; x++ {
+		if !borderY && hasPrevY && hasNextY && x >= 2 && x+4 <= bw-1 && x+4 <= end {
+			off0 := (x - 1) * 4
+			if (curRow[off0-1] | curRow[off0+3] | curRow[off0+7] | curRow[off0+11] | curRow[off0+15] | curRow[off0+19] |
+				prevRow[off0-1] | prevRow[off0+3] | prevRow[off0+7] | prevRow[off0+11] | prevRow[off0+15] | prevRow[off0+19] |
+				nextRow[off0-1] | nextRow[off0+3] | nextRow[off0+7] | nextRow[off0+11] | nextRow[off0+15] | nextRow[off0+19]) == 0 {
+				x += 3
+				continue
+			}
+		}
+		for next < len(samples) {
+			index := next
+			if reversed {
+				index = len(samples) - next - 1
+			}
+			if samples[index].first > x {
+				break
+			}
+			next++
+		}
+		for active < next {
+			index := active
+			if reversed {
+				index = len(samples) - active - 1
+			}
+			if x < samples[index].first+len(samples[index].weights) {
+				break
+			}
+			active++
+		}
+		if x < rect.Min.X || x > maxX {
+			continue
+		}
+		sx := min(max(x-1, 0), bw-1)
+		off := sx * 4
+		r8, g8, b8, a8 := curRow[off], curRow[off+1], curRow[off+2], curRow[off+3]
+		if a8 == 0 {
+			if hasPrevY && hasNextY && sx > 0 && sx+1 < bw {
+				if (prevRow[off-1] | prevRow[off+3] | prevRow[off+7] | curRow[off-1] | curRow[off+7] | nextRow[off-1] | nextRow[off+3] | nextRow[off+7]) == 0 {
+					if !borderY && x != 0 && x != maxX {
+						continue
+					}
+				} else {
+					bestA := uint8(0)
+					var br, bg, bb uint8
+					check := func(s []byte, o int) bool {
+						if a := s[o+3]; a > bestA {
+							bestA, br, bg, bb = a, s[o], s[o+1], s[o+2]
+							return a == 255
+						}
+						return false
+					}
+					if !check(prevRow, off-4) && !check(prevRow, off) && !check(prevRow, off+4) && !check(curRow, off-4) && !check(curRow, off+4) && !check(nextRow, off-4) && !check(nextRow, off) {
+						check(nextRow, off+4)
+					}
+					if bestA != 0 {
+						r8, g8, b8, a8 = br, bg, bb, 1
+					}
+				}
+			} else {
+				left, right := max(sx-1, 0), min(sx+2, bw)
+				top, bottom := max(sy-1, 0), min(sy+2, bh)
+				bestA, bestOff := uint8(0), 0
+			scanEdge:
+				for ny := top; ny < bottom; ny++ {
+					o := ny*stride + left*4
+					for nx := left; nx < right; nx++ {
+						if (nx != sx || ny != sy) && pix[o+3] > bestA {
+							bestA, bestOff = pix[o+3], o
+							if bestA == 255 {
+								break scanEdge
+							}
+						}
+						o += 4
+					}
+				}
+				if bestA != 0 {
+					r8, g8, b8, a8 = pix[bestOff], pix[bestOff+1], pix[bestOff+2], 1
+				}
+			}
+		}
+		if borderY || x == 0 || x == maxX {
+			a8 = 1
+		}
+		if a8 == 0 {
+			continue
+		}
+		var r, g, bVal, a float64
+		if a8 == 255 {
+			r = float64(uint32(r8) * 0x101)
+			g = float64(uint32(g8) * 0x101)
+			bVal = float64(uint32(b8) * 0x101)
+			a = 65535
+		} else {
+			a32 := uint32(a8)
+			r = float64((uint32(r8) * 0x101 * a32) / 0xff)
+			g = float64((uint32(g8) * 0x101 * a32) / 0xff)
+			bVal = float64((uint32(b8) * 0x101 * a32) / 0xff)
+			a = float64(a32 * 0x101)
+		}
+		rasterImageAccumulate(row, samples, x, active, next, reversed, r, g, bVal, a)
+	}
+}
+
 // rasterImageHorizontal 按源列复用像素，保留各目标像素的权重累加顺序与中间精度
 // 入参: row 横向缓冲, src 源像素, samples 采样表, y 源行坐标
 func rasterImageHorizontal(row []rasterImagePixel, src image.RGBA64Image, samples []rasterAxisSample, y int) {
@@ -460,6 +707,106 @@ func rasterImageHorizontal(row []rasterImagePixel, src image.RGBA64Image, sample
 	reversed := first.first > last.first || first.first == last.first && len(first.weights) > len(last.weights)
 	start := min(first.first, last.first)
 	end := max(first.first+len(first.weights), last.first+len(last.weights))
+	if te, ok := src.(*transparentEdgeImage); ok {
+		if nrgba, ok := te.source.(*image.NRGBA); ok {
+			rasterImageHorizontalTransparentEdgeNRGBA(row, te, nrgba, samples, y, start, end, reversed)
+			return
+		}
+	}
+	if nrgba, ok := src.(*image.NRGBA); ok {
+		b := nrgba.Bounds()
+		if y < b.Min.Y || y >= b.Max.Y {
+			return
+		}
+		rowOff := (y - b.Min.Y) * nrgba.Stride
+		active, next := 0, 0
+		for x := start; x < end; x++ {
+			for next < len(samples) {
+				index := next
+				if reversed {
+					index = len(samples) - next - 1
+				}
+				if samples[index].first > x {
+					break
+				}
+				next++
+			}
+			for active < next {
+				index := active
+				if reversed {
+					index = len(samples) - active - 1
+				}
+				if x < samples[index].first+len(samples[index].weights) {
+					break
+				}
+				active++
+			}
+			if x < b.Min.X || x >= b.Max.X {
+				continue
+			}
+			off := rowOff + (x-b.Min.X)*4
+			a8 := nrgba.Pix[off+3]
+			if a8 == 0 {
+				continue
+			}
+			r8, g8, b8 := nrgba.Pix[off], nrgba.Pix[off+1], nrgba.Pix[off+2]
+			var r, g, bVal, a float64
+			if a8 == 255 {
+				r = float64(uint32(r8) * 0x101)
+				g = float64(uint32(g8) * 0x101)
+				bVal = float64(uint32(b8) * 0x101)
+				a = 65535
+			} else {
+				a32 := uint32(a8)
+				r = float64((uint32(r8) * 0x101 * a32) / 0xff)
+				g = float64((uint32(g8) * 0x101 * a32) / 0xff)
+				bVal = float64((uint32(b8) * 0x101 * a32) / 0xff)
+				a = float64(a32 * 0x101)
+			}
+			rasterImageAccumulate(row, samples, x, active, next, reversed, r, g, bVal, a)
+		}
+		return
+	}
+	if rgba, ok := src.(*image.RGBA); ok {
+		b := rgba.Bounds()
+		if y < b.Min.Y || y >= b.Max.Y {
+			return
+		}
+		rowOff := (y - b.Min.Y) * rgba.Stride
+		active, next := 0, 0
+		for x := start; x < end; x++ {
+			for next < len(samples) {
+				index := next
+				if reversed {
+					index = len(samples) - next - 1
+				}
+				if samples[index].first > x {
+					break
+				}
+				next++
+			}
+			for active < next {
+				index := active
+				if reversed {
+					index = len(samples) - active - 1
+				}
+				if x < samples[index].first+len(samples[index].weights) {
+					break
+				}
+				active++
+			}
+			if x < b.Min.X || x >= b.Max.X {
+				continue
+			}
+			off := rowOff + (x-b.Min.X)*4
+			r8, g8, b8, a8 := rgba.Pix[off], rgba.Pix[off+1], rgba.Pix[off+2], rgba.Pix[off+3]
+			if r8 == 0 && g8 == 0 && b8 == 0 && a8 == 0 {
+				continue
+			}
+			rasterImageAccumulate(row, samples, x, active, next, reversed, float64(uint32(r8)*0x101), float64(uint32(g8)*0x101), float64(uint32(b8)*0x101), float64(uint32(a8)*0x101))
+		}
+		return
+	}
 	active, next := 0, 0
 	for x := start; x < end; x++ {
 		for next < len(samples) {
@@ -483,22 +830,10 @@ func rasterImageHorizontal(row []rasterImagePixel, src image.RGBA64Image, sample
 			active++
 		}
 		p := src.RGBA64At(x, y)
-		r, g, b, a := float64(p.R), float64(p.G), float64(p.B), float64(p.A)
-		for column := active; column < next; column++ {
-			index := column
-			if reversed {
-				index = len(samples) - column - 1
-			}
-			sample := samples[index]
-			weight := sample.weights[x-sample.first]
-			if weight != 0 {
-				value := &row[index]
-				value.r += r * weight
-				value.g += g * weight
-				value.b += b * weight
-				value.a += a * weight
-			}
+		if p.R == 0 && p.G == 0 && p.B == 0 && p.A == 0 {
+			continue
 		}
+		rasterImageAccumulate(row, samples, x, active, next, reversed, float64(p.R), float64(p.G), float64(p.B), float64(p.A))
 	}
 }
 

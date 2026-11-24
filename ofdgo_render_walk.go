@@ -28,7 +28,7 @@ type pageWalkTemplateRenderer interface {
 
 // pageWalkCompositeFormRenderer 允许后端访问器按需将复合图元引用直接输出为表单对象
 type pageWalkCompositeFormRenderer interface {
-	renderCompositeForm(ref *CompositeGraphicUnit, object CompositeGraphicUnit, matrix Matrix, clip *GeometryPath, references map[*CompositeGraphicUnit]bool) (bool, error)
+	renderCompositeForm(ref *CompositeGraphicUnit, object CompositeObject, matrix Matrix, clip *GeometryPath, references map[*CompositeGraphicUnit]bool) (bool, error)
 }
 
 // RenderState 保存对象继承的样式、父变换和页面坐标裁剪，所有引用只读
@@ -59,10 +59,10 @@ type PageGroups interface {
 	SkipObjects(count int)
 }
 
-// PageComposites 可选地接收展开前的复合图元及矢量资源，不替代成员遍历
+// PageComposites 可选地接收展开前的复合图元对象，不替代成员遍历
 // 状态包含当前图元到页面的完整变换，源对象及状态只读
 type PageComposites interface {
-	VisitComposite(object *CompositeGraphicUnit, state RenderState) error
+	VisitComposite(object *CompositeObject, state RenderState) error
 }
 
 // PageAnalysis 控制WalkPage和WalkObject对隐藏内容及裁剪的处理，不影响已构建场景的重放
@@ -186,6 +186,9 @@ func (r *Renderer) WalkPageContext(ctx context.Context, page *PageContent, visit
 		defer func() { r.transparentEdges = nil }()
 	}
 	defer r.bindPageResources(page)()
+	if r.decodeImages && !r.textOnly {
+		prefetchPageEncodedImages(ctx, r, page)
+	}
 	var pageOrigin *Matrix
 	var offsetX, offsetY float64
 	if box, err := r.GetPageBoxContext(ctx, page); err == nil && (box.X != 0 || box.Y != 0) {
@@ -335,6 +338,9 @@ func (r *Renderer) walkAnnotation(annotation Annotation, visitor PageVisitor) er
 // 入参: annotation 注解, offsetX 横向偏移, offsetY 纵向偏移, visitor 页面访问器
 // 返回: error 遍历或访问器错误
 func (r *Renderer) walkPageAnnotation(annotation Annotation, offsetX, offsetY float64, visitor PageVisitor) error {
+	if annotation.Appearance == nil {
+		return nil
+	}
 	if groups, ok := visitor.(PageGroups); ok && groups.BeginAnnotation(annotation.ID) {
 		defer groups.EndObject()
 	}
@@ -389,8 +395,8 @@ func (r *Renderer) walkLayers(layers []Layer, order int, pageOrigin *Matrix, vis
 				return err
 			}
 		}
-		for _, object := range layer.CompositeGraphicUnit {
-			if err := r.walkObject(&GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: object}, state, visitor, nil); err != nil {
+		for _, object := range layer.CompositeObject {
+			if err := r.walkObject(&GraphicObject{Type: "CompositeObject", CompositeObject: object}, state, visitor, nil); err != nil {
 				return err
 			}
 		}
@@ -423,28 +429,29 @@ func (r *Renderer) walkObject(object *GraphicObject, state RenderState, visitor 
 	case "ImageObject":
 		state.Hidden = state.Hidden || object.ImageObject.Visible != nil && !*object.ImageObject.Visible
 		return visitor.DrawObject(object, state)
-	case "CompositeGraphicUnit", "CompositeObject":
-		return r.walkComposite(object.CompositeGraphicUnit, state, visitor, references)
+	case "CompositeObject":
+		return r.walkComposite(object.CompositeObject, state, visitor, references)
 	default:
 		return fmt.Errorf("unsupported graphic object %q", object.Type)
 	}
 }
 
 // walkComposite 展开复合图元的资源、成员与透明度，不修改共享资源
-// 入参: object 复合图元, state 继承状态, visitor 页面访问器, references 当前资源引用链
+// 入参: object 复合图元对象, state 继承状态, visitor 页面访问器, references 当前资源引用链
 // 返回: error 几何或访问器错误
-func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState, visitor PageVisitor, references map[*CompositeGraphicUnit]bool) error {
+func (r *Renderer) walkComposite(object CompositeObject, state RenderState, visitor PageVisitor, references map[*CompositeGraphicUnit]bool) error {
 	state.Hidden = state.Hidden || object.Visible != nil && !*object.Visible
 	if state.Hidden && !pageIncludesHidden(visitor) {
 		if groups, ok := visitor.(PageGroups); ok {
-			count, ref, seen := len(object.Objects), object.ResourceID, make(map[*CompositeGraphicUnit]bool)
-			for ref != "" {
-				unit := r.compositeDefinition(ref)
-				if unit == nil || seen[unit] {
-					break
+			count := 0
+			if object.ResourceID != "" {
+				if unit := r.compositeDefinition(object.ResourceID); unit != nil {
+					if len(unit.Objects) != 0 {
+						count = len(unit.Objects)
+					} else {
+						count = len(unit.TextObject) + len(unit.PathObject) + len(unit.ImageObject) + len(unit.CompositeObject)
+					}
 				}
-				seen[unit] = true
-				count, ref = count+len(unit.Objects), unit.ResourceID
 			}
 			groups.SkipObjects(count)
 		}
@@ -466,10 +473,6 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 				return err
 			}
 		}
-		state.Clip, err = r.compositeExtentClip(object, matrix, state.Clip)
-		if err != nil {
-			return err
-		}
 		clips, clipMatrix := object.Clips, matrix
 		if !clips.usesObjectMatrix() {
 			clipMatrix = boundary
@@ -485,7 +488,7 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 			}
 		}
 	}
-	state.Defaults = r.compositeGraphicUnitDefaults(object, state.Defaults)
+	state.Defaults = r.compositeObjectDefaults(object, state.Defaults)
 	state.Parent = &matrix
 	if composites, ok := visitor.(PageComposites); ok {
 		if err := composites.VisitComposite(&object, state); err != nil {
@@ -493,47 +496,47 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 		}
 	}
 	state.BoundaryInCTM = true
-	if object.ResourceID != "" && len(object.Objects) == 0 && r.pageText == nil && !r.textOnly && !state.Hidden && state.Defaults == nil {
-		if hook, ok := visitor.(pageWalkCompositeFormRenderer); ok {
-			if ref := r.compositeDefinition(object.ResourceID); ref != nil && !references[ref] && ref.Width > 0 && ref.Height > 0 {
-				handled, err := hook.renderCompositeForm(ref, object, matrix, state.Clip, references)
-				if handled || err != nil {
-					return err
-				}
+	if object.ResourceID == "" {
+		return nil
+	}
+	ref := r.compositeDefinition(object.ResourceID)
+	if ref == nil {
+		return nil
+	}
+	if references[ref] {
+		return fmt.Errorf("cyclic composite resource %q", object.ResourceID)
+	}
+	if r.pageText == nil && !r.textOnly && !state.Hidden && state.Defaults == nil {
+		if hook, ok := visitor.(pageWalkCompositeFormRenderer); ok && ref.Width > 0 && ref.Height > 0 {
+			handled, err := hook.renderCompositeForm(ref, object, matrix, state.Clip, references)
+			if handled || err != nil {
+				return err
 			}
+		}
+	}
+	if !pageSkipsClips(visitor) {
+		var err error
+		state.Clip, err = r.compositeExtentClip(*ref, matrix, state.Clip)
+		if err != nil {
+			return err
 		}
 	}
 	useGroup := false
 	if object.Alpha != nil {
 		alpha := clampColor(*object.Alpha)
-		if alpha < 255 && r.compositeObjectCount(object, references) > 1 {
+		if alpha < 255 && r.compositeUnitObjectCount(*ref, references) > 1 {
 			if tg, ok := visitor.(PageTransparencyGroups); ok && tg.BeginTransparencyGroup(uint8(alpha)) {
 				useGroup = true
 				defer tg.EndTransparencyGroup()
 			}
 		}
 	}
-	if object.ResourceID != "" {
-		if ref := r.compositeDefinition(object.ResourceID); ref != nil {
-			if references[ref] {
-				return fmt.Errorf("cyclic composite resource %q", object.ResourceID)
-			}
-			if references == nil {
-				references = make(map[*CompositeGraphicUnit]bool)
-			}
-			references[ref] = true
-			copy := *ref
-			if !useGroup {
-				copy.Alpha = mergeAlpha(copy.Alpha, object.Alpha)
-			}
-			err := r.walkComposite(copy, state, visitor, references)
-			delete(references, ref)
-			if err != nil {
-				return err
-			}
-		}
+	if references == nil {
+		references = make(map[*CompositeGraphicUnit]bool)
 	}
-	for member := range object.objects() {
+	references[ref] = true
+	defer delete(references, ref)
+	for member := range ref.objects() {
 		if !useGroup {
 			member = mergeGraphicObjectAlpha(member, object.Alpha)
 		}
@@ -544,33 +547,29 @@ func (r *Renderer) walkComposite(object CompositeGraphicUnit, state RenderState,
 	return nil
 }
 
-// compositeObjectCount 估算复合图元展开后的可见子图元数量，超过1即提前返回
-// 入参: object 复合图元, references 当前资源引用链
+// compositeUnitObjectCount 估算复合图元资源展开后的可见子图元数量，超过1即提前返回
+// 入参: unit 复合图元资源, references 当前资源引用链
 // 返回: int 截断至2的子图元计数
-func (r *Renderer) compositeObjectCount(object CompositeGraphicUnit, references map[*CompositeGraphicUnit]bool) int {
+func (r *Renderer) compositeUnitObjectCount(unit CompositeGraphicUnit, references map[*CompositeGraphicUnit]bool) int {
 	count := 0
-	var visit func(unit CompositeGraphicUnit, seen map[*CompositeGraphicUnit]bool)
-	visit = func(unit CompositeGraphicUnit, seen map[*CompositeGraphicUnit]bool) {
+	var visit func(current CompositeGraphicUnit, seen map[*CompositeGraphicUnit]bool)
+	visit = func(current CompositeGraphicUnit, seen map[*CompositeGraphicUnit]bool) {
 		if count > 1 {
 			return
 		}
-		if unit.ResourceID != "" {
-			if ref := r.compositeDefinition(unit.ResourceID); ref != nil && !references[ref] && !seen[ref] {
-				if seen == nil {
-					seen = make(map[*CompositeGraphicUnit]bool)
-				}
-				seen[ref] = true
-				visit(*ref, seen)
-				delete(seen, ref)
-				if count > 1 {
-					return
-				}
-			}
-		}
-		for member := range unit.objects() {
+		for member := range current.objects() {
 			switch member.Type {
-			case "CompositeGraphicUnit", "CompositeObject":
-				visit(member.CompositeGraphicUnit, seen)
+			case "CompositeObject":
+				if member.CompositeObject.ResourceID != "" {
+					if ref := r.compositeDefinition(member.CompositeObject.ResourceID); ref != nil && !references[ref] && !seen[ref] {
+						if seen == nil {
+							seen = make(map[*CompositeGraphicUnit]bool)
+						}
+						seen[ref] = true
+						visit(*ref, seen)
+						delete(seen, ref)
+					}
+				}
 			default:
 				count++
 			}
@@ -579,7 +578,7 @@ func (r *Renderer) compositeObjectCount(object CompositeGraphicUnit, references 
 			}
 		}
 	}
-	visit(object, nil)
+	visit(unit, nil)
 	return count
 }
 

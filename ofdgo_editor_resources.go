@@ -678,7 +678,7 @@ func (e *Editor) compactResourceReferences(parts map[string][]byte, reader *Read
 		if e.backends.FontResources == nil || refs.fontUnsafe || usage == nil || usage.unsafe || refs.files[key] || protectedFiles[key] || removed[key] || parts[name] != nil {
 			continue
 		}
-		data, err := reader.readFile(name)
+		data, err := reader.readFileViewContext(ctx, name)
 		if err != nil {
 			return nil, err
 		}

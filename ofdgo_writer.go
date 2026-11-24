@@ -19,6 +19,9 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -37,6 +40,7 @@ import (
 	"time"
 	"weak"
 
+	"github.com/emmansun/gmsm/sm4"
 	basefile "github.com/xiaoqidun/ofdgo/internal/base/file"
 )
 
@@ -90,12 +94,15 @@ type editorSnapshotArchive struct {
 	retained *renderCache[int, *zip.Reader]
 }
 
-// snapshotTempHandle 管理溢出快照临时文件的并发读取与原子防双关清理
+// snapshotTempHandle 管理溢出快照临时文件的并发读取、可选一次性密流加解密与原子防双关清理
 type snapshotTempHandle struct {
 	closed atomic.Bool
 	mu     sync.RWMutex
 	file   *os.File
 	name   string
+	key    []byte
+	nonce  [8]byte
+	block  cipher.Block
 }
 
 // snapshotReaderAt 封装快照随机读取器作为ZIP条目共同持有的底层ReaderAt对象
@@ -105,11 +112,12 @@ type snapshotReaderAt struct {
 
 // editorSnapshotBuffer 分块保存压缩数据，超预算时自动溢出至临时文件并支持并发随机读取
 type editorSnapshotBuffer struct {
-	chunks     [][]byte
-	size       int64
-	spillLimit int64
-	temp       *snapshotTempHandle
-	err        error
+	chunks       [][]byte
+	size         int64
+	spillLimit   int64
+	encryptSpill bool
+	temp         *snapshotTempHandle
+	err          error
 }
 
 // editorProgress 编辑与保存阶段的进度回调，nil表示不回报进度
@@ -396,8 +404,57 @@ func (o *fileOutput) Begin(ctx context.Context) (WriteTransaction, error) {
 	return o.target.Begin(ctx)
 }
 
+// xorSnapshotCTR 使用SM4-CTR一次性密流在任意字节偏移执行无状态并发安全异或加解密
+// 入参: block 分组密码, nonce 随机现时, offset 字节偏移, dst 输出缓冲, src 输入数据
+func xorSnapshotCTR(block cipher.Block, nonce [8]byte, offset int64, dst, src []byte) {
+	var counter [sm4.BlockSize]byte
+	copy(counter[:8], nonce[:])
+	blockIndex := uint64(offset / sm4.BlockSize)
+	blockOffset := int(offset % sm4.BlockSize)
+	var keystream [sm4.BlockSize]byte
+	pos := 0
+	for pos < len(src) {
+		binary.BigEndian.PutUint64(counter[8:], blockIndex)
+		block.Encrypt(keystream[:], counter[:])
+		take := min(len(src)-pos, sm4.BlockSize-blockOffset)
+		for j := range take {
+			dst[pos+j] = src[pos+j] ^ keystream[blockOffset+j]
+		}
+		pos += take
+		blockIndex++
+		blockOffset = 0
+	}
+	clear(keystream[:])
+	clear(counter[:])
+}
+
+// writeSnapshotFile 将切片直接或经SM4-CTR加密写入临时文件，不修改调用方输入缓冲
+// 入参: file 临时文件, block 分组密码, nonce 随机现时, offset 字节偏移, data 待写数据
+// 返回: int 写入字节数, error 写入错误
+func writeSnapshotFile(file *os.File, block cipher.Block, nonce [8]byte, offset int64, data []byte) (int, error) {
+	if block == nil {
+		return file.Write(data)
+	}
+	var buf [32 * 1024]byte
+	defer clear(buf[:])
+	written := 0
+	for written < len(data) {
+		chunk := min(len(buf), len(data)-written)
+		xorSnapshotCTR(block, nonce, offset+int64(written), buf[:chunk], data[written:written+chunk])
+		n, err := file.Write(buf[:chunk])
+		written += n
+		if err != nil {
+			return written, err
+		}
+		if n != chunk {
+			return written, io.ErrShortWrite
+		}
+	}
+	return written, nil
+}
+
 // ReadAt 在读锁保护下从临时文件随机读取指定字节区间
-// 入参: data 目标缓冲, offset 文件偏移, limit 最大可读长度
+// 入参: data 目标缓冲, offset 数据偏移, limit 读取长度上限
 // 返回: int 读取字节数, error 读取或关闭错误
 func (h *snapshotTempHandle) ReadAt(data []byte, offset, limit int64) (int, error) {
 	if h == nil || h.closed.Load() {
@@ -409,13 +466,16 @@ func (h *snapshotTempHandle) ReadAt(data []byte, offset, limit int64) (int, erro
 		return 0, os.ErrClosed
 	}
 	n, err := h.file.ReadAt(data[:limit], offset)
+	if n > 0 && h.block != nil {
+		xorSnapshotCTR(h.block, h.nonce, offset, data[:n], data[:n])
+	}
 	if err == nil && n < len(data) {
 		err = io.EOF
 	}
 	return n, err
 }
 
-// Close 原子关闭并删除底层快照临时文件，重复调用安全
+// Close 原子关闭并删除底层快照临时文件同时清零临时密钥，重复调用安全
 // 返回: error 关闭或删除错误
 func (h *snapshotTempHandle) Close() error {
 	if h == nil || !h.closed.CompareAndSwap(false, true) {
@@ -424,6 +484,10 @@ func (h *snapshotTempHandle) Close() error {
 	h.mu.Lock()
 	file, name := h.file, h.name
 	h.file, h.name = nil, ""
+	clear(h.key)
+	h.key = nil
+	clear(h.nonce[:])
+	h.block = nil
 	h.mu.Unlock()
 	if file == nil {
 		return nil
@@ -439,13 +503,13 @@ func (h *snapshotTempHandle) Close() error {
 
 // ReadAt 从底层快照缓冲随机读取字节
 // 入参: data 目标缓冲, offset 数据偏移
-// 返回: int 读取字节数, error 读取错误
+// 返回: int 读取字节数, error 偏移或结束错误
 func (r *snapshotReaderAt) ReadAt(data []byte, offset int64) (int, error) {
 	return r.buf.ReadAt(data, offset)
 }
 
-// Write 追加快照数据，超出内存阈值时自动迁移至临时文件
-// 入参: data 压缩数据
+// Write 追加快照数据，超出内存阈值时自动迁移至临时文件并在敏感模式下以一次性密钥加密落盘
+// 入参: data 待写数据
 // 返回: int 写入字节数, error 写入错误
 func (b *editorSnapshotBuffer) Write(data []byte) (int, error) {
 	if len(data) == 0 {
@@ -456,47 +520,74 @@ func (b *editorSnapshotBuffer) Write(data []byte) (int, error) {
 		limit = editorSnapshotArchiveLimit
 	}
 	if b.temp == nil && b.err == nil && b.size+int64(len(data)) > limit {
-		temp, err := os.CreateTemp("", "ofdgo-snapshot-*.tmp")
-		if err != nil {
-			b.err = err
-		} else {
-			written := int64(0)
-			var spillErr error
-			for i, chunk := range b.chunks {
-				valid := len(chunk)
-				if i == len(b.chunks)-1 {
-					if rem := int(b.size % editorSnapshotChunkSize); rem != 0 {
-						valid = rem
-					}
-				}
-				if _, wErr := temp.Write(chunk[:valid]); wErr != nil {
-					spillErr = wErr
-					break
-				}
-				written += int64(valid)
+		var key []byte
+		var nonce [8]byte
+		var block cipher.Block
+		var initErr error
+		if b.encryptSpill {
+			key = make([]byte, sm4.BlockSize)
+			if _, err := rand.Read(key); err != nil {
+				initErr = err
+			} else if _, err := rand.Read(nonce[:]); err != nil {
+				initErr = err
+			} else if block, err = sm4.NewCipher(key); err != nil {
+				initErr = err
 			}
-			if spillErr == nil && written == b.size {
-				b.temp = &snapshotTempHandle{file: temp, name: temp.Name()}
-				b.chunks = nil
+		}
+		if initErr != nil {
+			clear(key)
+			clear(nonce[:])
+			b.err = initErr
+		} else {
+			temp, err := os.CreateTemp("", "ofdgo-snapshot-*.tmp")
+			if err != nil {
+				clear(key)
+				clear(nonce[:])
+				b.err = err
 			} else {
-				if spillErr == nil {
-					spillErr = io.ErrShortWrite
+				written := int64(0)
+				var spillErr error
+				for i, chunk := range b.chunks {
+					valid := len(chunk)
+					if i == len(b.chunks)-1 {
+						if rem := int(b.size % editorSnapshotChunkSize); rem != 0 {
+							valid = rem
+						}
+					}
+					if _, wErr := writeSnapshotFile(temp, block, nonce, written, chunk[:valid]); wErr != nil {
+						spillErr = wErr
+						break
+					}
+					written += int64(valid)
 				}
-				b.err = spillErr
-				name := temp.Name()
-				_ = temp.Close()
-				_ = os.Remove(name)
+				if spillErr == nil && written == b.size {
+					for _, chunk := range b.chunks {
+						clear(chunk)
+					}
+					b.temp = &snapshotTempHandle{file: temp, name: temp.Name(), key: key, nonce: nonce, block: block}
+					b.chunks = nil
+				} else {
+					if spillErr == nil {
+						spillErr = io.ErrShortWrite
+					}
+					clear(key)
+					clear(nonce[:])
+					b.err = spillErr
+					name := temp.Name()
+					_ = temp.Close()
+					_ = os.Remove(name)
+				}
 			}
 		}
 	}
 	if b.temp != nil {
 		b.temp.mu.RLock()
-		file := b.temp.file
+		file, block, nonce := b.temp.file, b.temp.block, b.temp.nonce
 		if file == nil {
 			b.temp.mu.RUnlock()
 			return 0, os.ErrClosed
 		}
-		n, err := file.Write(data)
+		n, err := writeSnapshotFile(file, block, nonce, b.size, data)
 		b.temp.mu.RUnlock()
 		b.size += int64(n)
 		return n, err
@@ -643,21 +734,113 @@ func (x *ofdXML) pageArea(name string, area PageArea) {
 	x.end(name)
 }
 
-// layer 写出新建图层及其对象
-// 入参: layer 图层
+// layer 写出新建图层及其对象，恢复嵌套PageBlock结构与ID
+// 入参: layer 图层对象
 func (x *ofdXML) layer(layer Layer) {
 	var attrs ofdAttrs
 	attrs.add("ID", layer.ID)
 	attrs.add("Type", layer.Type)
 	attrs.add("DrawParam", layer.DrawParam)
 	x.start("Layer", attrs)
-	for _, object := range layer.Objects {
+	x.graphicObjects(layer.Objects, layer.PageBlock)
+	x.end("Layer")
+}
+
+// graphicObjects 按嵌套PageBlock路径栈写出图形对象序列并保留空页块
+// 入参: objects 图形对象序列, blocks 页块列表
+func (x *ofdXML) graphicObjects(objects []GraphicObject, blocks []PageBlock) {
+	if len(objects) == 0 {
+		for _, block := range blocks {
+			if x.err != nil {
+				return
+			}
+			x.pageBlock(block)
+		}
+		return
+	}
+	var open []string
+	emitted := make(map[string]bool)
+	for _, object := range objects {
 		if x.err != nil {
 			return
 		}
+		target := object.pageBlocks
+		common := 0
+		for common < len(open) && common < len(target) && open[common] == target[common] {
+			common++
+		}
+		for i := len(open) - 1; i >= common; i-- {
+			x.end("PageBlock")
+		}
+		for i := common; i < len(target); i++ {
+			var attrs ofdAttrs
+			attrs.add("ID", target[i])
+			x.start("PageBlock", attrs)
+			emitted[target[i]] = true
+		}
+		open = target
 		x.object(object, false)
 	}
-	x.end("Layer")
+	for range open {
+		x.end("PageBlock")
+	}
+	x.emitEmptyPageBlocks(blocks, emitted)
+}
+
+// pageBlock 递归写出结构化PageBlock节点及其内部对象
+// 入参: block 页块对象
+func (x *ofdXML) pageBlock(block PageBlock) {
+	var attrs ofdAttrs
+	attrs.add("ID", block.ID)
+	x.start("PageBlock", attrs)
+	if len(block.Objects) != 0 {
+		trimmed := make([]GraphicObject, len(block.Objects))
+		for i, object := range block.Objects {
+			if len(object.pageBlocks) > 0 && object.pageBlocks[0] == block.ID {
+				object.pageBlocks = object.pageBlocks[1:]
+			}
+			trimmed[i] = object
+		}
+		x.graphicObjects(trimmed, block.PageBlock)
+	} else {
+		for _, obj := range block.TextObject {
+			x.object(GraphicObject{Type: "TextObject", TextObject: obj}, false)
+		}
+		for _, obj := range block.PathObject {
+			x.object(GraphicObject{Type: "PathObject", PathObject: obj}, false)
+		}
+		for _, obj := range block.ImageObject {
+			x.object(GraphicObject{Type: "ImageObject", ImageObject: obj}, false)
+		}
+		for _, obj := range block.CompositeObject {
+			x.object(GraphicObject{Type: "CompositeObject", CompositeObject: obj}, false)
+		}
+		for _, child := range block.PageBlock {
+			x.pageBlock(child)
+		}
+	}
+	x.end("PageBlock")
+}
+
+// emitEmptyPageBlocks 补写未在扁平对象序列中出现的空PageBlock节点
+// 入参: blocks 页块列表, emitted 已输出页块集合
+func (x *ofdXML) emitEmptyPageBlocks(blocks []PageBlock, emitted map[string]bool) {
+	for _, block := range blocks {
+		if x.err != nil {
+			return
+		}
+		if len(block.Objects) == 0 && len(block.TextObject) == 0 && len(block.PathObject) == 0 && len(block.ImageObject) == 0 && len(block.CompositeObject) == 0 {
+			if !emitted[block.ID] {
+				var attrs ofdAttrs
+				attrs.add("ID", block.ID)
+				x.start("PageBlock", attrs)
+				x.emitEmptyPageBlocks(block.PageBlock, emitted)
+				x.end("PageBlock")
+			}
+			continue
+		}
+		x.emitEmptyPageBlocks(block.PageBlock, emitted)
+	}
 }
 
 // resources 写出文档资源索引
@@ -807,9 +990,6 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.add("xmlns:ofd", ofdNamespace2016)
 	}
 	tagName := object.Type
-	if tagName == "CompositeGraphicUnit" && !root {
-		tagName = "CompositeObject"
-	}
 	switch object.Type {
 	case "TextObject", "Text":
 		obj := object.TextObject
@@ -924,8 +1104,8 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		attrs.flag("Visible", obj.Visible)
 		attrs.alpha(obj.Alpha)
 		actions = obj.Actions
-	case "CompositeObject", "CompositeGraphicUnit":
-		obj := object.CompositeGraphicUnit
+	case "CompositeObject":
+		obj := object.CompositeObject
 		attrs.add("ID", obj.ID)
 		attrs.add("Name", obj.Name)
 		attrs.add("Boundary", obj.Boundary)
@@ -965,8 +1145,8 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 		}
 		x.clips(object.ImageObject.Clips, ctm)
 		x.border(object.ImageObject.Border)
-	} else if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
-		x.clips(object.CompositeGraphicUnit.Clips, object.CompositeGraphicUnit.CTM)
+	} else if object.Type == "CompositeObject" {
+		x.clips(object.CompositeObject.Clips, object.CompositeObject.CTM)
 	} else if object.Type == "PathObject" || object.Type == "Path" {
 		if object.Type == "PathObject" {
 			x.clips(object.PathObject.Clips, object.PathObject.CTM)
@@ -996,21 +1176,43 @@ func (x *ofdXML) object(object GraphicObject, root bool) {
 				})
 			}
 		}
+		totalRunes := 0
+		for _, code := range object.TextObject.TextCode {
+			totalRunes += len(textCodeRunes(code.Value))
+		}
 		offset, index := 0, 0
 		for _, code := range object.TextObject.TextCode {
 			if x.err != nil {
 				return
 			}
 			end := offset + len(textCodeRunes(code.Value))
+			for index < len(transforms) && transforms[index].CodePosition < offset {
+				index++
+			}
 			for index < len(transforms) && transforms[index].CodePosition < end {
 				if x.err != nil {
 					return
 				}
 				transform := transforms[index]
+				codeCount := transform.CodeCount
+				if codeCount <= 0 {
+					codeCount = 1
+				}
+				if maxCount := totalRunes - transform.CodePosition; maxCount > 0 && codeCount > maxCount {
+					codeCount = maxCount
+				}
+				glyphCount := transform.GlyphCount
+				if glyphCount <= 0 {
+					if fields := len(strings.Fields(transform.Glyphs)); fields > 0 {
+						glyphCount = fields
+					} else {
+						glyphCount = 1
+					}
+				}
 				attrs := x.attrs[:0]
 				attrs.add("CodePosition", strconv.Itoa(transform.CodePosition-offset))
-				attrs.add("CodeCount", strconv.Itoa(transform.CodeCount))
-				attrs.add("GlyphCount", strconv.Itoa(transform.GlyphCount))
+				attrs.add("CodeCount", strconv.Itoa(codeCount))
+				attrs.add("GlyphCount", strconv.Itoa(glyphCount))
 				x.attrs = attrs
 				x.start("CGTransform", attrs)
 				x.text("Glyphs", transform.Glyphs)
@@ -1294,11 +1496,22 @@ func (x *ofdXML) pattern(pattern *Pattern) {
 	var content ofdAttrs
 	content.add("Thumbnail", pattern.CellContent.Thumbnail)
 	x.start("CellContent", content)
-	for object := range pattern.CellContent.objects() {
-		if x.err != nil {
-			return
+	if len(pattern.CellContent.Objects) != 0 {
+		x.graphicObjects(pattern.CellContent.Objects, pattern.CellContent.PageBlock)
+	} else {
+		for _, obj := range pattern.CellContent.TextObject {
+			x.object(GraphicObject{Type: "TextObject", TextObject: obj}, false)
 		}
-		x.object(object, false)
+		for _, obj := range pattern.CellContent.PathObject {
+			x.object(GraphicObject{Type: "PathObject", PathObject: obj}, false)
+		}
+		for _, obj := range pattern.CellContent.ImageObject {
+			x.object(GraphicObject{Type: "ImageObject", ImageObject: obj}, false)
+		}
+		for _, obj := range pattern.CellContent.CompositeObject {
+			x.object(GraphicObject{Type: "CompositeObject", CompositeObject: obj}, false)
+		}
+		x.graphicObjects(nil, pattern.CellContent.PageBlock)
 	}
 	x.end("CellContent")
 	x.end("Pattern")
@@ -1327,6 +1540,10 @@ func (x *ofdXML) actions(actions []Action) {
 				x.start("Area", ofdAttrs{{Name: xml.Name{Local: "Start"}, Value: area.Start}})
 				for _, command := range area.Command {
 					if x.err != nil {
+						return
+					}
+					if !validRegionCommandType(command.Type) {
+						x.err = fmt.Errorf("invalid region command type: %q", command.Type)
 						return
 					}
 					var attrs ofdAttrs
@@ -1423,7 +1640,7 @@ func (e *Editor) copySnapshotArchive(ctx context.Context, source *zip.Reader) (*
 	if e.runtimeResources != nil {
 		limit = e.runtimeResources.options.SnapshotBytes
 	}
-	data := &editorSnapshotBuffer{spillLimit: limit}
+	data := &editorSnapshotBuffer{spillLimit: limit, encryptSpill: e.encryption != nil}
 	cleanupData := true
 	defer func() {
 		if cleanupData {
@@ -1701,7 +1918,7 @@ func (e *Editor) readerWithOptions(ctx context.Context, progress editorProgress,
 	if err := r.initRootContext(ctx); err != nil {
 		return nil, nil, err
 	}
-	if _, err := r.DocContext(ctx); err != nil {
+	if _, err := r.docContext(ctx); err != nil {
 		return nil, nil, err
 	}
 	for i, page := range r.doc.Pages.Page {
@@ -1783,7 +2000,7 @@ func (e *Editor) resourceReader(ctx context.Context) (*Reader, error) {
 	if err := r.initRootContext(ctx); err != nil {
 		return nil, err
 	}
-	if _, err := r.DocContext(ctx); err != nil {
+	if _, err := r.docContext(ctx); err != nil {
 		return nil, err
 	}
 	return r, nil

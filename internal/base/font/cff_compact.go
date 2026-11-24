@@ -96,7 +96,7 @@ func compactCFFDirect(data []byte, expectedGlyphs int, keep map[uint16]bool) ([]
 			private = append(private, cid.private[fd])
 			fonts = append(fonts, f)
 		}
-		chars[index], selected[index], selects[index] = cid.fonts[fd].chars[gid], cid.cids[gid], mapped
+		chars[index], selected[index], selects[index] = normalizeCFFCharstring(cid.fonts[fd].chars[gid]), cid.cids[gid], mapped
 	}
 	cid.dicts, cid.private, cid.fonts = dicts, private, fonts
 	cid.charset, cid.selects = encodeCFFSubsetCharset(selected), selects
@@ -140,7 +140,7 @@ func compactCFFGlyphs(data []byte, keep map[uint16]bool) ([]byte, []uint16, erro
 			private = append(private, cid.private[fd])
 			fonts = append(fonts, cid.fonts[fd])
 		}
-		chars[index], selected[index], selects[index] = cid.fonts[fd].chars[gid], cid.cids[gid], mapped
+		chars[index], selected[index], selects[index] = normalizeCFFCharstring(cid.fonts[fd].chars[gid]), cid.cids[gid], mapped
 	}
 	cid.dicts, cid.private, cid.fonts = dicts, private, fonts
 	cid.charset, cid.selects = encodeCFFSubsetCharset(selected), selects
@@ -189,7 +189,7 @@ func compactCFFOrdered(data []byte, expectedGlyphs int, glyphs []uint16) ([]byte
 		font.locals = subsetCFFSubroutines(font.locals, locals[0])
 		chars := make([][]byte, len(ids))
 		for index, gid := range ids {
-			chars[index] = font.chars[gid]
+			chars[index] = normalizeCFFCharstring(font.chars[gid])
 		}
 		result, err := rebuildNamedCFF(data, font, chars, ids, true)
 		return result, ids, err
@@ -230,7 +230,7 @@ func compactCFFOrdered(data []byte, expectedGlyphs int, glyphs []uint16) ([]byte
 			private = append(private, cid.private[fd])
 			fonts = append(fonts, f)
 		}
-		chars[index], selected[index], selects[index] = cid.fonts[fd].chars[gid], index, mapped
+		chars[index], selected[index], selects[index] = normalizeCFFCharstring(cid.fonts[fd].chars[gid]), index, mapped
 	}
 	regSID := internCFFString(&cid.strings, "Adobe")
 	ordSID := internCFFString(&cid.strings, "Identity")
@@ -297,7 +297,7 @@ func compactNamedCFFOrder(data []byte, font *type2Font, keep map[uint16]bool) ([
 		if int(gid) >= len(font.chars) {
 			return nil, nil, fmt.Errorf("CFF glyph index out of range")
 		}
-		chars[index] = font.chars[gid]
+		chars[index] = normalizeCFFCharstring(font.chars[gid])
 	}
 	return ids, chars, nil
 }

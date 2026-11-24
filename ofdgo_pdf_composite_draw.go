@@ -409,26 +409,44 @@ func (c *pdfCompositor) drawPaint(node pdfCompositeNode, outline bool, paint pdf
 				originRecorded = true
 			}
 			if initial != nil {
-				pixel := initial[index]
-				if err := codecpdf.CompositePaintOver(&pixel, values, opacity, space, mode, compatible, marked); err != nil {
-					return err
+				ip := &initial[index]
+				var pixel pdfCompositePixel
+				if composedReady && ip.Alpha == previous.Alpha && ip.Effect == previous.Effect && ip.Shape == previous.Shape && ip.Values == previous.Values && values == previousValues && opacity == previousAlpha {
+					pixel = composed
+				} else {
+					previous, previousValues, previousAlpha = *ip, values, opacity
+					pixel = previous
+					if err := codecpdf.CompositePaintOver(&pixel, values, opacity, space, mode, compatible, marked); err != nil {
+						return err
+					}
+					composed, composedReady = pixel, true
 				}
-				if err := codecpdf.CompositeInterpolate(&pixels[index], pixel, shape); err != nil {
-					return err
+				if shape == 1 {
+					tp := &pixels[index]
+					tp.Values = pixel.Values
+					tp.Alpha = pixel.Alpha
+					tp.Effect = pixel.Effect
+					tp.Shape = 1
+				} else {
+					if err := codecpdf.CompositeInterpolate(&pixels[index], pixel, shape); err != nil {
+						return err
+					}
+					pixels[index].Shape += shape * (1 - pixels[index].Shape)
 				}
 			} else {
 				alpha := shape * opacity
-				if composedReady && pixels[index] == previous && values == previousValues && alpha == previousAlpha {
-					pixels[index] = composed
+				tp := &pixels[index]
+				if composedReady && tp.Alpha == previous.Alpha && tp.Effect == previous.Effect && tp.Shape == previous.Shape && tp.Values == previous.Values && values == previousValues && alpha == previousAlpha {
+					*tp = composed
 				} else {
-					previous, previousValues, previousAlpha = pixels[index], values, alpha
-					if err := codecpdf.CompositePaintOver(&pixels[index], values, alpha, space, mode, compatible, marked); err != nil {
+					previous, previousValues, previousAlpha = *tp, values, alpha
+					if err := codecpdf.CompositePaintOver(tp, values, alpha, space, mode, compatible, marked); err != nil {
 						return err
 					}
-					composed, composedReady = pixels[index], true
+					composed, composedReady = *tp, true
 				}
+				tp.Shape += shape * (1 - tp.Shape)
 			}
-			pixels[index].Shape += shape * (1 - pixels[index].Shape)
 			bits := pdfTransferChannels
 			if selectChannels {
 				if uniformReady {
@@ -664,26 +682,67 @@ func (c *pdfCompositor) drawGroupRegion(node pdfCompositeNode, pixels []pdfCompo
 }
 
 // drawKnockout 将每个对象与组初始背景合成，再按对象形状替换先前对象
-// 入参: nodes 组图元, initial 初始背景, pixels 组输出, space 混合空间
-// 返回: error 图元或合成错误
+// 入参: nodes 待绘制节点列表, initial 组初始背景像素, pixels 当前累积像素, space 组颜色空间
+// 返回: error 绘制或取消错误
 func (c *pdfCompositor) drawKnockout(nodes []pdfCompositeNode, initial, pixels []pdfCompositePixel, space *pdfgo.ColorSpace) error {
 	if err := c.importer.ctx.Err(); err != nil {
 		return err
 	}
-	candidate := c.acquirePixels(len(initial))
-	defer c.releasePixels(candidate)
-	clear(candidate)
-	local := *c
+	var candidate []pdfCompositePixel
 	var initialChannels []uint8
+	var localChannels []uint8
+	local := *c
 	if c.channels != nil {
 		initialChannels = c.acquireChannels(len(c.channels))
 		defer c.releaseChannels(initialChannels)
 		copy(initialChannels, c.channels)
-		local.channels = c.acquireChannels(len(c.channels))
-		defer c.releaseChannels(local.channels)
-		clear(local.channels)
 	}
+	ensureCandidate := func() {
+		if candidate == nil {
+			candidate = c.acquirePixels(len(initial))
+			copy(candidate, initial)
+			if initialChannels != nil {
+				localChannels = c.acquireChannels(len(c.channels))
+				copy(localChannels, initialChannels)
+				local.channels = localChannels
+			}
+		}
+	}
+	defer func() {
+		if candidate != nil {
+			c.releasePixels(candidate)
+		}
+		if localChannels != nil {
+			c.releaseChannels(localChannels)
+		}
+	}()
 	for _, node := range nodes {
+		if node.group == nil {
+			style, fill, stroke := node.style()
+			if fill != stroke {
+				box, err := c.markBounds(node)
+				if err != nil {
+					return err
+				}
+				if c.pixelBounds(box).Empty() {
+					continue
+				}
+				paint, overprint := style.Fill, style.FillOverprint
+				if stroke {
+					paint, overprint = style.Stroke, style.StrokeOverprint
+				}
+				if c.channels == nil || paint.Tiling == nil {
+					mask, err := c.mask(style.SoftMask, space)
+					if err != nil {
+						return err
+					}
+					if err := c.drawPaint(node, stroke, paint, style.BlendMode, overprint, mask, initial, initialChannels, pixels, space); err != nil {
+						return err
+					}
+					continue
+				}
+			}
+		}
 		var box Box
 		var err error
 		if node.group != nil {
@@ -698,32 +757,67 @@ func (c *pdfCompositor) drawKnockout(nodes []pdfCompositeNode, initial, pixels [
 		if region.Empty() {
 			continue
 		}
-		for y := region.Min.Y; y < region.Max.Y; y++ {
-			if err := c.importer.ctx.Err(); err != nil {
-				return err
-			}
-			start, end := y*c.width+region.Min.X, y*c.width+region.Max.X
-			copy(candidate[start:end], initial[start:end])
-			if initialChannels != nil {
-				copy(local.channels[start:end], initialChannels[start:end])
-			}
-		}
+		ensureCandidate()
 		if err := local.draw([]pdfCompositeNode{node}, candidate, space); err != nil {
 			return err
 		}
+		isGroup := node.group != nil
 		for y := region.Min.Y; y < region.Max.Y; y++ {
-			for x := region.Min.X; x < region.Max.X; x++ {
-				i := y*c.width + x
-				if err := codecpdf.CompositeKnockout(&pixels[i], initial[i], candidate[i]); err != nil {
+			if y&15 == 0 {
+				if err := c.importer.ctx.Err(); err != nil {
 					return err
 				}
-				if c.channels != nil && candidate[i].Shape != 0 {
-					c.channels[i] = local.channels[i]
+			}
+			rowStart := y*c.width + region.Min.X
+			rowEnd := y*c.width + region.Max.X
+			if !isGroup {
+				for i := rowStart; i < rowEnd; i++ {
+					cp := &candidate[i]
+					if cp.Shape == 0 {
+						continue
+					}
+					src := *cp
+					init := initial[i]
+					*cp = init
+					if err := codecpdf.CompositeKnockoutFast(&pixels[i], init, src); err != nil {
+						return err
+					}
+					if initialChannels != nil {
+						c.channels[i] = local.channels[i]
+						local.channels[i] = initialChannels[i]
+					}
+				}
+				continue
+			}
+			for i := rowStart; i < rowEnd; i++ {
+				cp := &candidate[i]
+				ip := &initial[i]
+				if cp.Shape == 0 && cp.Alpha == ip.Alpha && cp.Effect == ip.Effect && cp.Values == ip.Values {
+					if initialChannels != nil && local.channels[i] != initialChannels[i] {
+						local.channels[i] = initialChannels[i]
+					}
+					continue
+				}
+				src := *cp
+				init := *ip
+				*cp = init
+				if src.Shape != 0 {
+					if err := codecpdf.CompositeKnockoutFast(&pixels[i], init, src); err != nil {
+						return err
+					}
+					if initialChannels != nil {
+						c.channels[i] = local.channels[i]
+					}
+				}
+				if initialChannels != nil {
+					local.channels[i] = initialChannels[i]
 				}
 			}
 		}
 	}
-	c.gradients, c.meshes, c.clipMasks = local.gradients, local.meshes, local.clipMasks
+	if candidate != nil {
+		c.gradients, c.meshes, c.clipMasks = local.gradients, local.meshes, local.clipMasks
+	}
 	return nil
 }
 

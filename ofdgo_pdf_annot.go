@@ -426,7 +426,7 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 	stamp.compositeCache = nil
 	stamp.compositeNodes = p.compositeNodes[:len(p.compositeNodes):len(p.compositeNodes)]
 	if !skipAppearance {
-		stamp.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
+		stamp.clipTexts = make(map[*pdfgo.TextClip]pdfClipTextEntry)
 	}
 	stamp.pageWidth, stamp.pageHeight = box.W, box.H
 	defer func() {
@@ -474,7 +474,7 @@ func (p *pdfImporter) paintedAnnotation(ctx context.Context, page *pdfgo.Page, a
 	if err != nil {
 		return err
 	}
-	converted := Annotation{Type: pdfAnnotationType(annotation.Subtype), Subtype: string(annotation.Subtype), Remark: remark, Appearance: Appearance{Boundary: pdfBoundary(box), Objects: objects}}
+	converted := Annotation{Type: pdfAnnotationType(annotation.Subtype), Subtype: string(annotation.Subtype), Remark: remark, Appearance: &Appearance{Boundary: pdfBoundary(box), Objects: objects}}
 	if annotation.Subtype == "Projection" {
 		projection, err := p.reader.ReadProjectionAnnotation(annotation)
 		if err != nil {

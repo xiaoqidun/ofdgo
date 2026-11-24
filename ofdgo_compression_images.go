@@ -105,7 +105,7 @@ func optimizeImageResource(ctx context.Context, data []byte, options Compression
 			return optimizeJP2Resource(ctx, data, options, size)
 		}
 	}
-	return pdfgo.OptimizeImageResource(ctx, data, options, size)
+	return pdfgo.OptimizeImageResource(ctx, data, options.pdfOptions(), size)
 }
 
 // optimizeBMPResource 压缩可保留色彩与密度的位图，未知元数据及高精度位域保持原样
@@ -189,10 +189,10 @@ func optimizeRasterResource(ctx context.Context, data []byte, pixels image.Image
 	var err error
 	if hasDensity && options.Mode != CompressionLossy {
 		var encoded bytes.Buffer
-		err = pdfgo.EncodePNGWithOptions(ctx, &encoded, pixels, options)
+		err = pdfgo.EncodePNGWithOptions(ctx, &encoded, pixels, options.pdfOptions())
 		candidate = encoded.Bytes()
 	} else {
-		candidate, err = pdfgo.EncodeImageResource(ctx, pixels, options)
+		candidate, err = pdfgo.EncodeImageResource(ctx, pixels, options.pdfOptions())
 	}
 	if err != nil {
 		if errors.Is(err, io.ErrShortBuffer) {
@@ -208,7 +208,7 @@ func optimizeRasterResource(ctx context.Context, data []byte, pixels image.Image
 				densityWritten = true
 			} else {
 				var encoded bytes.Buffer
-				if pngErr := pdfgo.EncodePNGWithOptions(ctx, &encoded, pixels, options); pngErr != nil {
+				if pngErr := pdfgo.EncodePNGWithOptions(ctx, &encoded, pixels, options.pdfOptions()); pngErr != nil {
 					if errors.Is(pngErr, io.ErrShortBuffer) {
 						return data, ctx.Err()
 					}
@@ -343,24 +343,28 @@ func (v *compressionImages) DrawObject(object *GraphicObject, state RenderState)
 }
 
 // VisitComposite 按矢量资源的完整变换统计缩略图和替换图，不以裁剪区域缩减尺寸
-// 入参: object 矢量资源或复合图元, state 已包含当前图元变换的状态
+// 入参: object 复合图元对象, state 已包含当前图元变换的状态
 // 返回: error 取消、资源标识或几何错误
-func (v *compressionImages) VisitComposite(object *CompositeGraphicUnit, state RenderState) error {
+func (v *compressionImages) VisitComposite(object *CompositeObject, state RenderState) error {
 	if err := v.ctx.Err(); err != nil {
 		return err
 	}
-	if object.Thumbnail == "" && object.Substitution == "" {
+	if object == nil || object.ResourceID == "" {
 		return nil
 	}
-	ids := [2]string{editorResourceID(object.Thumbnail), editorResourceID(object.Substitution)}
-	if object.Thumbnail != "" && ids[0] == "" || object.Substitution != "" && ids[1] == "" {
+	unit := v.renderer.compositeDefinition(object.ResourceID)
+	if unit == nil || unit.Thumbnail == "" && unit.Substitution == "" {
+		return nil
+	}
+	ids := [2]string{editorResourceID(unit.Thumbnail), editorResourceID(unit.Substitution)}
+	if unit.Thumbnail != "" && ids[0] == "" || unit.Substitution != "" && ids[1] == "" {
 		return fmt.Errorf("invalid composite image resource")
 	}
 	matrix := IdentityMatrix()
 	if state.Parent != nil {
 		matrix = *state.Parent
 	}
-	size := compressionImageSize(object.Width*math.Hypot(matrix.a, matrix.b), object.Height*math.Hypot(matrix.c, matrix.d), v.dpi)
+	size := compressionImageSize(unit.Width*math.Hypot(matrix.a, matrix.b), unit.Height*math.Hypot(matrix.c, matrix.d), v.dpi)
 	return v.recordSize(ids, size)
 }
 
@@ -516,13 +520,6 @@ func (v *compressionImages) patternImages(color *FillColor, object Matrix) error
 	return nil
 }
 
-// compressionImagePlan 分文档合并图片需求，版本文件的当前入口独立于其他文档处理
-// 入参: ctx 取消上下文, options 压缩配置
-// 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
-func (r *Reader) compressionImagePlan(ctx context.Context, options CompressionOptions) (map[string]bool, map[string]image.Point, error) {
-	return r.compressionImagePlanProtected(ctx, options, nil, nil)
-}
-
 // compressionImagePlanProtected 按签名与全包历史版本保护边界分文档合并图片需求，受保护文档和文件不参与有损降采样
 // 入参: ctx 取消上下文, options 压缩配置, protectedDocs 受签名保护的文档索引, protectedFiles 受签名保护的文件路径
 // 返回: map[string]bool 可有损处理的路径, map[string]image.Point 像素需求, error 读取或取消错误
@@ -636,7 +633,7 @@ func (r *Reader) compressionImageSizes(ctx context.Context, images []ImageInfo, 
 	if dpi == 0 {
 		return nil, nil
 	}
-	doc, err := r.DocContext(ctx)
+	doc, err := r.docContext(ctx)
 	if err != nil {
 		return nil, ctx.Err()
 	}

@@ -81,7 +81,7 @@ func structureMappedIDs(ctx context.Context, id string, links map[string][]strin
 // 入参: ctx 取消上下文, reader 资源已加载的阅读器, page 页面引用
 // 返回: map[string]bool 可达图元标识, error 页面读取或遍历错误
 func structurePageObjectIDs(ctx context.Context, reader *Reader, page Page) (map[string]bool, error) {
-	if _, err := reader.DocContext(ctx); err != nil {
+	if _, err := reader.docContext(ctx); err != nil {
 		return nil, err
 	}
 	content, err := reader.PageContentContext(ctx, page)
@@ -272,7 +272,7 @@ func (e *Editor) pruneStructureReferences(ctx context.Context, parts map[string]
 				return err
 			}
 		} else if snapshot.doc.Annotations != "" {
-			if _, err := snapshot.DocContext(ctx); err != nil {
+			if _, err := snapshot.docContext(ctx); err != nil {
 				return err
 			}
 			annots, err := snapshot.pageAnnotationsContext(ctx, page.ID)
@@ -513,7 +513,7 @@ func (e *Editor) annotationStructureSource(page int, wanted map[string]bool) (*e
 	if !slices.Contains(knownTags, true) {
 		return base, nil
 	}
-	if _, err := base.reader.Doc(); err != nil {
+	if _, err := base.reader.docInternal(); err != nil {
 		return nil, err
 	}
 	if source := base.pages[e.pages[page].ID]; source != nil {

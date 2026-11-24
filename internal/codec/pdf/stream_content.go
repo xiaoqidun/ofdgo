@@ -675,21 +675,18 @@ func (b *ContentBuilder) WrapTextStyle(firstSpan int, style TextStrokeStyle) {
 		c := style.StrokeColor
 		if c.A == 0 {
 			prefix = append(prefix, " 0 G"...)
+		} else if c.R == c.G && c.G == c.B {
+			prefix = append(prefix, ' ')
+			prefix = appendCompactFloatBytes(prefix, unpremultiplyChannel(c.R, c.A), 4)
+			prefix = append(prefix, " G"...)
 		} else {
-			a := float64(c.A) / 255.0
-			if c.R == c.G && c.G == c.B {
-				prefix = append(prefix, ' ')
-				prefix = appendCompactFloatBytes(prefix, float64(c.R)/255.0/a, 4)
-				prefix = append(prefix, " G"...)
-			} else {
-				prefix = append(prefix, ' ')
-				prefix = appendCompactFloatBytes(prefix, float64(c.R)/255.0/a, 4)
-				prefix = append(prefix, ' ')
-				prefix = appendCompactFloatBytes(prefix, float64(c.G)/255.0/a, 4)
-				prefix = append(prefix, ' ')
-				prefix = appendCompactFloatBytes(prefix, float64(c.B)/255.0/a, 4)
-				prefix = append(prefix, " RG"...)
-			}
+			prefix = append(prefix, ' ')
+			prefix = appendCompactFloatBytes(prefix, unpremultiplyChannel(c.R, c.A), 4)
+			prefix = append(prefix, ' ')
+			prefix = appendCompactFloatBytes(prefix, unpremultiplyChannel(c.G, c.A), 4)
+			prefix = append(prefix, ' ')
+			prefix = appendCompactFloatBytes(prefix, unpremultiplyChannel(c.B, c.A), 4)
+			prefix = append(prefix, " RG"...)
 		}
 		if style.RenderMode == 2 && style.HasFill {
 			if style.FillAlpha != c.A || c.A != 255 {
@@ -1073,6 +1070,19 @@ func (b *ContentBuilder) setAlpha(alpha uint8) {
 	b.state.alphaValid = true
 }
 
+// unpremultiplyChannel 将预乘颜色通道还原并限幅至[0,1]范围
+// 入参: v 预乘通道值, a 透明度通道值
+// 返回: float64 归一化非预乘通道值
+func unpremultiplyChannel(v, a uint8) float64 {
+	if a == 0 {
+		return 0
+	}
+	if v >= a {
+		return 1
+	}
+	return float64(v) / float64(a)
+}
+
 // setFill 设置当前填充颜色或渐变，渐变前强制重置不透明状态
 // 入参: fill 填充画刷, m 当前矩阵
 func (b *ContentBuilder) setFill(fill canvas.Paint, m canvas.Matrix) {
@@ -1096,21 +1106,18 @@ func (b *ContentBuilder) setFill(fill canvas.Paint, m canvas.Matrix) {
 	c := fill.Color
 	if c.A == 0 {
 		b.buf = append(b.buf, " 0 g"...)
+	} else if c.R == c.G && c.R == c.B {
+		b.buf = append(b.buf, ' ')
+		b.buf = appendCompactFloatBytes(b.buf, unpremultiplyChannel(c.R, c.A), 4)
+		b.buf = append(b.buf, " g"...)
 	} else {
-		a := float64(c.A) / 255.0
-		if c.R == c.G && c.R == c.B {
-			b.buf = append(b.buf, ' ')
-			b.buf = appendCompactFloatBytes(b.buf, float64(c.R)/255.0/a, 4)
-			b.buf = append(b.buf, " g"...)
-		} else {
-			b.buf = append(b.buf, ' ')
-			b.buf = appendCompactFloatBytes(b.buf, float64(c.R)/255.0/a, 4)
-			b.buf = append(b.buf, ' ')
-			b.buf = appendCompactFloatBytes(b.buf, float64(c.G)/255.0/a, 4)
-			b.buf = append(b.buf, ' ')
-			b.buf = appendCompactFloatBytes(b.buf, float64(c.B)/255.0/a, 4)
-			b.buf = append(b.buf, " rg"...)
-		}
+		b.buf = append(b.buf, ' ')
+		b.buf = appendCompactFloatBytes(b.buf, unpremultiplyChannel(c.R, c.A), 4)
+		b.buf = append(b.buf, ' ')
+		b.buf = appendCompactFloatBytes(b.buf, unpremultiplyChannel(c.G, c.A), 4)
+		b.buf = append(b.buf, ' ')
+		b.buf = appendCompactFloatBytes(b.buf, unpremultiplyChannel(c.B, c.A), 4)
+		b.buf = append(b.buf, " rg"...)
 	}
 	b.setAlpha(c.A)
 	b.state.fill = fill
@@ -1140,21 +1147,18 @@ func (b *ContentBuilder) setStroke(stroke canvas.Paint, m canvas.Matrix) {
 	c := stroke.Color
 	if c.A == 0 {
 		b.buf = append(b.buf, " 0 G"...)
+	} else if c.R == c.G && c.R == c.B {
+		b.buf = append(b.buf, ' ')
+		b.buf = appendCompactFloatBytes(b.buf, unpremultiplyChannel(c.R, c.A), 4)
+		b.buf = append(b.buf, " G"...)
 	} else {
-		a := float64(c.A) / 255.0
-		if c.R == c.G && c.R == c.B {
-			b.buf = append(b.buf, ' ')
-			b.buf = appendCompactFloatBytes(b.buf, float64(c.R)/255.0/a, 4)
-			b.buf = append(b.buf, " G"...)
-		} else {
-			b.buf = append(b.buf, ' ')
-			b.buf = appendCompactFloatBytes(b.buf, float64(c.R)/255.0/a, 4)
-			b.buf = append(b.buf, ' ')
-			b.buf = appendCompactFloatBytes(b.buf, float64(c.G)/255.0/a, 4)
-			b.buf = append(b.buf, ' ')
-			b.buf = appendCompactFloatBytes(b.buf, float64(c.B)/255.0/a, 4)
-			b.buf = append(b.buf, " RG"...)
-		}
+		b.buf = append(b.buf, ' ')
+		b.buf = appendCompactFloatBytes(b.buf, unpremultiplyChannel(c.R, c.A), 4)
+		b.buf = append(b.buf, ' ')
+		b.buf = appendCompactFloatBytes(b.buf, unpremultiplyChannel(c.G, c.A), 4)
+		b.buf = append(b.buf, ' ')
+		b.buf = appendCompactFloatBytes(b.buf, unpremultiplyChannel(c.B, c.A), 4)
+		b.buf = append(b.buf, " RG"...)
 	}
 	b.setAlpha(c.A)
 	b.state.stroke = stroke

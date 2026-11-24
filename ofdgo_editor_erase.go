@@ -33,8 +33,8 @@ func editorObjectClips(object *GraphicObject) **Clips {
 		return &object.PathObject.Clips
 	case "ImageObject":
 		return &object.ImageObject.Clips
-	case "CompositeObject", "CompositeGraphicUnit":
-		return &object.CompositeGraphicUnit.Clips
+	case "CompositeObject":
+		return &object.CompositeObject.Clips
 	}
 	return nil
 }

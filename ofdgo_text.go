@@ -209,16 +209,20 @@ func (obj TextObject) Text() string {
 	return text.String()
 }
 
-// UnmarshalXML 解析标准文字节点，将各TextCode前的局部字形位置统一为对象内索引
-// 入参: decoder XML解码器, start 对象起始节点
+// UnmarshalXML 解析标准文字节点，保留跨TextCode的字形位置映射并统一为对象内全局字符索引
+// 入参: decoder XML解码器, start 起始节点
 // 返回: error 解码错误
 func (obj *TextObject) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
 	type plain TextObject
+	type pendingTransform struct {
+		item       CGTransform
+		afterCodes int
+	}
 	var value plain
 	if err := decodeGraphicAttributes(start, &value); err != nil {
 		return err
 	}
-	offset, pending := 0, 0
+	var pending []pendingTransform
 	if err := decodeOFDChildren(decoder, start, func(d *xml.Decoder, node xml.StartElement) error {
 		switch node.Name.Local {
 		case "FillColor":
@@ -230,28 +234,17 @@ func (obj *TextObject) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement
 		case "Actions":
 			return decodeOFDActions(d, node, &value.Actions)
 		case "CGTransform":
-			return d.DecodeElement(&value.CGTransform, &node)
+			var item CGTransform
+			if err := d.DecodeElement(&item, &node); err != nil {
+				return err
+			}
+			pending = append(pending, pendingTransform{item: item, afterCodes: len(value.TextCode)})
+			return nil
 		case "TextCode":
 			var code TextCode
 			if err := d.DecodeElement(&code, &node); err != nil {
 				return err
 			}
-			segmentLen := len(textCodeRunes(code.Value))
-			valid := value.CGTransform[:pending]
-			for i := pending; i < len(value.CGTransform); i++ {
-				item := value.CGTransform[i]
-				if item.CodePosition < 0 || item.CodePosition >= segmentLen {
-					continue
-				}
-				if item.CodeCount > segmentLen-item.CodePosition {
-					item.CodeCount = segmentLen - item.CodePosition
-				}
-				item.CodePosition += offset
-				valid = append(valid, item)
-			}
-			value.CGTransform = valid
-			pending = len(value.CGTransform)
-			offset += segmentLen
 			value.TextCode = append(value.TextCode, code)
 			return nil
 		}
@@ -259,8 +252,56 @@ func (obj *TextObject) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement
 	}); err != nil {
 		return err
 	}
-	if pending < len(value.CGTransform) {
-		value.CGTransform = value.CGTransform[:pending]
+	if len(pending) != 0 && len(value.TextCode) != 0 {
+		offsets := make([]int, len(value.TextCode))
+		lengths := make([]int, len(value.TextCode))
+		total := 0
+		for i, code := range value.TextCode {
+			offsets[i] = total
+			lengths[i] = len(textCodeRunes(code.Value))
+			total += lengths[i]
+		}
+		valid := make([]CGTransform, 0, len(pending))
+		for _, entry := range pending {
+			item := entry.item
+			if item.CodePosition < 0 {
+				continue
+			}
+			pos := item.CodePosition
+			switch {
+			case entry.afterCodes == 0:
+				if pos >= total {
+					continue
+				}
+			case entry.afterCodes < len(value.TextCode):
+				segLen := lengths[entry.afterCodes]
+				if pos < segLen {
+					pos += offsets[entry.afterCodes]
+				} else if pos >= total {
+					continue
+				}
+			default:
+				if pos >= total {
+					continue
+				}
+			}
+			if item.CodeCount <= 0 {
+				item.CodeCount = 1
+			}
+			if item.CodeCount > total-pos {
+				item.CodeCount = total - pos
+			}
+			if item.GlyphCount <= 0 {
+				if n := len(strings.Fields(item.Glyphs)); n > 0 {
+					item.GlyphCount = n
+				} else {
+					item.GlyphCount = 1
+				}
+			}
+			item.CodePosition = pos
+			valid = append(valid, item)
+		}
+		value.CGTransform = valid
 	}
 	*obj = TextObject(value)
 	for _, attr := range ofdXMLStart(start).Attr {
@@ -370,13 +411,7 @@ func (obj TextObject) withPathStyle(style PathObject) TextObject {
 // 入参: text 文本对象
 // 返回: string 字体ID
 func (r *Renderer) textObjectFontID(text TextObject) string {
-	fontID := text.Font
-	if fontID == "" && text.DrawParam != "" {
-		if dp := r.getDrawParam(text.DrawParam, nil); dp != nil && dp.Font != "" {
-			fontID = dp.Font
-		}
-	}
-	return fontID
+	return text.Font
 }
 
 // textObjectGlyphTransforms 获取文本对象的字形变换

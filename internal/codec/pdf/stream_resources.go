@@ -241,7 +241,9 @@ func (r *GraphicResourceRegistry) StandardType1Font(baseFont string) (pdfgo.Name
 		"Type":     pdfgo.Name("Font"),
 		"Subtype":  pdfgo.Name("Type1"),
 		"BaseFont": pdfgo.Name(baseFont),
-		"Encoding": pdfgo.Name("WinAnsiEncoding"),
+	}
+	if baseFont != "Symbol" && baseFont != "ZapfDingbats" {
+		dict["Encoding"] = pdfgo.Name("WinAnsiEncoding")
 	}
 	r.stdFonts[baseFont] = patternItem{name: name, ref: ref}
 	r.pendingObjs = append(r.pendingObjs, pendingDictObj{ref: ref, dict: dict})

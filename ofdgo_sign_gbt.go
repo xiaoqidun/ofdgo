@@ -41,6 +41,7 @@ type digitalVerifyResult struct {
 	SignatureMethod string
 	Timestamps      []signatureTimestampEvidence
 	SignatureTime   time.Time
+	SignerTimes     []signerCertTime
 	DataHashChecked bool
 	DataHashOK      bool
 	SignedChecked   bool
@@ -348,6 +349,9 @@ func verifyGBT35275SignedData(sd *gbtSignedData, signedData []byte, options *sig
 			return result, err
 		}
 		result.SignerCerts = append(result.SignerCerts, cert.Raw)
+		if !signer.SigningTime.IsZero() {
+			result.SignerTimes = append(result.SignerTimes, signerCertTime{cert: cert.Raw, at: signer.SigningTime})
+		}
 		tokens, err := signatureTimestampAttributes(signer.UnauthAttrs)
 		if err != nil {
 			return result, err

@@ -167,8 +167,8 @@ func cloneEditorObject(object GraphicObject) (GraphicObject, error) {
 		return GraphicObject{Type: object.Type, PathObject: cloneEditorData(object.PathObject), state: object.state}, nil
 	case "ImageObject":
 		return GraphicObject{Type: object.Type, ImageObject: cloneEditorData(object.ImageObject), state: object.state}, nil
-	case "CompositeObject", "CompositeGraphicUnit":
-		return GraphicObject{Type: object.Type, CompositeGraphicUnit: cloneEditorData(object.CompositeGraphicUnit), state: object.state}, nil
+	case "CompositeObject":
+		return GraphicObject{Type: "CompositeObject", CompositeObject: cloneEditorData(object.CompositeObject), state: object.state}, nil
 	}
 	return GraphicObject{}, fmt.Errorf("unsupported object type %q", object.Type)
 }
@@ -177,7 +177,7 @@ func cloneEditorObject(object GraphicObject) (GraphicObject, error) {
 // 入参: object 对象副本, dx 横向位移, dy 纵向位移, scale 正缩放比例
 // 返回: GraphicObject 变换后的对象, error 错误信息
 func transformEditorObject(object GraphicObject, dx, dy, scale float64) (GraphicObject, error) {
-	if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" || object.Type == "TextObject" && len(object.TextObject.CGTransform) != 0 {
+	if object.Type == "CompositeObject" || object.Type == "TextObject" && len(object.TextObject.CGTransform) != 0 {
 		return transformEditorMatrix(object, Matrix{a: scale, d: scale, e: dx, f: dy}), nil
 	}
 	var boundary, ctm *string
@@ -556,7 +556,14 @@ func (e *Editor) SetResources(resources *Resources) {
 		return
 	}
 	e.runtimeResources = resources
-	e.snapshotArchive = nil
+	if e.snapshotArchive != nil {
+		if e.snapshotArchive.retained != nil {
+			e.snapshotArchive.retained.clear()
+		}
+		e.snapshotArchive.files = nil
+		e.snapshotArchive.retained = nil
+		e.snapshotArchive = nil
+	}
 	e.fontRenderer = nil
 	e.fontSourcesCache = newFontSourceCache(resources)
 	e.validatedPaths = nil
@@ -609,7 +616,7 @@ func (e *Editor) PageContext(ctx context.Context, index int) (*PageContent, erro
 	result.XMLName = xml.Name{Space: ofdNamespace2016, Local: "Page"}
 	for i := range result.Content.Layer {
 		layer := &result.Content.Layer[i]
-		layer.TextObject, layer.PathObject, layer.ImageObject, layer.CompositeGraphicUnit = nil, nil, nil, nil
+		layer.TextObject, layer.PathObject, layer.ImageObject, layer.CompositeObject = nil, nil, nil, nil
 		for _, object := range layer.Objects {
 			if err := ctx.Err(); err != nil {
 				return nil, err
@@ -621,8 +628,8 @@ func (e *Editor) PageContext(ctx context.Context, index int) (*PageContent, erro
 				layer.PathObject = append(layer.PathObject, object.PathObject)
 			case "ImageObject":
 				layer.ImageObject = append(layer.ImageObject, object.ImageObject)
-			case "CompositeObject", "CompositeGraphicUnit":
-				layer.CompositeGraphicUnit = append(layer.CompositeGraphicUnit, object.CompositeGraphicUnit)
+			case "CompositeObject":
+				layer.CompositeObject = append(layer.CompositeObject, object.CompositeObject)
 			}
 		}
 	}
@@ -970,7 +977,7 @@ func (e *Editor) UpdateObject(page int, id string, object GraphicObject) error {
 	case "ImageObject":
 		object.ImageObject.ID = id
 	case "CompositeObject":
-		object.CompositeGraphicUnit.ID = id
+		object.CompositeObject.ID = id
 	default:
 		return fmt.Errorf("unsupported object type %q", object.Type)
 	}
@@ -1439,9 +1446,9 @@ func (v *editorValidation) prepareObject(id string, object GraphicObject) (Graph
 		join = obj.Join
 		alpha, clips, actions = obj.Alpha, obj.Clips, obj.Actions
 	case "CompositeObject":
-		obj := &object.CompositeGraphicUnit
-		if obj.ResourceID == "" || len(obj.Objects)+len(obj.TextObject)+len(obj.PathObject)+len(obj.ImageObject)+len(obj.CompositeGraphicUnit) != 0 || obj.extentSet || obj.Width != 0 || obj.Height != 0 || obj.Thumbnail != "" || obj.Substitution != "" {
-			return GraphicObject{}, fmt.Errorf("composite requires a vector resource without inline content")
+		obj := &object.CompositeObject
+		if obj.ResourceID == "" {
+			return GraphicObject{}, fmt.Errorf("composite requires a vector resource")
 		}
 		if err := v.validateVector(obj.ResourceID); err != nil {
 			return GraphicObject{}, err

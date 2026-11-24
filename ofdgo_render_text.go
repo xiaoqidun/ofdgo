@@ -132,11 +132,7 @@ func (r *Renderer) PositionText(object TextObject, state RenderState) (*Position
 // 入参: object 文字对象, state 继承状态, contentOnly 仅提取原文
 // 返回: *PositionedText 定位结果, error 字体或几何错误
 func (r *Renderer) positionText(object TextObject, state RenderState, contentOnly bool) (*PositionedText, error) {
-	defaults := r.drawParamDefaults(object.DrawParam, state.Defaults)
 	size := object.Size
-	if size == 0 && defaults != nil && defaults.Size > 0 {
-		size = defaults.Size
-	}
 	if size == 0 {
 		size = 3.5
 	}
@@ -165,9 +161,6 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 		horizontal = 1
 	}
 	id := object.Font
-	if id == "" && defaults != nil && defaults.Font != "" {
-		id = defaults.Font
-	}
 	prepared, err := r.PrepareFont(id)
 	if err != nil {
 		return nil, err
@@ -200,20 +193,14 @@ func (r *Renderer) positionText(object TextObject, state RenderState, contentOnl
 		return nil, err
 	}
 	weight := object.Weight
-	if weight == 0 && !object.WeightSet && defaults != nil && (defaults.Weight > 0 || defaults.WeightSet) {
-		weight = defaults.Weight
-	}
 	italic := object.Italic
-	if !object.ItalicSet && !italic && defaults != nil && defaults.Italic {
-		italic = true
-	}
 	bold := weight >= 700
 	if definition := r.fontDefinition(id); definition != nil {
+		if bold && basefont.NoSyntheticBold(definition.FontName, definition.FamilyName) {
+			bold = false
+		}
 		if definition.Bold {
 			bold = true
-		}
-		if basefont.NoSyntheticBold(definition.FontName, definition.FamilyName) {
-			bold = false
 		}
 		if definition.Italic {
 			italic = true

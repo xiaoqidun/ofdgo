@@ -417,16 +417,10 @@ func (r *Reader) applySignatureCoverage(ctx context.Context, report *SignatureVe
 		if r.versionInfo != nil && strings.TrimSpace(r.versionInfo.Location) != "" {
 			versionPath := cleanPackagePath(r.versionInfo.Location)
 			if validPackagePath(versionPath) {
-				locked := covered[cleanList]
-				if locked {
-					contentRequired[versionPath] = true
-					docRequired[versionPath] = true
-				}
+				contentRequired[versionPath] = true
+				docRequired[versionPath] = true
 				if err := r.signatureCoverageReferences(ctx, versionPath, docRequired); err != nil && report.CoverageError == "" {
 					report.CoverageOK, report.CoverageError = false, err.Error()
-				}
-				if !locked && !contentRequired[versionPath] {
-					delete(docRequired, versionPath)
 				}
 			}
 		} else if r.ofd != nil && o.DocIndex >= 0 && o.DocIndex < len(r.ofd.DocBody) && r.ofd.DocBody[o.DocIndex].versioned {

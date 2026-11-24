@@ -183,7 +183,7 @@ func flattenCanvasPath(path *canvas.Path, tolerance float64) *canvas.Path {
 // 入参: geometry 几何后端
 // 返回: bool 是否采用原生描边
 func canvasNativeStroke(geometry GeometryBackend) bool {
-	_, ok := geometry.(CanvasBackend)
+	_, ok := geometry.(DefaultBackend)
 	return ok
 }
 
@@ -488,7 +488,7 @@ func actionRegionPath(region *Region, matrix Matrix) *canvas.Path {
 // Curves 在输出边界转换椭圆弧，其他曲线保持原样
 // 入参: path 页面路径
 // 返回: GeometryPath 贝塞尔路径, error 路径错误
-func (CanvasBackend) Curves(path GeometryPath) (GeometryPath, error) {
+func (DefaultBackend) Curves(path GeometryPath) (GeometryPath, error) {
 	p, err := geometryToCanvasPath(&path)
 	if err != nil {
 		return nil, err
@@ -499,14 +499,14 @@ func (CanvasBackend) Curves(path GeometryPath) (GeometryPath, error) {
 // Path 解析对象的标准紧缩路径并转换到页面坐标
 // 入参: object 路径对象
 // 返回: GeometryPath 页面路径, error 无效路径错误
-func (b CanvasBackend) Path(object PathObject) (GeometryPath, error) {
+func (b DefaultBackend) Path(object PathObject) (GeometryPath, error) {
 	return objectGeometryPath(b, object)
 }
 
 // Region 解析动作区域并保持椭圆弧及退化变换的既有处理
 // 入参: region 动作区域, matrix 页面变换
 // 返回: GeometryPath 页面路径, error 解析错误
-func (CanvasBackend) Region(region *Region, matrix Matrix) (GeometryPath, error) {
+func (DefaultBackend) Region(region *Region, matrix Matrix) (GeometryPath, error) {
 	p := actionRegionPath(region, matrix)
 	return *geometryFromCanvasPath(p.Transform(canvas.Matrix{{1, 0, 0}, {0, -1, 0}})), nil
 }
@@ -514,7 +514,7 @@ func (CanvasBackend) Region(region *Region, matrix Matrix) (GeometryPath, error)
 // Bounds 计算曲线路径的精确范围
 // 入参: path 页面路径
 // 返回: Box 路径范围, error 无效路径错误
-func (CanvasBackend) Bounds(path GeometryPath) (Box, error) {
+func (DefaultBackend) Bounds(path GeometryPath) (Box, error) {
 	p, err := geometryToCanvasPath(&path)
 	if err != nil {
 		return Box{}, err
@@ -529,7 +529,7 @@ func (CanvasBackend) Bounds(path GeometryPath) (Box, error) {
 // Transform 变换路径，保持曲线与椭圆弧，不修改源路径
 // 入参: path 页面路径, matrix 页面变换
 // 返回: GeometryPath 新路径, error 无效路径错误
-func (CanvasBackend) Transform(path GeometryPath, matrix Matrix) (GeometryPath, error) {
+func (DefaultBackend) Transform(path GeometryPath, matrix Matrix) (GeometryPath, error) {
 	curves := true
 	for _, segment := range path {
 		if segment.Verb == GeometryArc {
@@ -560,7 +560,7 @@ func (CanvasBackend) Transform(path GeometryPath, matrix Matrix) (GeometryPath, 
 // Normalize 按填充规则整理自交区域
 // 入参: path 页面路径, evenOdd 是否采用奇偶规则
 // 返回: GeometryPath 非零填充路径, error 无效路径错误
-func (CanvasBackend) Normalize(path GeometryPath, evenOdd bool) (GeometryPath, error) {
+func (DefaultBackend) Normalize(path GeometryPath, evenOdd bool) (GeometryPath, error) {
 	p, err := geometryToCanvasPath(&path)
 	if err != nil {
 		return nil, err
@@ -579,7 +579,7 @@ func (CanvasBackend) Normalize(path GeometryPath, evenOdd bool) (GeometryPath, e
 // Combine 计算两个非零填充区域的布尔运算
 // 入参: left 左路径, right 右路径, operation 运算类型
 // 返回: GeometryPath 结果路径, error 运算错误
-func (CanvasBackend) Combine(left, right GeometryPath, operation GeometryOperation) (GeometryPath, error) {
+func (DefaultBackend) Combine(left, right GeometryPath, operation GeometryOperation) (GeometryPath, error) {
 	a, err := geometryToCanvasPath(&left)
 	if err != nil {
 		return nil, err
@@ -610,7 +610,7 @@ func (CanvasBackend) Combine(left, right GeometryPath, operation GeometryOperati
 // Stroke 将绝对长度虚线与描边转换为填充区域，几何后端异常时使用本库非零描边
 // 入参: path 页面路径, options 描边样式
 // 返回: GeometryPath 描边区域, error 样式或路径错误
-func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (result GeometryPath, err error) {
+func (DefaultBackend) Stroke(path GeometryPath, options StrokeOptions) (result GeometryPath, err error) {
 	if err := validateStrokeOptions(options); err != nil {
 		return nil, err
 	}
@@ -654,7 +654,7 @@ func (CanvasBackend) Stroke(path GeometryPath, options StrokeOptions) (result Ge
 // Clip 解析对象裁剪并与父裁剪相交，保留未裁剪与完全裁去的区别
 // 入参: r 渲染器, clips OFD裁剪, matrix 裁剪坐标到页面的变换, parent 父裁剪
 // 返回: *GeometryPath 页面裁剪, error 无效父路径错误
-func (CanvasBackend) Clip(r *Renderer, clips *Clips, matrix Matrix, parent *GeometryPath) (*GeometryPath, error) {
+func (DefaultBackend) Clip(r *Renderer, clips *Clips, matrix Matrix, parent *GeometryPath) (*GeometryPath, error) {
 	p, err := geometryToCanvasPath(parent)
 	if err != nil {
 		return nil, err

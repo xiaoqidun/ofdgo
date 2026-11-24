@@ -514,12 +514,18 @@ func (r *pdfTextReplacements) markedContent(mark pdfgo.MarkedContentMark) error 
 	return nil
 }
 
+// pdfClipTextEntry 保存文字裁剪转换得到的文本对象及竖排替形或旋转后的轮廓路径
+type pdfClipTextEntry struct {
+	texts []TextObject
+	paths []PathObject
+}
+
 // apply 合并可等价表示的替换区段及相邻显式空串连字，原文相同但样式不同的区段保留原图元
 // 入参: nodes 原始图元
 // 返回: []pdfCompositeNode 转换图元, error 取消或语义转换错误
 func (r *pdfTextReplacements) apply(nodes []pdfCompositeNode) ([]pdfCompositeNode, error) {
 	if len(r.order) != 0 {
-		if err := r.count(nodes, false); err != nil {
+		if err := r.count(nodes, false, r.importer.compositeSpace); err != nil {
 			return nil, err
 		}
 		for _, span := range r.order {
@@ -627,9 +633,9 @@ func (r *pdfTextReplacements) mergeEmptyLigatures(nodes []pdfCompositeNode) ([]p
 }
 
 // count 统计区段文字并逐字核对原文，排除需要组级合成的内容
-// 入参: nodes 图元, blocked 上层组是否阻止直接转换
+// 入参: nodes 图元, blocked 上层组是否阻止直接转换, space 当前继承的混合色彩空间
 // 返回: error 取消错误
-func (r *pdfTextReplacements) count(nodes []pdfCompositeNode, blocked bool) error {
+func (r *pdfTextReplacements) count(nodes []pdfCompositeNode, blocked bool, space *pdfgo.ColorSpace) error {
 	for _, node := range nodes {
 		if err := r.importer.ctx.Err(); err != nil {
 			return err
@@ -655,25 +661,47 @@ func (r *pdfTextReplacements) count(nodes []pdfCompositeNode, blocked bool) erro
 				}
 			}
 		}
+		childSpace := space
 		childBlocked := blocked
 		if group := node.group; group != nil && node.textObject == nil {
-			opaque, err := r.importer.opaque(node, group.ColorSpace)
+			if group.ColorSpace != nil {
+				childSpace = group.ColorSpace
+			}
+			opaque, err := r.importer.opaque(node, childSpace)
 			if err := r.importer.ctx.Err(); err != nil {
 				return err
 			}
-			childBlocked = childBlocked || !opaque || err != nil || group.ColorSpace != nil && !group.ColorSpace.SRGBEquivalent()
+			childBlocked = childBlocked || !opaque || err != nil || childSpace != nil && !childSpace.SRGBEquivalent()
 		}
-		if err := r.count(node.children, childBlocked); err != nil {
+		if err := r.count(node.children, childBlocked, childSpace); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// merge 合并同层连续图元，保留原始绘制顺序与字形坐标
+// merge 合并同层连续图元，保留原始绘制顺序、字形坐标与合法表单复用区间
 // 入参: nodes 图元
 // 返回: []pdfCompositeNode 合并结果, error 取消错误
 func (r *pdfTextReplacements) merge(nodes []pdfCompositeNode) ([]pdfCompositeNode, error) {
+	type formRange struct {
+		start int
+		end   int
+		mark  *pdfgo.FormMark
+	}
+	origLen := len(nodes)
+	var origForms []formRange
+	for idx := range nodes {
+		for _, sp := range nodes[idx].forms {
+			if sp.count > 0 && idx+sp.count <= origLen {
+				origForms = append(origForms, formRange{start: idx, end: idx + sp.count, mark: sp.mark})
+			}
+		}
+	}
+	var oldToNew []int
+	if len(origForms) != 0 {
+		oldToNew = make([]int, origLen)
+	}
 	result := nodes[:0]
 	for i := 0; i < len(nodes); {
 		if err := r.importer.ctx.Err(); err != nil {
@@ -747,15 +775,44 @@ func (r *pdfTextReplacements) merge(nodes []pdfCompositeNode) ([]pdfCompositeNod
 				}
 			}
 		}
-		node.forms = nil
+		newIdx := len(result)
 		result = append(result, node)
+		if oldToNew != nil {
+			if combined {
+				for k := i; k < end; k++ {
+					oldToNew[k] = newIdx
+				}
+			} else {
+				oldToNew[i] = newIdx
+			}
+		}
 		if !combined {
-			for _, remaining := range nodes[i+1 : end] {
-				remaining.forms = nil
-				result = append(result, remaining)
+			for k := i + 1; k < end; k++ {
+				if oldToNew != nil {
+					oldToNew[k] = len(result)
+				}
+				result = append(result, nodes[k])
 			}
 		}
 		i = end
+	}
+	if len(origForms) != 0 && len(result) != origLen {
+		for k := range result {
+			result[k].forms = nil
+		}
+		for _, fr := range origForms {
+			if fr.start > 0 && oldToNew[fr.start] == oldToNew[fr.start-1] {
+				continue
+			}
+			if fr.end < origLen && oldToNew[fr.end] == oldToNew[fr.end-1] {
+				continue
+			}
+			newStart := oldToNew[fr.start]
+			newEnd := oldToNew[fr.end-1] + 1
+			if newEnd > newStart {
+				result[newStart].forms = append(result[newStart].forms, pdfFormSpan{mark: fr.mark, count: newEnd - newStart})
+			}
+		}
 	}
 	clear(nodes[len(result):])
 	return result, nil
@@ -1017,11 +1074,11 @@ func (p *pdfImporter) textRender(mark pdfgo.TextMark, widthScale float64, skipSp
 	}
 	fill, stroke, visible := paintMode == 0 || paintMode == 2, paintMode == 1 || paintMode == 2, true
 	var vertMap map[uint16]uint16
-	if !embedded && !skipSplit && mark.Replacement == nil && mark.Clip == nil && len(mark.Glyphs) > 0 {
-		if font.Vertical && paintMode != 3 {
+	if !embedded && !skipSplit && mark.Replacement == nil && len(mark.Glyphs) > 0 {
+		if font.Vertical && (paintMode != 3 || mark.Clip != nil) {
 			fbMetrics, fbVert := p.fallbackExternalFont(id)
 			if fbOutline, ok := fbMetrics.(FontOutlines); ok && fbOutline != nil {
-				if !stroke && fill {
+				if !stroke && (fill || mark.Clip != nil) {
 					flags := make([]bool, len(mark.Glyphs))
 					anyFlag, allFlag := false, true
 					for i, glyph := range mark.Glyphs {
@@ -1038,6 +1095,7 @@ func (p *pdfImporter) textRender(mark pdfgo.TextMark, widthScale float64, skipSp
 					if allFlag {
 						forceOutlineFill = true
 					} else if anyFlag {
+						var clipEntry pdfClipTextEntry
 						for s := 0; s < len(mark.Glyphs); {
 							e := s + 1
 							for e < len(mark.Glyphs) && flags[e] == flags[s] {
@@ -1045,10 +1103,25 @@ func (p *pdfImporter) textRender(mark pdfgo.TextMark, widthScale float64, skipSp
 							}
 							sub := mark
 							sub.Glyphs, sub.Positions = mark.Glyphs[s:e], mark.Positions[s:e]
+							if mark.Clip != nil {
+								sub.Clip = new(pdfgo.TextClip)
+							}
 							if err := p.textRender(sub, 1, true, flags[s], false); err != nil {
 								return err
 							}
+							if sub.Clip != nil {
+								part := p.clipTexts[sub.Clip]
+								clipEntry.texts = append(clipEntry.texts, part.texts...)
+								clipEntry.paths = append(clipEntry.paths, part.paths...)
+								delete(p.clipTexts, sub.Clip)
+							}
 							s = e
+						}
+						if mark.Clip != nil {
+							if p.clipTexts == nil {
+								p.clipTexts = make(map[*pdfgo.TextClip]pdfClipTextEntry)
+							}
+							p.clipTexts[mark.Clip] = clipEntry
 						}
 						return nil
 					}
@@ -1067,6 +1140,7 @@ func (p *pdfImporter) textRender(mark pdfgo.TextMark, widthScale float64, skipSp
 				if allFlag {
 					verticalRotateText = true
 				} else if anyFlag {
+					var clipEntry pdfClipTextEntry
 					for s := 0; s < len(mark.Glyphs); {
 						e := s + 1
 						for e < len(mark.Glyphs) && flags[e] == flags[s] {
@@ -1074,15 +1148,30 @@ func (p *pdfImporter) textRender(mark pdfgo.TextMark, widthScale float64, skipSp
 						}
 						sub := mark
 						sub.Glyphs, sub.Positions = mark.Glyphs[s:e], mark.Positions[s:e]
+						if mark.Clip != nil {
+							sub.Clip = new(pdfgo.TextClip)
+						}
 						if err := p.textRender(sub, 1, true, false, flags[s]); err != nil {
 							return err
 						}
+						if sub.Clip != nil {
+							part := p.clipTexts[sub.Clip]
+							clipEntry.texts = append(clipEntry.texts, part.texts...)
+							clipEntry.paths = append(clipEntry.paths, part.paths...)
+							delete(p.clipTexts, sub.Clip)
+						}
 						s = e
+					}
+					if mark.Clip != nil {
+						if p.clipTexts == nil {
+							p.clipTexts = make(map[*pdfgo.TextClip]pdfClipTextEntry)
+						}
+						p.clipTexts[mark.Clip] = clipEntry
 					}
 					return nil
 				}
 			}
-		} else if !font.Vertical {
+		} else if !font.Vertical && mark.Clip == nil {
 			fbMetrics, _ := p.fallbackExternalFont(id)
 			if scales, changed := pdfSimpleFontWidthScales(font, mark.Glyphs, fbMetrics); changed {
 				same := true
@@ -1148,7 +1237,7 @@ func (p *pdfImporter) textRender(mark pdfgo.TextMark, widthScale float64, skipSp
 		}
 	}
 	outlineStroke := stroke && outline != nil
-	outlineFill := forceOutlineFill && fill && !stroke && outline != nil
+	outlineFill := forceOutlineFill && (fill || mark.Clip != nil) && !stroke && outline != nil
 	outlineDraw := outlineStroke || outlineFill
 	var glyphPaths []pdfgo.Path
 	const unit = 25.4 / 72
@@ -1374,8 +1463,8 @@ func (p *pdfImporter) textRender(mark pdfgo.TextMark, widthScale float64, skipSp
 		box = Box{X: box.X - margin, Y: box.Y - margin, W: box.W + 2*margin, H: box.H + 2*margin}
 		object.LineWidth = lineWidth / scale
 		object.LineWidthSet = object.LineWidth == 0
-		object.Cap = []string{"Butt", "Round", "Square"}[mark.Style.Cap]
-		object.Join = []string{"Miter", "Round", "Bevel"}[mark.Style.Join]
+		object.Cap = pdfLineCapName(mark.Style.Cap)
+		object.Join = pdfLineJoinName(mark.Style.Join)
 		object.MiterLimit = mark.Style.MiterLimit
 		if len(mark.Style.Dash) > 0 {
 			strokeScale := math.Hypot(p.matrix[0], p.matrix[1]) * sx / scale
@@ -1415,18 +1504,33 @@ func (p *pdfImporter) textRender(mark pdfgo.TextMark, widthScale float64, skipSp
 		return err
 	}
 	if mark.Clip != nil {
-		clipObject := object
-		clipObject.Clips = nil
-		clipObject.Fill, clipObject.Stroke = new(bool), new(bool)
-		*clipObject.Fill = true
-		*clipObject.Stroke = false
-		clipObject.Visible = nil
-		if p.clipTexts == nil {
-			p.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
+		var entry pdfClipTextEntry
+		if outlineFill {
+			for _, path := range glyphPaths {
+				if len(path.Segments) == 0 {
+					continue
+				}
+				encoded, clipErr := p.clipPath(path)
+				if clipErr != nil {
+					return clipErr
+				}
+				entry.paths = append(entry.paths, encoded.path[0])
+			}
+		} else {
+			clipObject := object
+			clipObject.Clips = nil
+			clipObject.Fill, clipObject.Stroke = new(bool), new(bool)
+			*clipObject.Fill = true
+			*clipObject.Stroke = false
+			clipObject.Visible = nil
+			entry.texts = []TextObject{clipObject}
 		}
-		p.clipTexts[mark.Clip] = []TextObject{clipObject}
+		if p.clipTexts == nil {
+			p.clipTexts = make(map[*pdfgo.TextClip]pdfClipTextEntry)
+		}
+		p.clipTexts[mark.Clip] = entry
 	}
-	if outlineDraw {
+	if outlineDraw && (fill || outlineStroke) {
 		for _, path := range glyphPaths {
 			if len(path.Segments) == 0 {
 				continue
@@ -1461,7 +1565,7 @@ func (p *pdfImporter) degenerateText(mark pdfgo.TextMark) error {
 	if scale == 0 {
 		scale, x = 1, 0
 	}
-	var clips []TextObject
+	var clips pdfClipTextEntry
 	for index, position := range mark.Positions {
 		glyph := mark
 		glyph.Size, glyph.HorizontalScale = size, scale
@@ -1475,13 +1579,15 @@ func (p *pdfImporter) degenerateText(mark pdfgo.TextMark) error {
 			return err
 		}
 		if glyph.Clip != nil {
-			clips = append(clips, p.clipTexts[glyph.Clip]...)
+			part := p.clipTexts[glyph.Clip]
+			clips.texts = append(clips.texts, part.texts...)
+			clips.paths = append(clips.paths, part.paths...)
 			delete(p.clipTexts, glyph.Clip)
 		}
 	}
 	if mark.Clip != nil {
 		if p.clipTexts == nil {
-			p.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
+			p.clipTexts = make(map[*pdfgo.TextClip]pdfClipTextEntry)
 		}
 		p.clipTexts[mark.Clip] = clips
 	}

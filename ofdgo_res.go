@@ -92,25 +92,16 @@ type DrawParams struct {
 type DrawParam struct {
 	ID             string       `xml:"ID,attr"`
 	Relative       string       `xml:"Relative,attr"`
-	ResourceID     string       `xml:"ResourceID,attr"`
-	BaseLoc        string       `xml:"BaseLoc,attr"`
-	Link           string       `xml:"Link,attr"`
 	LineWidth      float64      `xml:"LineWidth,attr"`
 	Join           string       `xml:"Join,attr"`
 	Cap            string       `xml:"Cap,attr"`
 	DashOffset     *float64     `xml:"DashOffset,attr"`
 	DashPattern    string       `xml:"DashPattern,attr"`
 	MiterLimit     float64      `xml:"MiterLimit,attr"`
-	Font           string       `xml:"Font,attr"`
-	Size           float64      `xml:"Size,attr"`
-	Weight         int          `xml:"Weight,attr"`
-	Italic         bool         `xml:"Italic,attr"`
 	FillColor      *FillColor   `xml:"FillColor"`
 	StrokeColor    *StrokeColor `xml:"StrokeColor"`
 	LineWidthSet   bool         `xml:"-"`
 	MiterLimitSet  bool         `xml:"-"`
-	WeightSet      bool         `xml:"-"`
-	ItalicSet      bool         `xml:"-"`
 	DashPatternSet bool         `xml:"-"`
 }
 
@@ -119,40 +110,20 @@ type CompositeGraphicUnits struct {
 	CompositeGraphicUnit []CompositeGraphicUnit `xml:"CompositeGraphicUnit"`
 }
 
-// CompositeGraphicUnit 复合图元
-// Width、Height、Thumbnail和Substitution用于矢量资源定义
+// CompositeGraphicUnit 复合图元资源定义
 type CompositeGraphicUnit struct {
-	ID                   string                 `xml:"ID,attr"`
-	Name                 string                 `xml:"Name,attr"`
-	BaseLoc              string                 `xml:"BaseLoc,attr"`
-	ResourceID           string                 `xml:"ResourceID,attr"`
-	Boundary             string                 `xml:"Boundary,attr"`
-	CTM                  string                 `xml:"CTM,attr"`
-	DrawParam            string                 `xml:"DrawParam,attr"`
-	LineWidth            float64                `xml:"LineWidth,attr"`
-	Cap                  string                 `xml:"Cap,attr"`
-	Join                 string                 `xml:"Join,attr"`
-	MiterLimit           float64                `xml:"MiterLimit,attr"`
-	DashOffset           *float64               `xml:"DashOffset,attr"`
-	DashPattern          string                 `xml:"DashPattern,attr"`
-	Alpha                *int                   `xml:"Alpha,attr"`
-	Visible              *bool                  `xml:"Visible,attr"`
-	Width                float64                `xml:"Width,attr"`
-	Height               float64                `xml:"Height,attr"`
-	Thumbnail            string                 `xml:"Thumbnail"`
-	Substitution         string                 `xml:"Substitution"`
-	Objects              []GraphicObject        `xml:"-"`
-	TextObject           []TextObject           `xml:"TextObject"`
-	PathObject           []PathObject           `xml:"PathObject"`
-	ImageObject          []ImageObject          `xml:"ImageObject"`
-	CompositeGraphicUnit []CompositeGraphicUnit `xml:"CompositeGraphicUnit"`
-	Clips                *Clips                 `xml:"Clips"`
-	Actions              []Action               `xml:"Actions>Action"`
-	LineWidthSet         bool                   `xml:"-"`
-	MiterLimitSet        bool                   `xml:"-"`
-	DashPatternSet       bool                   `xml:"-"`
-	states               map[string]editorCompositeState
-	extentSet            bool
+	ID              string            `xml:"ID,attr"`
+	Width           float64           `xml:"Width,attr"`
+	Height          float64           `xml:"Height,attr"`
+	Thumbnail       string            `xml:"Thumbnail"`
+	Substitution    string            `xml:"Substitution"`
+	Objects         []GraphicObject   `xml:"-"`
+	TextObject      []TextObject      `xml:"TextObject"`
+	PathObject      []PathObject      `xml:"PathObject"`
+	ImageObject     []ImageObject     `xml:"ImageObject"`
+	CompositeObject []CompositeObject `xml:"CompositeObject"`
+	PageBlock       []PageBlock       `xml:"PageBlock"`
+	extentSet       bool
 }
 
 // resourceIndex 提供原始标识与标准十进制标识的常数时间查找索引

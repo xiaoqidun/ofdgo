@@ -492,14 +492,191 @@ func resPathFast(r *Reader, rootDir, baseLoc string) string {
 	return r.ResPath(baseLoc)
 }
 
-// OFD 返回包入口OFD.xml的只读副本，切片已克隆避免篡改内部状态
+// cloneDocVersions 深拷贝文档版本列表
+// 入参: versions 原版本列表指针
+// 返回: *DocVersions 独立副本
+func cloneDocVersions(versions *DocVersions) *DocVersions {
+	if versions == nil {
+		return nil
+	}
+	return &DocVersions{Version: slices.Clone(versions.Version)}
+}
+
+// cloneDocInfo 深拷贝文档元数据，隔离关键词与自定义数据切片
+// 入参: info 原文档元数据
+// 返回: *DocInfo 独立副本
+func cloneDocInfo(info *DocInfo) *DocInfo {
+	if info == nil {
+		return nil
+	}
+	copied := *info
+	copied.Keywords = slices.Clone(info.Keywords)
+	if info.CustomDatas != nil {
+		copied.CustomDatas = &CustomDatas{CustomData: slices.Clone(info.CustomDatas.CustomData)}
+	}
+	return &copied
+}
+
+// cloneAction 深拷贝单个文档动作及其所有指针和切片字段
+// 入参: action 原动作
+// 返回: Action 独立副本
+func cloneAction(action Action) Action {
+	copied := Action{Event: action.Event}
+	if action.Region != nil {
+		areas := make([]RegionArea, len(action.Region.Area))
+		for i, area := range action.Region.Area {
+			areas[i] = RegionArea{Start: area.Start, Command: slices.Clone(area.Command)}
+		}
+		copied.Region = &Region{Area: areas}
+	}
+	if action.Goto != nil {
+		gotoCopy := &Goto{}
+		if action.Goto.Dest != nil {
+			dest := action.Goto.Dest.effective()
+			gotoCopy.Dest = &dest
+		}
+		if action.Goto.Bookmark != nil {
+			bookmark := *action.Goto.Bookmark
+			gotoCopy.Bookmark = &bookmark
+		}
+		copied.Goto = gotoCopy
+	}
+	if action.URI != nil {
+		uri := *action.URI
+		copied.URI = &uri
+	}
+	if action.GotoA != nil {
+		gotoA := GotoA{AttachID: action.GotoA.AttachID}
+		if action.GotoA.NewWindow != nil {
+			v := *action.GotoA.NewWindow
+			gotoA.NewWindow = &v
+		}
+		copied.GotoA = &gotoA
+	}
+	if action.Sound != nil {
+		sound := *action.Sound
+		if action.Sound.Volume != nil {
+			v := *action.Sound.Volume
+			sound.Volume = &v
+		}
+		copied.Sound = &sound
+	}
+	if action.Movie != nil {
+		movie := *action.Movie
+		copied.Movie = &movie
+	}
+	return copied
+}
+
+// cloneActions 深拷贝动作切片
+// 入参: actions 原动作列表
+// 返回: []Action 独立副本
+func cloneActions(actions []Action) []Action {
+	if actions == nil {
+		return nil
+	}
+	result := make([]Action, len(actions))
+	for i, action := range actions {
+		result[i] = cloneAction(action)
+	}
+	return result
+}
+
+// cloneOutlines 递归深拷贝文档大纲切片及其动作列表
+// 入参: outlines 原大纲列表
+// 返回: []OutlineElem 独立副本
+func cloneOutlines(outlines []OutlineElem) []OutlineElem {
+	if outlines == nil {
+		return nil
+	}
+	result := make([]OutlineElem, len(outlines))
+	for i, elem := range outlines {
+		result[i] = OutlineElem{
+			Title:       elem.Title,
+			Count:       elem.Count,
+			Expanded:    elem.Expanded,
+			Actions:     cloneActions(elem.Actions),
+			OutlineElem: cloneOutlines(elem.OutlineElem),
+		}
+	}
+	return result
+}
+
+// cloneBookmarks 深拷贝书签切片及其跳转目标指针字段
+// 入参: bookmarks 原书签列表
+// 返回: []Bookmark 独立副本
+func cloneBookmarks(bookmarks []Bookmark) []Bookmark {
+	if bookmarks == nil {
+		return nil
+	}
+	result := make([]Bookmark, len(bookmarks))
+	for i, bookmark := range bookmarks {
+		result[i] = Bookmark{Name: bookmark.Name, Dest: bookmark.Dest.effective()}
+	}
+	return result
+}
+
+// cloneDocument 深拷贝文档结构，保留权限声明标记并隔离全部切片与指针字段
+// 入参: doc 原文档结构
+// 返回: *Document 独立副本
+func cloneDocument(doc *Document) *Document {
+	if doc == nil {
+		return nil
+	}
+	copied := *doc
+	copied.CommonData.PublicRes = slices.Clone(doc.CommonData.PublicRes)
+	copied.CommonData.DocumentRes = slices.Clone(doc.CommonData.DocumentRes)
+	copied.CommonData.TemplatePage = slices.Clone(doc.CommonData.TemplatePage)
+	copied.Pages.Page = slices.Clone(doc.Pages.Page)
+	copied.Outlines.OutlineElem = cloneOutlines(doc.Outlines.OutlineElem)
+	copied.Permissions = *clonePermissions(&doc.Permissions)
+	copied.Actions = cloneActions(doc.Actions)
+	copied.VPreferences = cloneVPreferences(doc.VPreferences)
+	copied.Bookmarks.Bookmark = cloneBookmarks(doc.Bookmarks.Bookmark)
+	if doc.Attachments.Attachment != nil {
+		attachments := make([]Attachment, len(doc.Attachments.Attachment))
+		for i, attachment := range doc.Attachments.Attachment {
+			attachment.Size = cloneFloat64Ptr(attachment.Size)
+			attachments[i] = attachment
+		}
+		copied.Attachments.Attachment = attachments
+	}
+	copied.CustomTags.CustomTag = slices.Clone(doc.CustomTags.CustomTag)
+	if doc.Extensions.Extension != nil {
+		extensions := make([]Extension, len(doc.Extensions.Extension))
+		for i, ext := range doc.Extensions.Extension {
+			ext.Property = slices.Clone(ext.Property)
+			ext.ExtendData = slices.Clone(ext.ExtendData)
+			if ext.Data != nil {
+				data := make([]ExtensionData, len(ext.Data))
+				for j, item := range ext.Data {
+					item.Attr = slices.Clone(item.Attr)
+					data[j] = item
+				}
+				ext.Data = data
+			}
+			extensions[i] = ext
+		}
+		copied.Extensions.Extension = extensions
+	}
+	return &copied
+}
+
+// OFD 返回包入口OFD.xml的只读深拷贝副本，避免篡改内部状态
 // 返回: OFD 入口结构副本
 func (r *Reader) OFD() OFD {
 	if r == nil || r.ofd == nil {
 		return OFD{}
 	}
 	doc := *r.ofd
-	doc.DocBody = slices.Clone(doc.DocBody)
+	if r.ofd.DocBody != nil {
+		doc.DocBody = make([]DocBody, len(r.ofd.DocBody))
+		for i, body := range r.ofd.DocBody {
+			body.DocInfo = *cloneDocInfo(&body.DocInfo)
+			body.Versions = cloneDocVersions(body.Versions)
+			doc.DocBody[i] = body
+		}
+	}
 	return doc
 }
 
@@ -657,23 +834,40 @@ func (r *Reader) DocumentContext(ctx context.Context, index int) (*Reader, error
 	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}
-	if _, err := next.DocContext(ctx); err != nil {
+	if _, err := next.docContext(ctx); err != nil {
 		return nil, err
 	}
 	next.bindEncryptionHold()
 	return next, nil
 }
 
-// Doc 获取当前文档结构
-// 返回: *Document 文档结构, error 错误信息
+// Doc 获取当前文档结构的独立副本
+// 返回: *Document 文档结构副本, error 错误信息
 func (r *Reader) Doc() (*Document, error) {
 	return r.DocContext(context.Background())
 }
 
-// DocContext 获取当前文档结构及关联内容，取消或失败时保留原阅读状态
+// DocContext 获取当前文档结构及关联内容的独立副本，取消或失败时保留原阅读状态
 // 入参: ctx 取消上下文
-// 返回: *Document 文档结构, error 读取或取消错误
+// 返回: *Document 文档结构副本, error 读取或取消错误
 func (r *Reader) DocContext(ctx context.Context) (*Document, error) {
+	doc, err := r.docContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return cloneDocument(doc), nil
+}
+
+// docInternal 返回内部共享文档结构供包内只读使用
+// 返回: *Document 内部文档结构, error 错误信息
+func (r *Reader) docInternal() (*Document, error) {
+	return r.docContext(context.Background())
+}
+
+// docContext 加载当前文档结构及关联内容并返回内部共享结构，供包内只读路径避免额外拷贝
+// 入参: ctx 取消上下文
+// 返回: *Document 内部文档结构, error 读取或取消错误
+func (r *Reader) docContext(ctx context.Context) (*Document, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -712,17 +906,21 @@ func (r *Reader) DocContext(ctx context.Context) (*Document, error) {
 	return doc, nil
 }
 
-// DocStructure 获取当前文档结构与资源索引，不预加载全包批注与印章媒体
-// 返回: *Document 文档结构, error 错误信息
+// DocStructure 获取当前文档结构与资源索引的独立副本，不预加载全包批注与印章媒体
+// 返回: *Document 文档结构副本, error 错误信息
 func (r *Reader) DocStructure() (*Document, error) {
 	return r.DocStructureContext(context.Background())
 }
 
-// DocStructureContext 获取当前文档结构与资源索引并响应取消，批注与印章保留按需惰性加载
+// DocStructureContext 获取当前文档结构与资源索引的独立副本并响应取消，批注与印章保留按需惰性加载
 // 入参: ctx 取消上下文
-// 返回: *Document 文档结构, error 读取或取消错误
+// 返回: *Document 文档结构副本, error 读取或取消错误
 func (r *Reader) DocStructureContext(ctx context.Context) (*Document, error) {
-	return r.docStructureContext(ctx)
+	doc, err := r.docStructureContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return cloneDocument(doc), nil
 }
 
 // PageContent 获取页面内容
@@ -973,53 +1171,53 @@ func (r *Reader) DocType() string {
 	return r.ofd.DocType
 }
 
-// DocInfo 获取文档元数据
-// 返回: *DocInfo 元数据, error 错误信息
+// DocInfo 获取文档元数据的独立副本
+// 返回: *DocInfo 元数据副本, error 错误信息
 func (r *Reader) DocInfo() (*DocInfo, error) {
 	if r.ofd == nil || r.documentIndex < 0 || r.documentIndex >= len(r.ofd.DocBody) {
 		return nil, fmt.Errorf("no docbody found")
 	}
-	return &r.ofd.DocBody[r.documentIndex].DocInfo, nil
+	return cloneDocInfo(&r.ofd.DocBody[r.documentIndex].DocInfo), nil
 }
 
-// Permissions 获取文档权限信息，不加载注解或签名
-// 返回: *Permissions 权限信息, error 错误信息
+// Permissions 获取文档权限信息的独立副本，不加载注解或签名
+// 返回: *Permissions 权限信息副本, error 错误信息
 func (r *Reader) Permissions() (*Permissions, error) {
 	doc, err := r.docStructure()
 	if err != nil {
 		return nil, err
 	}
-	return &doc.Permissions, nil
+	return clonePermissions(&doc.Permissions), nil
 }
 
-// Outlines 获取文档大纲，不加载注解或签名
-// 返回: []OutlineElem 大纲列表, error 错误信息
+// Outlines 获取文档大纲的独立副本，不加载注解或签名
+// 返回: []OutlineElem 大纲列表副本, error 错误信息
 func (r *Reader) Outlines() ([]OutlineElem, error) {
 	doc, err := r.docStructure()
 	if err != nil {
 		return nil, err
 	}
-	return doc.Outlines.OutlineElem, nil
+	return cloneOutlines(doc.Outlines.OutlineElem), nil
 }
 
-// Actions 获取文档动作，不加载注解或签名
-// 返回: []Action 动作列表, error 错误信息
+// Actions 获取文档动作的独立副本，不加载注解或签名
+// 返回: []Action 动作列表副本, error 错误信息
 func (r *Reader) Actions() ([]Action, error) {
 	doc, err := r.docStructure()
 	if err != nil {
 		return nil, err
 	}
-	return doc.Actions, nil
+	return cloneActions(doc.Actions), nil
 }
 
-// Bookmarks 获取文档书签，不加载注解或签名
-// 返回: []Bookmark 书签列表, error 错误信息
+// Bookmarks 获取文档书签的独立副本，不加载注解或签名
+// 返回: []Bookmark 书签列表副本, error 错误信息
 func (r *Reader) Bookmarks() ([]Bookmark, error) {
 	doc, err := r.docStructure()
 	if err != nil {
 		return nil, err
 	}
-	return doc.Bookmarks.Bookmark, nil
+	return cloneBookmarks(doc.Bookmarks.Bookmark), nil
 }
 
 // Attachments 获取独立的附件列表，修改返回值不影响阅读器缓存
@@ -1138,7 +1336,7 @@ func (r *Reader) CustomTagsContext(ctx context.Context) ([]CustomTag, error) {
 		}
 		doc.CustomTags.CustomTag = customTags.CustomTag
 	}
-	return doc.CustomTags.CustomTag, nil
+	return slices.Clone(doc.CustomTags.CustomTag), nil
 }
 
 // CustomDatas 获取自定义数据

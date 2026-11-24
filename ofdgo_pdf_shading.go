@@ -1228,20 +1228,20 @@ func (c *pdfCompositor) mesh(mesh *pdfgo.MeshGradient, space *pdfgo.ColorSpace, 
 	if err != nil {
 		return nil, err
 	}
-	triangles, ok := c.cache.meshes[mesh]
+	prepared, ok := c.cache.meshes[mesh]
 	if !ok {
 		var err error
-		triangles, err = codecpdf.MeshTriangles(c.importer.ctx, mesh, c.importer.matrix, c.importer.rasterDPI)
+		prepared, err = codecpdf.PrepareMesh(c.importer.ctx, mesh, c.importer.matrix)
 		if err != nil {
 			return nil, err
 		}
 		if c.cache.meshes == nil {
-			c.cache.meshes = map[*pdfgo.MeshGradient][]codecpdf.MeshTriangle{}
+			c.cache.meshes = map[*pdfgo.MeshGradient]*codecpdf.MeshPrepared{}
 		}
-		c.cache.meshes[mesh] = triangles
+		c.cache.meshes[mesh] = prepared
 	}
 	options := codecpdf.MeshRasterOptions{Matrix: c.importer.matrix, Origin: pdfgo.Point{X: c.box.X, Y: c.box.Y}, DPI: c.importer.rasterDPI, Width: c.width, Height: c.height, Workers: conversionWorkers(c.importer.ctx), SoftMask: c.softMask}
-	pixels, err := codecpdf.MeshPixels(c.importer.ctx, mesh, triangles, space, converter, options)
+	pixels, err := codecpdf.MeshRasterPrepared(c.importer.ctx, mesh, prepared, space, converter, options)
 	if err != nil {
 		return nil, err
 	}

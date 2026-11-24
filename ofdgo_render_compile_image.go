@@ -111,7 +111,7 @@ func (c *semanticCompiler) imageObject(object ImageObject, state RenderState) er
 		}
 		bounds := img.Bounds()
 		placed := matrix.Multiply(Matrix{a: 1 / float64(bounds.Dx()), d: 1 / float64(bounds.Dy())}).Multiply(TranslationMatrix(-float64(bounds.Min.X), -float64(bounds.Min.Y)))
-		if err := c.addImage(img, placed, clip, object.Interpolate); err != nil {
+		if err := c.addImage(img, placed, clip, object.interpolate); err != nil {
 			return err
 		}
 	}
@@ -185,7 +185,7 @@ func (c *semanticCompiler) drawStampContent(stamp Stamp) error {
 			return err
 		}
 		defer reader.Close()
-		document, err := reader.DocContext(ctx)
+		document, err := reader.docContext(ctx)
 		if err != nil {
 			return err
 		}

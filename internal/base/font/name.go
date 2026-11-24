@@ -36,24 +36,40 @@ type fontNameRecord struct {
 // 入参: file 字体数据
 // 返回: [][]string 各字体名称及带样式的字体族名称
 func FileNames(file io.ReaderAt) [][]string {
+	if file == nil {
+		return nil
+	}
 	var header [12]byte
-	if _, err := file.ReadAt(header[:], 0); err != nil {
+	if err := readAtFull(file, header[:], 0); err != nil {
 		return nil
 	}
 	if string(header[:4]) != "ttcf" {
-		return [][]string{fontFaceNames(file, 0)}
+		return [][]string{fontFaceNames(file, 0, nil)}
 	}
 	version := binary.BigEndian.Uint32(header[4:])
 	if version != 0x00010000 && version != 0x00020000 {
 		return nil
 	}
-	var faces [][]string
-	for i, count := uint32(0), binary.BigEndian.Uint32(header[8:]); i < count; i++ {
-		var entry [4]byte
-		if _, err := file.ReadAt(entry[:], 12+int64(i)*4); err != nil {
-			return nil
+	count := uint64(binary.BigEndian.Uint32(header[8:]))
+	if count == 0 || count > maxFaceCount {
+		return nil
+	}
+	rawOffsets := make([]byte, count*4)
+	if err := readAtFull(file, rawOffsets, 12); err != nil {
+		return nil
+	}
+	faces := make([][]string, 0, count)
+	faceCache := make(map[uint64][]string)
+	tableCache := make(map[[2]uint64][]string)
+	for i := uint64(0); i < count; i++ {
+		faceOffset := uint64(binary.BigEndian.Uint32(rawOffsets[i*4:]))
+		if cached, ok := faceCache[faceOffset]; ok {
+			faces = append(faces, append([]string(nil), cached...))
+			continue
 		}
-		faces = append(faces, fontFaceNames(file, int64(binary.BigEndian.Uint32(entry[:]))))
+		names := fontFaceNames(file, int64(faceOffset), tableCache)
+		faceCache[faceOffset] = names
+		faces = append(faces, append([]string(nil), names...))
 	}
 	return faces
 }
@@ -67,11 +83,14 @@ func NamesFromTable(data []byte) []string {
 }
 
 // fontFaceNames 读取指定字体表目录中的名称
-// 入参: file 字体数据, offset 字体表目录偏移
+// 入参: file 字体数据, offset 字体表目录偏移, tableCache 名称表解析缓存，可为nil
 // 返回: []string 字体名称及带样式的字体族名称
-func fontFaceNames(file io.ReaderAt, offset int64) []string {
+func fontFaceNames(file io.ReaderAt, offset int64, tableCache map[[2]uint64][]string) []string {
+	if offset < 0 {
+		return nil
+	}
 	var header [12]byte
-	if _, err := file.ReadAt(header[:], offset); err != nil {
+	if err := readAtFull(file, header[:], offset); err != nil {
 		return nil
 	}
 	switch string(header[:4]) {
@@ -79,21 +98,38 @@ func fontFaceNames(file io.ReaderAt, offset int64) []string {
 	default:
 		return nil
 	}
-	entries := make([]byte, int(binary.BigEndian.Uint16(header[4:]))*16)
-	if _, err := file.ReadAt(entries, offset+12); err != nil {
+	tableCount := uint64(binary.BigEndian.Uint16(header[4:]))
+	if tableCount == 0 || tableCount > maxFaceTableCount {
+		return nil
+	}
+	entries := make([]byte, tableCount*16)
+	if err := readAtFull(file, entries, offset+12); err != nil {
 		return nil
 	}
 	for i := 0; i < len(entries); i += 16 {
 		if string(entries[i:i+4]) != "name" {
 			continue
 		}
-		offset := int64(binary.BigEndian.Uint32(entries[i+8:]))
-		length := int64(binary.BigEndian.Uint32(entries[i+12:]))
-		data, err := io.ReadAll(io.NewSectionReader(file, offset, length))
-		if err != nil {
+		tableOffset := uint64(binary.BigEndian.Uint32(entries[i+8:]))
+		length := uint64(binary.BigEndian.Uint32(entries[i+12:]))
+		if length == 0 || length > maxFaceTableSize {
 			return nil
 		}
-		return NamesFromTable(data)
+		key := [2]uint64{tableOffset, length}
+		if tableCache != nil {
+			if cached, ok := tableCache[key]; ok {
+				return cached
+			}
+		}
+		data := make([]byte, length)
+		if err := readAtFull(file, data, int64(tableOffset)); err != nil {
+			return nil
+		}
+		names := NamesFromTable(data)
+		if tableCache != nil {
+			tableCache[key] = names
+		}
+		return names
 	}
 	return nil
 }

@@ -488,7 +488,7 @@ export class PrintDialog {
 		clearTimeout(this.destroyedPrintTimer);
 		this.destroyedPrintTimer = setTimeout(() => {
 			this.destroyedPrintTimer = 0;
-			if (this.destroyed && this.waiting === "browser") this.finishPrint();
+			if (this.destroyed && (this.waiting === "browser" || this.waiting === "native")) this.finishPrint();
 		}, BROWSER_PRINT_DESTROYED_TIMEOUT_MS);
 	}
 
@@ -551,17 +551,18 @@ export class PrintDialog {
 				document.title = this.printTitle = context.name;
 			}
 			this.waiting = this.nativeHost ? "native" : "browser";
+			this.nativePrintController = this.nativeHost ? new AbortController() : null;
 			this.controls();
 			this.status(job.deviceOptions ? "正在提交打印" : "正在打开打印", true);
 			if (job.deviceOptions) {
-				const result = await this.nativeHost.call("print", {...job.deviceOptions, fingerprint:job.fingerprint});
-				this.finishPrint(result?.submitted ? "打印已提交" : "打印作业未被接受");
+				const result = await this.nativeHost.call("print", {...job.deviceOptions, fingerprint:job.fingerprint}, this.nativePrintController.signal);
+				if (this.releasePrint === release) this.finishPrint(result?.submitted ? "打印已提交" : "打印作业未被接受");
 				if (this.current(sequence) && result?.submitted && job.manual && job.sides === "front") {
 					if (job.backContent) { this.el.Sides.value = "back"; this.schedule(); }
 					else this.status("背面为空白");
 				}
 			} else if (this.nativeHost) {
-				const capabilities = await this.nativeHost.call("print.capabilities", {});
+				const capabilities = await this.nativeHost.call("print.capabilities", {}, this.nativePrintController.signal);
 				if (!this.current(sequence)) throw new DOMException("打印已取消", "AbortError");
 				if (!capabilities.systemDialog) throw new Error("当前运行时不支持系统打印");
 				if (!capabilities.dialogCompletion) {
@@ -569,8 +570,8 @@ export class PrintDialog {
 					this.controls();
 					this.watchBrowserPrint();
 				}
-				await this.nativeHost.call("print.dialog", {kind:"system"});
-				if (capabilities.dialogCompletion) this.finishPrint("打印窗口已关闭");
+				await this.nativeHost.call("print.dialog", {kind:"system"}, this.nativePrintController.signal);
+				if (capabilities.dialogCompletion && this.releasePrint === release) this.finishPrint("打印窗口已关闭");
 			} else if (typeof window.print === "function") {
 				this.watchBrowserPrint();
 				window.print();
@@ -598,6 +599,7 @@ export class PrintDialog {
 
 	finishPrint(message = "") {
 		this.clearBrowserPrintWatch();
+		this.nativePrintController = null;
 		if (this.previousTitle !== undefined) {
 			if (document.title === this.printTitle) document.title = this.previousTitle;
 			delete this.previousTitle;
@@ -664,7 +666,14 @@ export class PrintDialog {
 		this.close();
 		this.observer.disconnect();
 		window.removeEventListener("beforeprint", this.beforePrint);
-		if (this.waiting === "browser") this.armDestroyedPrintTimeout();
-		else window.removeEventListener("afterprint", this.afterPrint);
+		if (this.waiting === "native") {
+			this.nativePrintController?.abort();
+			this.armDestroyedPrintTimeout();
+			window.removeEventListener("afterprint", this.afterPrint);
+		} else if (this.waiting === "browser") {
+			this.armDestroyedPrintTimeout();
+		} else {
+			window.removeEventListener("afterprint", this.afterPrint);
+		}
 	}
 }

@@ -339,7 +339,7 @@ func (r *Renderer) ObjectGeometry(object GraphicObject, drawParam string) (Box, 
 // 入参: ctx 取消上下文，nil使用后台上下文, object 图形对象, drawParam 图层绘制参数标识
 // 返回: Box 毫米范围, []ObjectContour 绘制轮廓, error 度量或取消错误
 func (r *Renderer) ObjectGeometryContext(ctx context.Context, object GraphicObject, drawParam string) (Box, []ObjectContour, error) {
-	if object.Type != "PathObject" && object.Type != "ImageObject" && object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
+	if object.Type != "PathObject" && object.Type != "ImageObject" && object.Type != "CompositeObject" {
 		return Box{}, nil, fmt.Errorf("contours require a path, image or composite object")
 	}
 	result, err := r.MeasureObjectContext(ctx, object, MeasureOptions{Defaults: r.drawParamDefaults(drawParam, nil), Contours: true})

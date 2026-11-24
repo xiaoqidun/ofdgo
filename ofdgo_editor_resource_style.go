@@ -42,7 +42,7 @@ func applyResourceStyleParts(ctx context.Context, reader *Reader, maximumID uint
 	if maximumID > maxUnitID {
 		return fmt.Errorf("MaxUnitID %d exceeds uint32 range", maximumID)
 	}
-	doc, err := reader.DocContext(ctx)
+	doc, err := reader.docContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -121,7 +121,7 @@ func resourceColorNode(node *editorXML) bool {
 // 入参: ctx 取消上下文, catalog 当前资源目录, targetFile 目标颜色空间所在文件, space 替换后的颜色空间
 // 返回: error 不兼容的色值或调色板索引
 func validateResourceColors(ctx context.Context, catalog *resourceCatalog, targetFile string, space ColorSpace) error {
-	doc, err := catalog.scan.reader.DocContext(ctx)
+	doc, err := catalog.scan.reader.docContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -411,9 +411,6 @@ func (r *Reader) DrawParam(ctx context.Context, id string, resolved bool) (*Draw
 		draw.ID = item.ID
 		if !resolved {
 			return &draw, nil
-		}
-		if draw.ResourceID != "" || draw.Link != "" || draw.BaseLoc != "" {
-			return nil, fmt.Errorf("external draw parameter cannot be resolved")
 		}
 		chain = append(chain, draw)
 		if draw.Relative == "" {

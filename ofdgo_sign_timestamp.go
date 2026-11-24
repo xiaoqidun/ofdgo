@@ -258,6 +258,11 @@ func verifySignatureTimestamp(token, data []byte, altData [][]byte, o SignatureT
 			return err
 		}
 		report.SignedValueOK = verifySM2Signature(pub, nil, signer.AuthAttrs, signer.Signature)
+	} else if signatureMethodText(signer.SignatureAlg) == "1.2.840.113549.1.1.10" {
+		report.SignedValueOK, err = verifyRSAPSSSignature(signer.SignatureAlgRaw, signer.DigestAlg, cert, signer.AuthAttrs, signer.Signature)
+		if err != nil {
+			return err
+		}
 	} else {
 		report.SignedValueOK, err = verifyPublicKeySignature(signer.SignatureAlg, signer.DigestAlg, cert, signer.AuthAttrs, signer.Signature)
 		if err != nil {
@@ -595,7 +600,7 @@ func (report *SignatureVerifyReport) applySignatureTimestamps(ctx context.Contex
 	if o.Policy != nil {
 		options.Required = options.Required || o.Policy.RequireTimestamp
 	}
-	if o.Timestamp != nil && len(options.TrustCerts) == 0 && len(o.TrustCerts) != 0 {
+	if len(options.TrustCerts) == 0 && len(o.TrustCerts) != 0 {
 		options.TrustCerts = appendSignatureCerts(nil, o.TrustCerts...)
 	}
 	if options.VerifyTime == nil && o.VerifyTime != nil {

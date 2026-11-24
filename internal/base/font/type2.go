@@ -120,8 +120,26 @@ func readType2Font(data []byte) (*type2Font, error) {
 	if value, ok := dict[1206]; ok && (len(value) != 1 || value[0] != 2) {
 		return nil, fmt.Errorf("unsupported CFF charstring type")
 	}
+	var privateRange []float64
 	if _, cid := dict[1230]; cid {
-		return nil, fmt.Errorf("CID CFF requires FD normalization")
+		fdArrOff, err := cffDictOffset(data, dict, 1236)
+		if err != nil {
+			return nil, fmt.Errorf("CID CFF requires FD normalization")
+		}
+		fds, _, err := readType2Index(data, fdArrOff)
+		if err != nil || len(fds) != 1 {
+			return nil, fmt.Errorf("CID CFF requires FD normalization")
+		}
+		fdDict, err := readCFFDict(fds[0])
+		if err != nil {
+			return nil, err
+		}
+		if _, hasMatrix := fdDict[1207]; hasMatrix {
+			return nil, fmt.Errorf("CID CFF requires FD normalization")
+		}
+		privateRange = fdDict[18]
+	} else {
+		privateRange = dict[18]
 	}
 	offset := dict[17]
 	if len(offset) != 1 || !finite(offset[0]) || offset[0] < 0 || offset[0] > float64(len(data)) || offset[0] != math.Trunc(offset[0]) {
@@ -134,8 +152,17 @@ func readType2Font(data []byte) (*type2Font, error) {
 	if len(chars) == 0 {
 		return nil, fmt.Errorf("empty CFF charstrings")
 	}
+	if _, cid := dict[1230]; cid {
+		selectOff, err := cffDictOffset(data, dict, 1237)
+		if err != nil {
+			return nil, fmt.Errorf("CID CFF requires FD normalization")
+		}
+		if _, err := readType2FDSelect(data, selectOff, len(chars), 1); err != nil {
+			return nil, fmt.Errorf("CID CFF requires FD normalization")
+		}
+	}
 	font := &type2Font{data: data, chars: chars, globals: globals, seed: 1}
-	if _, err := readType2Private(data, dict[18], font); err != nil {
+	if _, err := readType2Private(data, privateRange, font); err != nil {
 		return nil, err
 	}
 	return font, nil
@@ -203,9 +230,8 @@ func normalizeType2ProgramsMatrix(data []byte, matrix *[6]float64) ([][]byte, bo
 		}
 		steps := 0
 		state := type2State{font: font, args: stack[:0], width: font.def, seed: font.seed + uint64(gid), steps: &steps}
-		_, err := state.run(program, 0)
-		if err != nil {
-			continue
+		if _, err := state.run(program, 0); err != nil {
+			return nil, false, fmt.Errorf("CFF glyph %d: %w", gid, err)
 		}
 		if !state.changed && matrix == nil {
 			continue
@@ -515,7 +541,7 @@ func (s *type2State) appendComponent(code, x, y float64) error {
 		s.dependencies[uint16(gid)] = true
 	}
 	child := type2State{font: s.font, matrix: s.matrix, width: s.font.def, component: true, output: s.output, originX: x, originY: y, outX: s.outX, outY: s.outY, seed: s.font.seed + uint64(gid), steps: s.steps, stripHints: s.stripHints, dependencies: s.dependencies, localUsage: s.localUsage, globalUsage: s.globalUsage}
-	_, err := child.run(s.font.chars[gid], 0)
+	_, err := child.run(normalizeCFFCharstring(s.font.chars[gid]), 0)
 	if err != nil {
 		return fmt.Errorf("invalid Type2 component %s: %w", name, err)
 	}

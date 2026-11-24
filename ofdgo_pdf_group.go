@@ -225,15 +225,28 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 	var clips []pdfgo.Path
 	opaque := true
 	scale := math.Hypot(p.matrix[0], p.matrix[1])
+	var pendingEvents []func() error
 	collect := pdfgo.Visitor{
 		Reference:       visitor.Reference,
 		OptionalContent: visitor.OptionalContent,
 		Halftones:       visitor.Halftones,
-		PostScript:      visitor.PostScript,
-		Warning:         visitor.Warning,
 		Text:            func(pdfgo.TextMark) error { return errPDFGroupRaster },
 		Image:           func(pdfgo.ImageMark) error { return errPDFGroupRaster },
 		Group:           func(pdfgo.GroupMark, func(pdfgo.Visitor) error) error { return errPDFGroupRaster },
+	}
+	if visitor.PostScript != nil {
+		collect.PostScript = func(mark pdfgo.PostScriptMark) error {
+			pendingEvents = append(pendingEvents, func() error { return visitor.PostScript(mark) })
+			return nil
+		}
+	}
+	if visitor.Warning != nil {
+		collect.Warning = func(warning pdfgo.Diagnostic) {
+			pendingEvents = append(pendingEvents, func() error {
+				visitor.Warning(warning)
+				return nil
+			})
+		}
 	}
 	collect.Path = func(path pdfgo.PathMark) error {
 		if err := p.ctx.Err(); err != nil {
@@ -308,7 +321,7 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 				for i, dash := range path.Style.Dash {
 					dashes[i] = dash * strokeScale
 				}
-				outline, err = geometry.Stroke(strokeShape, StrokeOptions{Width: path.Style.LineWidth * strokeScale, Cap: []string{"Butt", "Round", "Square"}[path.Style.Cap], Join: []string{"Miter", "Round", "Bevel"}[path.Style.Join], MiterLimit: path.Style.MiterLimit, DashOffset: path.Style.DashPhase * strokeScale, Dashes: dashes, Tolerance: tolerance})
+				outline, err = geometry.Stroke(strokeShape, StrokeOptions{Width: path.Style.LineWidth * strokeScale, Cap: pdfLineCapName(path.Style.Cap), Join: pdfLineJoinName(path.Style.Join), MiterLimit: path.Style.MiterLimit, DashOffset: path.Style.DashPhase * strokeScale, Dashes: dashes, Tolerance: tolerance})
 				if err != nil {
 					return err
 				}
@@ -344,6 +357,11 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 	if err := p.ctx.Err(); err != nil {
 		return err
 	}
+	for _, replay := range pendingEvents {
+		if err := replay(); err != nil {
+			return err
+		}
+	}
 	if len(combined) != 0 {
 		regions = append(regions, pdfPaintRegion{*paint, combined, intent, origin})
 	}
@@ -356,6 +374,11 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 			return err
 		}
 	}
+	type emittedRegion struct {
+		object GraphicObject
+		origin pdfObjectOrigin
+	}
+	emitted := make([]emittedRegion, 0, len(regions))
 	var covered GeometryPath
 	for i := len(regions) - 1; i >= 0; i-- {
 		if err := p.ctx.Err(); err != nil {
@@ -404,7 +427,10 @@ func (p *pdfImporter) groupPaths(mark pdfgo.GroupMark, walk func(pdfgo.Visitor) 
 			return err
 		}
 		object := PathObject{Boundary: pdfBoundary(box), AbbreviatedData: data, Fill: &fill, Stroke: &stroke, FillColor: color, Clips: objectClips}
-		p.appendOriginObject(GraphicObject{Type: "PathObject", PathObject: object}, region.origin)
+		emitted = append(emitted, emittedRegion{object: GraphicObject{Type: "PathObject", PathObject: object}, origin: region.origin})
+	}
+	for i := len(emitted) - 1; i >= 0; i-- {
+		p.appendOriginObject(emitted[i].object, emitted[i].origin)
 		p.report.PathObjects++
 	}
 	return nil
@@ -471,6 +497,7 @@ func (p *pdfImporter) compileGroup(build func(*pdfImporter) error) (*RasterPage,
 		return nil, box, err
 	}
 	editor := NewEditor()
+	defer editor.Close()
 	editor.SetResources(p.resources)
 	editor.SetRenderBackends(p.editor.Backends())
 	editor.SetFontDirs(p.editor.fontDirs...)
@@ -641,7 +668,7 @@ func (p *pdfImporter) appendRasterGroup(img image.Image, box Box, opacity float6
 	optimized := false
 	if p.compression.Mode == CompressionLossy {
 		var err error
-		encoded, err = pdfgo.EncodeImageResource(p.ctx, img, p.compression)
+		encoded, err = pdfgo.EncodeImageResource(p.ctx, img, p.compression.pdfOptions())
 		if err != nil && !errors.Is(err, io.ErrShortBuffer) {
 			return err
 		}

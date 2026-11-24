@@ -15,7 +15,6 @@ const READ_ONLY_OPERATIONS = new Set([
 	"ofdgoResourceReferences", "ofdgoResourceTargets", "ofdgoResources", "ofdgoRichTextFonts", "ofdgoSVGFontData",
 	"ofdgoSearchPage", "ofdgoSearchPages", "ofdgoSignaturePlacement", "ofdgoStructureObjects", "ofdgoStructureTargets",
 	"ofdgoStructureXML", "ofdgoStyleResource", "ofdgoStyleTextFonts", "ofdgoTextSelection", "ofdgoValidateInvoice",
-	"ofdgoVerifySignatures",
 ]);
 const PDF_REPLACE_OPERATIONS = new Set([
 	"ofdgoOpen", "ofdgoOpenPDF", "ofdgoCreateDocument",
@@ -718,6 +717,10 @@ class NativeHost {
 		const temporaryOnly = !!options.temporaryOnly;
 		const includeHandle = options.includeHandle !== false;
 		const exclude = options.exclude;
+		if (typeof value.svgUrl === "string" && value.svgUrl) {
+			if (value.svgUrl.startsWith("blob:")) URL.revokeObjectURL(value.svgUrl);
+			else await this.call("release", {svgUrl:value.svgUrl}).catch(() => {});
+		}
 		if (value.nativeHandle) {
 			if (!temporaryOnly && !exclude?.has(value.nativeHandle)) {
 				this.resources?.unregister(value);
@@ -890,7 +893,7 @@ class NativeHost {
 		});
 		this.bridge.on("ofdgo.error", message => onError(new Error(message)));
 		const title = document.querySelector("title");
-		if (title) new MutationObserver(() => this.call("title", {title:document.title}).catch(onError)).observe(title, {childList:true});
+		if (title) new MutationObserver(() => this.call("title", {title:document.title}).catch(() => {})).observe(title, {childList:true});
 		await this.call("ready", {});
 	}
 
@@ -899,10 +902,13 @@ class NativeHost {
 	}
 
 	installFileInputs(onError) {
+		let opening = false;
 		document.addEventListener("click", async event => {
 			const input = event.target;
 			if (!(input instanceof HTMLInputElement) || input.type !== "file" || input.disabled) return;
 			event.preventDefault();
+			if (opening) return;
+			opening = true;
 			try {
 				const files = (await this.call("open", {multiple:input.multiple, directory:input.webkitdirectory, accept:input.accept})).map(value => new NativeFile(value));
 				if (!files.length) { input.dispatchEvent(new Event("cancel", {bubbles:true})); return; }
@@ -912,6 +918,8 @@ class NativeHost {
 			} catch (error) {
 				if (error.name === "AbortError") input.dispatchEvent(new Event("cancel", {bubbles:true}));
 				else onError(error);
+			} finally {
+				opening = false;
 			}
 		}, true);
 	}

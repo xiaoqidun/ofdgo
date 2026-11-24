@@ -166,10 +166,13 @@ func skipTTConditional(code []byte, position int, alternate bool) (int, error) {
 	return 0, fmt.Errorf("%w: unterminated conditional at %d in %d bytes", errTTInvalidControlFlow, start, len(code))
 }
 
-// ttAbs 返回定点数绝对值
+// ttAbs 返回定点数绝对值，对最小负值做饱和处理避免溢出
 // 入参: value 定点数
 // 返回: int32 绝对值
 func ttAbs(value int32) int32 {
+	if value == math.MinInt32 {
+		return math.MaxInt32
+	}
 	if value < 0 {
 		return -value
 	}

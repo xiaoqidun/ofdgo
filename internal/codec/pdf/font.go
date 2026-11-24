@@ -285,15 +285,17 @@ func sfntMissingPadding(program []byte) bool {
 	if len(program) < 12 {
 		return true
 	}
-	count := int(binary.BigEndian.Uint16(program[4:6]))
-	if count > (len(program)-12)/16 {
+	size := uint64(len(program))
+	count := uint64(binary.BigEndian.Uint16(program[4:6]))
+	if count > (size-12)/16 {
 		return true
 	}
-	for index := range count {
+	for index := uint64(0); index < count; index++ {
 		record := program[12+16*index:]
-		offset := int(binary.BigEndian.Uint32(record[8:12]))
-		length := int(binary.BigEndian.Uint32(record[12:16]))
-		if offset > len(program) || length > len(program)-offset || (4-length%4)%4 > len(program)-offset-length {
+		offset := uint64(binary.BigEndian.Uint32(record[8:12]))
+		length := uint64(binary.BigEndian.Uint32(record[12:16]))
+		pad := (4 - length%4) % 4
+		if offset > size || length > size-offset || pad > size-offset-length {
 			return true
 		}
 	}
@@ -318,16 +320,16 @@ func missingLeftBearings(tables map[string][]byte, start, count int) ([]byte, er
 	if len(loca) < (count+1)*entrySize {
 		return nil, fmt.Errorf("incomplete embedded PDF font glyph locations")
 	}
-	location := func(index int) int {
+	location := func(index int) uint64 {
 		if format == 0 {
-			return int(binary.BigEndian.Uint16(loca[index*2:])) * 2
+			return uint64(binary.BigEndian.Uint16(loca[index*2:])) * 2
 		}
-		return int(binary.BigEndian.Uint32(loca[index*4:]))
+		return uint64(binary.BigEndian.Uint32(loca[index*4:]))
 	}
 	result := make([]byte, 2*(count-start))
 	for index := start; index < count; index++ {
 		from, to := location(index), location(index+1)
-		if from > to || to > len(glyf) {
+		if from > to || to > uint64(len(glyf)) {
 			return nil, fmt.Errorf("invalid embedded PDF font glyph location")
 		}
 		if from == to {

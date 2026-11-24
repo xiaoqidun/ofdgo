@@ -178,8 +178,8 @@ func (s *canvasBackendState) resetFonts() {
 
 // forkSharedState 将Canvas后端的线程安全共享缓存传递给Fork子渲染器
 // 入参: src 源渲染器, dst 目标子渲染器
-func (CanvasBackend) forkSharedState(src, dst *Renderer) {
-	dst.sharedBackendStates[CanvasBackend{}] = src.canvasFontData()
+func (DefaultBackend) forkSharedState(src, dst *Renderer) {
+	dst.sharedBackendStates[DefaultBackend{}] = src.canvasFontData()
 	dst.sharedBackendStates[canvasTextGlyphCacheKey{}] = src.canvasTextGlyphPaths()
 	dst.sharedBackendStates[canvasOutlineCacheKey{}] = src.canvasFontOutlines()
 	dst.sharedBackendStates[canvasClipUnionKey{}] = src.canvasClipUnions()
@@ -224,7 +224,7 @@ func (r *Renderer) canvasSettledPaths() *renderCache[canvasFillKey, *canvas.Path
 // canvasFontData 获取子渲染器共享的只读字体字节缓存，限制解析数据保留量
 // 返回: *renderCache[[32]byte, []byte] 字体数据缓存
 func (r *Renderer) canvasFontData() *renderCache[[32]byte, []byte] {
-	return sharedCanvasCache[[32]byte, []byte](r, CanvasBackend{}, 32<<20)
+	return sharedCanvasCache[[32]byte, []byte](r, DefaultBackend{}, 32<<20)
 }
 
 // canvasDrawClips 获取派生渲染器共享的绘制裁剪缓存
@@ -239,28 +239,29 @@ func (r *Renderer) canvasStrokeClips() *renderCache[canvasStrokeKey, *canvas.Pat
 	return sharedCanvasCache[canvasStrokeKey, *canvas.Path](r, canvasStrokeCacheKey{}, 16<<20)
 }
 
-// strokeClippedCanvasPath 复用原生描边与裁剪结果，自定义几何后端沿用逐次调用
-// 入参: path 绘制路径, clip 裁剪路径, options 描边样式, fill 是否允许重叠填充轮廓
-// 返回: *canvas.Path 可独立变换的描边轮廓
+// strokeClippedCanvasPath 复用原生描边与裁剪结果，纯描边按原点归一化共享缓存，自定义几何后端沿用逐次调用
+// 入参: path 原始路径, clip 裁剪路径, options 描边选项, fill 是否同时填充
+// 返回: *canvas.Path 描边并裁剪后的路径
 func (r *Renderer) strokeClippedCanvasPath(path, clip *canvas.Path, options StrokeOptions, fill bool) *canvas.Path {
 	geometry, err := r.Geometry()
 	if err != nil {
 		r.renderError = err
 		return &canvas.Path{}
 	}
-	render := func() (*canvas.Path, int, error) {
+	applyResultClip := func(stroked *canvas.Path) *canvas.Path {
+		if fill {
+			return applyFillClipPath(stroked, clip)
+		}
+		return applyClipPath(stroked, clip)
+	}
+	strokeOnly := func(target *canvas.Path) (*canvas.Path, int, error) {
 		stroke := canvasStrokePath
 		if fill && !r.compactStrokes {
 			stroke = canvasStrokeFillPath
 		}
-		result, err := stroke(geometry, path, options)
+		result, err := stroke(geometry, target, options)
 		if err != nil {
 			return nil, 0, err
-		}
-		if fill {
-			result = applyFillClipPath(result, clip)
-		} else {
-			result = applyClipPath(result, clip)
 		}
 		return result, len(result.Data())*8 + 256, nil
 	}
@@ -271,23 +272,44 @@ func (r *Renderer) strokeClippedCanvasPath(path, clip *canvas.Path, options Stro
 			r.renderError = encodeErr
 			return &canvas.Path{}
 		}
-		paths := []*canvas.Path{path}
 		if clip != nil {
-			paths = append(paths, clip)
+			key := canvasStrokeKey{digest: canvasGeometryDigest(path, clip), options: string(encoded), fill: fill, compact: r.compactStrokes}
+			if cached, ok := r.canvasStrokeClips().get(key); ok {
+				return cached.Copy()
+			}
 		}
-		key := canvasStrokeKey{digest: canvasGeometryDigest(paths...), options: string(encoded), fill: fill, compact: r.compactStrokes}
-		result, err = r.canvasStrokeClips().load(r.pageContext, key, render)
-		if err == nil {
-			return result.Copy()
+		bounds := path.Bounds()
+		tx, ty := bounds.X0, bounds.Y0
+		normPath := path
+		shifted := (tx != 0 || ty != 0) && !path.Empty()
+		if shifted {
+			normPath = path.Copy().Translate(-tx, -ty)
 		}
-	} else {
-		result, _, err = render()
+		strokeKey := canvasStrokeKey{digest: canvasGeometryDigest(normPath), options: string(encoded), fill: fill, compact: r.compactStrokes}
+		stroked, strokeErr := r.canvasStrokeClips().load(r.pageContext, strokeKey, func() (*canvas.Path, int, error) {
+			return strokeOnly(normPath)
+		})
+		if strokeErr != nil {
+			r.renderError = strokeErr
+			return &canvas.Path{}
+		}
+		result = stroked.Copy()
+		if shifted {
+			result = result.Translate(tx, ty)
+		}
+		if clip != nil {
+			result = applyResultClip(result)
+			clipKey := canvasStrokeKey{digest: canvasGeometryDigest(path, clip), options: string(encoded), fill: fill, compact: r.compactStrokes}
+			r.canvasStrokeClips().put(clipKey, result.Copy(), len(result.Data())*8+256)
+		}
+		return result
 	}
+	result, _, err = strokeOnly(path)
 	if err != nil {
 		r.renderError = err
 		return &canvas.Path{}
 	}
-	return result
+	return applyResultClip(result)
 }
 
 // applyCachedClipPath 复用绘制轮廓的裁剪结果，返回可独立变换的副本
@@ -361,7 +383,7 @@ func (r *Renderer) imageEffectCache() *renderCache[imageEffectKey, image.Image] 
 // canvasState 获取当前渲染器的Canvas私有缓存，按需创建且不向其他后端暴露
 // 返回: *canvasBackendState Canvas缓存
 func (r *Renderer) canvasState() *canvasBackendState {
-	key := CanvasBackend{}
+	key := DefaultBackend{}
 	if state, ok := r.backendStates[key]; ok {
 		return state.(*canvasBackendState)
 	}

@@ -36,7 +36,9 @@ func (e *businessEngine) preparePrint(args []platformValue) (any, error) {
 	}
 	ctx := e.operationContext()
 	if len(args) > 1 {
-		ctx = e.newOutputContext(args[1])
+		operation := e.newOutputContext(args[1])
+		defer operation.cancel()
+		ctx = operation
 	}
 	editor := e.currentEditor
 	if editor == nil {
@@ -46,6 +48,22 @@ func (e *businessEngine) preparePrint(args []platformValue) (any, error) {
 			return nil, err
 		}
 		defer func() { _ = editor.Close() }()
+	} else {
+		mismatch, err := e.editorTargetMismatch()
+		if err != nil {
+			return nil, err
+		}
+		if mismatch {
+			snapshot, err := editor.Snapshot(ctx)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = snapshot.Close() }()
+			if _, err := e.alignEditorTarget(ctx, snapshot); err != nil {
+				return nil, err
+			}
+			editor = snapshot
+		}
 	}
 	source := e.currentSession.Renderer
 	dirs, fonts := source.FontSources()
@@ -77,7 +95,9 @@ func (e *businessEngine) layoutPrint(args []platformValue) (any, error) {
 	}
 	ctx := e.operationContext()
 	if len(args) > 1 {
-		ctx = e.newOutputContext(args[1])
+		operation := e.newOutputContext(args[1])
+		defer operation.cancel()
+		ctx = operation
 	}
 	next, err := e.printDocument.Reconfigure(ctx, options)
 	if err != nil {
@@ -101,7 +121,9 @@ func (e *businessEngine) printSide(args []platformValue) (any, error) {
 	}
 	ctx := e.operationContext()
 	if len(args) > 1 {
-		ctx = e.newOutputContext(args[1])
+		operation := e.newOutputContext(args[1])
+		defer operation.cancel()
+		ctx = operation
 	}
 	var output bytes.Buffer
 	if err := e.printDocument.RenderSVG(ctx, args[0].Int(), &output); err != nil {
@@ -122,7 +144,9 @@ func (e *businessEngine) printPDF(args []platformValue) (any, error) {
 	}
 	ctx := e.operationContext()
 	if len(args) > 1 && args[1].Type() == platformTypeFunction {
-		ctx = e.newOutputContext(args[1])
+		operation := e.newOutputContext(args[1])
+		defer operation.cancel()
+		ctx = operation
 	}
 	writer := bufio.NewWriterSize(exportWriter{write: args[0]}, 1<<20)
 	if err := e.printDocument.WritePDF(ctx, writer); err != nil {
@@ -135,7 +159,6 @@ func (e *businessEngine) printPDF(args []platformValue) (any, error) {
 }
 
 // discardPrint 释放当前打印快照，可重复调用
-// 入参: _ 保留的调用参数
 // 返回: any 空结果, error 资源释放错误
 func (e *businessEngine) discardPrint(_ []platformValue) (any, error) {
 	if e.printDocument != nil {

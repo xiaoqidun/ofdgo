@@ -174,6 +174,37 @@ func CompositeColor(paint pdfgo.Paint, point pdfgo.Point, space *pdfgo.ColorSpac
 // 入参: target 原像素与输出, source 替换像素, shape 覆盖率
 // 返回: error 像素或覆盖率错误
 func CompositeInterpolate(target *CompositePixel, source CompositePixel, shape float64) error {
+	if shape >= 0 && shape <= 1 && target.Alpha >= 0 && target.Alpha <= 1 && target.Shape >= 0 && target.Shape <= 1 && target.Effect >= 0 && target.Effect <= 1 && source.Alpha >= 0 && source.Alpha <= 1 && source.Shape >= 0 && source.Shape <= 1 && source.Effect >= 0 && source.Effect <= 1 {
+		invShape := 1 - shape
+		tAlpha, sAlpha := target.Alpha, source.Alpha
+		alpha := tAlpha*invShape + sAlpha*shape
+		if alpha != 0 {
+			var values [4]float64
+			for c := range 4 {
+				var tp, sp float64
+				if tAlpha != 0 {
+					v := target.Values[c]
+					if !(v >= 0 && v <= 1) {
+						goto slow
+					}
+					tp = v * tAlpha
+				}
+				if sAlpha != 0 {
+					v := source.Values[c]
+					if !(v >= 0 && v <= 1) {
+						goto slow
+					}
+					sp = v * sAlpha
+				}
+				values[c] = (tp*invShape + sp*shape) / alpha
+			}
+			target.Values = values
+		}
+		target.Alpha = alpha
+		target.Effect = target.Effect*invShape + source.Effect*shape
+		return nil
+	}
+slow:
 	pixel := pdfgo.ColorantPixel{Values: target.Values[:], Alpha: target.Alpha, Shape: target.Shape, Effect: target.Effect}
 	if err := pixel.Interpolate(pdfgo.ColorantPixel{Values: source.Values[:], Alpha: source.Alpha, Shape: source.Shape, Effect: source.Effect}, shape); err != nil {
 		return err
@@ -194,6 +225,66 @@ func CompositeKnockout(target *CompositePixel, initial, source CompositePixel) e
 		return err
 	}
 	target.Alpha, target.Effect, target.Shape = pixel.Alpha, pixel.Effect, pixel.Shape
+	return nil
+}
+
+// CompositeKnockoutFast 按ISO 32000-1挖空公式合并单像素，仅对非法数值回退完整校验
+// 入参: target 累计组结果, initial 初始背景, source 单个对象合成结果
+// 返回: error 像素错误
+func CompositeKnockoutFast(target *CompositePixel, initial, source CompositePixel) error {
+	f := source.Shape
+	if f == 0 {
+		return nil
+	}
+	if !(f >= 0 && f <= 1 && target.Alpha >= 0 && target.Alpha <= 1 && target.Shape >= 0 && target.Shape <= 1 && target.Effect >= 0 && target.Effect <= 1 && initial.Alpha >= 0 && initial.Alpha <= 1 && initial.Shape >= 0 && initial.Shape <= 1 && initial.Effect >= 0 && initial.Effect <= 1 && source.Alpha >= 0 && source.Alpha <= 1 && source.Effect >= 0 && source.Effect <= 1) {
+		return CompositeKnockout(target, initial, source)
+	}
+	invF := 1 - f
+	tAlpha, iAlpha, sAlpha := target.Alpha, initial.Alpha, source.Alpha
+	alpha := tAlpha*invF + sAlpha - iAlpha*invF
+	if alpha > 0 {
+		var values [4]float64
+		for c := range 4 {
+			var tp, ip, sp float64
+			if tAlpha != 0 {
+				v := target.Values[c]
+				if !(v >= 0 && v <= 1) {
+					return CompositeKnockout(target, initial, source)
+				}
+				tp = v * tAlpha
+			}
+			if iAlpha != 0 {
+				v := initial.Values[c]
+				if !(v >= 0 && v <= 1) {
+					return CompositeKnockout(target, initial, source)
+				}
+				ip = v * iAlpha
+			}
+			if sAlpha != 0 {
+				v := source.Values[c]
+				if !(v >= 0 && v <= 1) {
+					return CompositeKnockout(target, initial, source)
+				}
+				sp = v * sAlpha
+			}
+			out := (tp*invF + sp - ip*invF) / alpha
+			if out < 0 {
+				out = 0
+			} else if out > 1 {
+				out = 1
+			}
+			values[c] = out
+		}
+		target.Values = values
+	}
+	if alpha < 0 {
+		alpha = 0
+	} else if alpha > 1 {
+		alpha = 1
+	}
+	target.Alpha = alpha
+	target.Effect = target.Effect*invF + source.Effect
+	target.Shape += f * (1 - target.Shape)
 	return nil
 }
 
@@ -289,6 +380,43 @@ func compositeOver(backdrop *CompositePixel, source [4]float64, alpha float64, s
 	if alpha == 0 {
 		return nil
 	}
+	if NormalBlend(mode) && alpha > 0 && alpha <= 1 && backdrop.Alpha >= 0 && backdrop.Alpha <= 1 {
+		components := space.Components()
+		if components > 0 && components <= 4 {
+			ba := backdrop.Alpha
+			if ba == 0 || alpha == 1 {
+				for i := range components {
+					v := source[i]
+					if !(v >= 0 && v <= 1) {
+						goto slow
+					}
+				}
+				for i := range components {
+					backdrop.Values[i] = source[i]
+				}
+				backdrop.Alpha = alpha
+				backdrop.Effect = alpha + backdrop.Effect*(1-alpha)
+				return nil
+			}
+			invA := 1 - alpha
+			combined := alpha + ba*invA
+			wB := ba * invA / combined
+			wS := alpha / combined
+			for i := range components {
+				bv, sv := backdrop.Values[i], source[i]
+				if !(bv >= 0 && bv <= 1 && sv >= 0 && sv <= 1) {
+					goto slow
+				}
+			}
+			for i := range components {
+				backdrop.Values[i] = backdrop.Values[i]*wB + source[i]*wS
+			}
+			backdrop.Alpha = combined
+			backdrop.Effect = alpha + backdrop.Effect*invA
+			return nil
+		}
+	}
+slow:
 	values, combined, err := space.Composite(backdrop.Values[:space.Components()], source[:space.Components()], backdrop.Alpha, alpha, mode)
 	if err != nil {
 		return err

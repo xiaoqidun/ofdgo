@@ -102,11 +102,11 @@ type encryptionProvider struct {
 
 // encryptionSeed 保存标准的文件密钥包装信息
 type encryptionSeed struct {
-	XMLName xml.Name         `xml:"http://www.ofdspec.org/2016 DecyptSeed"`
-	ID      string           `xml:"ID,attr"`
-	Method  string           `xml:"EncryptCaseId,attr"`
-	Users   []encryptionUser `xml:"UserInfo"`
-	Params  encryptionParams `xml:"ExtendParams"`
+	XMLName xml.Name          `xml:"http://www.ofdspec.org/2016 DecyptSeed"`
+	ID      string            `xml:"ID,attr"`
+	Method  string            `xml:"EncryptCaseId,attr"`
+	Users   []encryptionUser  `xml:"UserInfo"`
+	Params  *encryptionParams `xml:"ExtendParams,omitempty"`
 }
 
 // encryptionParams 保留未知扩展，避免默认另存时静默丢失其语义
@@ -175,7 +175,11 @@ func EncryptPackageTo(ctx context.Context, input *Input, writer io.Writer, optio
 	if err := sameOutputFile(input.info, writer); err != nil {
 		return 0, err
 	}
-	r, err := NewReaderContext(ctx, input)
+	var readerOpts []ReaderOption
+	if options.Resources != nil {
+		readerOpts = append(readerOpts, WithResources(options.Resources))
+	}
+	r, err := NewReaderContext(ctx, input, readerOpts...)
 	if err != nil {
 		return 0, err
 	}
@@ -284,11 +288,84 @@ func encryptionNode(nodes map[string]decryptNode, base, name string) (decryptNod
 	return decryptNode{}, "", fmt.Errorf("missing encrypted entry: %s", name)
 }
 
+// encodeWrapIVParams 构造仅含独立密钥包装初始向量参数的扩展节点
+// 入参: wrapIV 包装初始向量
+// 返回: *encryptionParams 扩展参数节点
+func encodeWrapIVParams(wrapIV []byte) *encryptionParams {
+	return &encryptionParams{Raw: `<Parameter Name="WrapIV">` + base64.StdEncoding.EncodeToString(wrapIV) + `</Parameter>`}
+}
+
+// parseEncryptionParams 解析扩展参数中的独立密钥包装初始向量并标记是否存在未知扩展
+// 入参: params 扩展参数节点
+// 返回: []byte 包装初始向量, bool 是否存在未知扩展
+func parseEncryptionParams(params *encryptionParams) ([]byte, bool) {
+	if params == nil || strings.TrimSpace(params.Raw) == "" {
+		return nil, false
+	}
+	decoder := xml.NewDecoder(strings.NewReader(`<root xmlns="` + ofdNamespace2016 + `">` + params.Raw + `</root>`))
+	depth := 0
+	var wrapIV []byte
+	unknown := false
+	for {
+		tok, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, true
+		}
+		switch node := tok.(type) {
+		case xml.StartElement:
+			depth++
+			if depth == 1 {
+				continue
+			}
+			if depth == 2 && node.Name.Local == "Parameter" && (node.Name.Space == "" || node.Name.Space == ofdNamespace2016) {
+				name := ""
+				extraAttr := false
+				for _, attr := range node.Attr {
+					if attr.Name.Space == "" && attr.Name.Local == "Name" {
+						name = attr.Value
+					} else if attr.Name.Space != "xmlns" && attr.Name.Local != "xmlns" {
+						extraAttr = true
+					}
+				}
+				if !extraAttr && name == "WrapIV" && len(wrapIV) == 0 {
+					var text string
+					if err := decoder.DecodeElement(&text, &node); err != nil {
+						return nil, true
+					}
+					depth--
+					decoded, err := decodeEncryptionBase64(strings.TrimSpace(text))
+					if err != nil || len(decoded) != sm4.BlockSize {
+						return nil, true
+					}
+					wrapIV = decoded
+					continue
+				}
+			}
+			unknown = true
+			if err := decoder.Skip(); err != nil {
+				return nil, true
+			}
+			depth--
+		case xml.EndElement:
+			depth--
+		case xml.CharData:
+			if depth == 1 && len(bytes.TrimSpace(node)) != 0 {
+				unknown = true
+			}
+		}
+	}
+	return wrapIV, unknown
+}
+
 // sameEncryptionSeedPolicy 判断条目级密钥描述是否与主密钥描述共享一致接收者策略
 // 入参: base 主密钥描述, item 条目密钥描述
-// 返回: bool 是否一致
+// 返回: bool 策略是否一致
 func sameEncryptionSeedPolicy(base, item encryptionSeed) bool {
-	if base.Method != item.Method || strings.TrimSpace(item.Params.Raw) != "" || len(base.Users) != len(item.Users) {
+	_, unknown := parseEncryptionParams(item.Params)
+	if base.Method != item.Method || unknown || len(base.Users) != len(item.Users) {
 		return false
 	}
 	for i := range base.Users {
@@ -361,12 +438,13 @@ func orderEncryptionRecords(records []encryptionRecord) ([]encryptionRecord, err
 }
 
 // unwrapEncryptionKey 按方案尝试会话凭据并复用口令派生与证书解包密钥，单条损坏接收者条目跳过继续尝试
-// 入参: seed 密钥描述, settings 会话凭据, passwordKeys 会话口令密钥缓存, certKeys 会话证书解包密钥缓存
-// 返回: []byte 文件密钥, []byte 初始向量, int 命中凭据索引, error 错误信息
+// 入参: seed 密钥描述, settings 会话参数, passwordKeys 口令派生密钥缓存, certKeys 证书解包密钥缓存
+// 返回: []byte 文件密钥, []byte 初始向量, int 命中凭据索引, error 解密错误
 func unwrapEncryptionKey(seed encryptionSeed, settings readerOptions, passwordKeys [][]byte, certKeys map[unwrappedCertKey][]byte) ([]byte, []byte, int, error) {
 	if seed.Method != "1.1.1" && seed.Method != "1.1.2" {
 		return nil, nil, -1, ErrUnsupportedEncryption
 	}
+	seedWrapIV, _ := parseEncryptionParams(seed.Params)
 	for credIndex, credential := range settings.credentials {
 		for _, user := range seed.Users {
 			if credential.UserName != "" && credential.UserName != user.Name {
@@ -394,7 +472,11 @@ func unwrapEncryptionKey(seed encryptionSeed, settings readerOptions, passwordKe
 					}
 					passwordKeys[credIndex] = kek
 				}
-				key, err = settings.provider.DecryptSM4(kek, iv, wrapped)
+				wrapIV := iv
+				if len(seedWrapIV) == sm4.BlockSize {
+					wrapIV = seedWrapIV
+				}
+				key, err = settings.provider.DecryptSM4(kek, wrapIV, wrapped)
 			} else if seed.Method == "1.1.2" && credential.Decrypter != nil {
 				certificate, err = decodeEncryptionBase64(user.Certificate)
 				if err != nil || len(certificate) == 0 {
@@ -424,10 +506,11 @@ func unwrapEncryptionKey(seed encryptionSeed, settings readerOptions, passwordKe
 }
 
 // inheritedEncryptionOptions 保留能够完整恢复的原接收者策略，仅全包加密支持继承
-// 入参: record 加密记录, seed 原密钥描述, credential 命中凭据, provider 密码实现
-// 返回: *EncryptionOptions 可继承策略，nil表示需调用方显式选择
+// 入参: record 加密记录, seed 密钥描述, credential 命中凭据, provider 密码实现
+// 返回: *EncryptionOptions 可继承的加密策略
 func inheritedEncryptionOptions(record encryptionRecord, seed encryptionSeed, credential Credentials, provider CryptoProvider) *EncryptionOptions {
-	if !strings.EqualFold(strings.TrimSpace(record.Scope), "All") || strings.TrimSpace(seed.Params.Raw) != "" {
+	_, unknown := parseEncryptionParams(seed.Params)
+	if !strings.EqualFold(strings.TrimSpace(record.Scope), "All") || unknown {
 		return nil
 	}
 	options := &EncryptionOptions{Provider: provider}
@@ -449,16 +532,70 @@ func inheritedEncryptionOptions(record encryptionRecord, seed encryptionSeed, cr
 }
 
 // decodeEncryptionBase64 过滤ASCII空白字符后解码Base64数据
-// 入参: value Base64编码文本
+// 入参: value 编码文本
 // 返回: []byte 解码字节, error 解码错误
 func decodeEncryptionBase64(value string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(strings.ReplaceAll(strings.ReplaceAll(value, " ", ""), "\t", ""))
 }
 
+// streamEncryptSM4CBC 按固定块流式执行SM4-CBC加密及PKCS#7填充并直接写出目标流
+// 入参: ctx 取消上下文, dst 密文写入器, src 明文读取器, key 加密密钥, iv 初始向量
+// 返回: error 加密或取消错误
+func streamEncryptSM4CBC(ctx context.Context, dst io.Writer, src io.Reader, key, iv []byte) error {
+	block, err := sm4.NewCipher(key)
+	if err != nil {
+		return err
+	}
+	if len(iv) != block.BlockSize() {
+		return fmt.Errorf("invalid SM4 IV length")
+	}
+	mode := cipher.NewCBCEncrypter(block, iv)
+	buf := make([]byte, 32*1024)
+	defer clear(buf)
+	pending := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, readErr := src.Read(buf[pending:])
+		if n > 0 {
+			total := pending + n
+			blocks := (total / sm4.BlockSize) * sm4.BlockSize
+			if blocks > 0 {
+				mode.CryptBlocks(buf[:blocks], buf[:blocks])
+				if _, writeErr := dst.Write(buf[:blocks]); writeErr != nil {
+					return writeErr
+				}
+				rem := total - blocks
+				copy(buf[:rem], buf[blocks:total])
+				pending = rem
+			} else {
+				pending = total
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	pad := byte(sm4.BlockSize - pending)
+	for i := pending; i < sm4.BlockSize; i++ {
+		buf[i] = pad
+	}
+	mode.CryptBlocks(buf[:sm4.BlockSize], buf[:sm4.BlockSize])
+	_, err = dst.Write(buf[:sm4.BlockSize])
+	return err
+}
+
 // encryptPackageToWriter 流式逐条加密阅读器中的包条目并直接写出ZIP归档
-// 口令与证书模式均为每个文件生成独立初始向量与条目种子，避免共享密钥与向量泄露密文前缀关系
-// 入参: ctx 取消上下文, writer 输出流, r 明文包阅读器, options 加密策略, progress 取消与进度检查
-// 返回: int64 写出字节数, error 错误信息
+// 口令与证书模式均为主密钥包装、映射表与每个文件生成独立随机初始向量
+// 入参: ctx 取消上下文, writer 目标写入器, r 文档阅读器, options 加密选项, progress 进度回调
+// 返回: int64 写入字节数, error 加密或写入错误
 func encryptPackageToWriter(ctx context.Context, writer io.Writer, r *Reader, options EncryptionOptions, progress editorProgress) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -478,13 +615,15 @@ func encryptPackageToWriter(ctx context.Context, writer io.Writer, r *Reader, op
 	if provider == nil {
 		provider = GMCryptoProvider{}
 	}
-	key, iv, identifier := make([]byte, 16), make([]byte, 16), make([]byte, 16)
-	for _, buffer := range [][]byte{key, iv, identifier} {
+	_, isDefaultProvider := provider.(GMCryptoProvider)
+	key, mapIV, identifier := make([]byte, 16), make([]byte, 16), make([]byte, 16)
+	for _, buffer := range [][]byte{key, mapIV, identifier} {
 		if _, err := rand.Read(buffer); err != nil {
 			return 0, err
 		}
 	}
 	defer clear(key)
+	defer clear(mapIV)
 	id := "E" + hex.EncodeToString(identifier)
 	seed := encryptionSeed{ID: id, Method: "1.1.1"}
 	var kek []byte
@@ -496,11 +635,17 @@ func encryptPackageToWriter(ctx context.Context, writer io.Writer, r *Reader, op
 			return 0, err
 		}
 		defer clear(kek)
-		wrapped, err := provider.EncryptSM4(kek, iv, key)
+		wrapIV := make([]byte, 16)
+		if _, err := rand.Read(wrapIV); err != nil {
+			return 0, err
+		}
+		defer clear(wrapIV)
+		wrapped, err := provider.EncryptSM4(kek, wrapIV, key)
 		if err != nil {
 			return 0, err
 		}
-		seed.Users = []encryptionUser{{Name: options.UserName, Role: options.UserType, Key: base64.StdEncoding.EncodeToString(wrapped), IV: base64.StdEncoding.EncodeToString(iv)}}
+		seed.Users = []encryptionUser{{Name: options.UserName, Role: options.UserType, Key: base64.StdEncoding.EncodeToString(wrapped), IV: base64.StdEncoding.EncodeToString(mapIV)}}
+		seed.Params = encodeWrapIVParams(wrapIV)
 	} else {
 		seed.Method = "1.1.2"
 		for _, recipient := range options.Recipients {
@@ -512,12 +657,17 @@ func encryptPackageToWriter(ctx context.Context, writer io.Writer, r *Reader, op
 			if err != nil {
 				return 0, err
 			}
-			seed.Users = append(seed.Users, encryptionUser{Name: recipient.UserName, Role: recipient.UserType, Certificate: base64.StdEncoding.EncodeToString(certificate), Key: base64.StdEncoding.EncodeToString(wrapped), IV: base64.StdEncoding.EncodeToString(iv)})
+			seed.Users = append(seed.Users, encryptionUser{Name: recipient.UserName, Role: recipient.UserType, Certificate: base64.StdEncoding.EncodeToString(certificate), Key: base64.StdEncoding.EncodeToString(wrapped), IV: base64.StdEncoding.EncodeToString(mapIV)})
 		}
 	}
 	names := slices.Sorted(maps.Keys(r.fileNames))
 	entries := encryptionEntries{XMLName: xml.Name{Space: ofdNamespace2016, Local: "EncryptEntries"}, ID: id, Entries: make([]encryptionEntry, 0, len(names))}
 	entryIVs := make([][]byte, len(names))
+	defer func() {
+		for _, entryIV := range entryIVs {
+			clear(entryIV)
+		}
+	}()
 	for i, name := range names {
 		encryptedName := fmt.Sprintf("Encrypt/Files/%d.dat", i)
 		entryIV := make([]byte, 16)
@@ -532,7 +682,7 @@ func encryptPackageToWriter(ctx context.Context, writer io.Writer, r *Reader, op
 	if err != nil {
 		return 0, err
 	}
-	mapData, err := provider.EncryptSM4(key, iv, plainMap)
+	mapData, err := provider.EncryptSM4(key, mapIV, plainMap)
 	clear(plainMap)
 	if err != nil {
 		return 0, err
@@ -578,7 +728,29 @@ func encryptPackageToWriter(ctx context.Context, writer io.Writer, r *Reader, op
 		if err := ctx.Err(); err != nil {
 			return count, err
 		}
-		plain, borrowed, readErr := r.readFileData(name)
+		entryPath := fmt.Sprintf("Encrypt/Files/%d.dat", i)
+		if isDefaultProvider {
+			rc, openErr := r.openFile(name)
+			if openErr != nil {
+				return count, openErr
+			}
+			dst, createErr := archive.CreateHeader(&zip.FileHeader{Name: entryPath, Method: zip.Store})
+			if createErr != nil {
+				_ = rc.Close()
+				return count, createErr
+			}
+			encErr := streamEncryptSM4CBC(ctx, dst, rc, key, entryIVs[i])
+			closeErr := rc.Close()
+			if encErr != nil {
+				return count, encErr
+			}
+			if closeErr != nil {
+				return count, closeErr
+			}
+			continue
+		}
+		_, borrowed := r.files[cleanPackagePath(name)]
+		plain, readErr := r.readFileViewContext(ctx, name)
 		if readErr != nil {
 			return count, readErr
 		}
@@ -589,19 +761,29 @@ func encryptPackageToWriter(ctx context.Context, writer io.Writer, r *Reader, op
 		if encErr != nil {
 			return count, encErr
 		}
-		if err := writeStoreEntry(fmt.Sprintf("Encrypt/Files/%d.dat", i), cipherData); err != nil {
+		if err := writeStoreEntry(entryPath, cipherData); err != nil {
 			return count, err
 		}
 	}
 	for i, entryIV := range entryIVs {
+		if err := ctx.Err(); err != nil {
+			return count, err
+		}
 		ivText := base64.StdEncoding.EncodeToString(entryIV)
 		entrySeed := encryptionSeed{ID: id, Method: seed.Method}
 		if passwordMode {
-			wrapped, encErr := provider.EncryptSM4(kek, entryIV, key)
+			entryWrapIV := make([]byte, 16)
+			if _, randErr := rand.Read(entryWrapIV); randErr != nil {
+				return count, randErr
+			}
+			wrapped, encErr := provider.EncryptSM4(kek, entryWrapIV, key)
 			if encErr != nil {
+				clear(entryWrapIV)
 				return count, encErr
 			}
 			entrySeed.Users = []encryptionUser{{Name: options.UserName, Role: options.UserType, Key: base64.StdEncoding.EncodeToString(wrapped), IV: ivText}}
+			entrySeed.Params = encodeWrapIVParams(entryWrapIV)
+			clear(entryWrapIV)
 		} else {
 			entrySeed.Users = make([]encryptionUser, len(seed.Users))
 			for j, user := range seed.Users {
@@ -888,7 +1070,7 @@ func (s *encryptedPackageSource) materializeArchive(ctx context.Context, limit i
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	data := &editorSnapshotBuffer{spillLimit: limit}
+	data := &editorSnapshotBuffer{spillLimit: limit, encryptSpill: true}
 	cleanupData := true
 	defer func() {
 		if cleanupData {
@@ -1005,10 +1187,10 @@ func (seed *encryptionSeed) UnmarshalXML(d *xml.Decoder, start xml.StartElement)
 		return fmt.Errorf("unexpected encryption seed element: %s", start.Name.Local)
 	}
 	var raw struct {
-		ID     string           `xml:"ID,attr"`
-		Method string           `xml:"EncryptCaseId,attr"`
-		Users  []encryptionUser `xml:"UserInfo"`
-		Params encryptionParams `xml:"ExtendParams"`
+		ID     string            `xml:"ID,attr"`
+		Method string            `xml:"EncryptCaseId,attr"`
+		Users  []encryptionUser  `xml:"UserInfo"`
+		Params *encryptionParams `xml:"ExtendParams"`
 	}
 	if err := d.DecodeElement(&raw, &start); err != nil {
 		return err
@@ -1108,7 +1290,7 @@ func (r *Reader) decryptPackageContext(ctx context.Context, settings readerOptio
 	}
 	passwordKeys := make([][]byte, len(settings.credentials))
 	certKeys := make(map[unwrappedCertKey][]byte)
-	state := &encryptionState{info: EncryptionInfo{Encrypted: true, Layers: len(list.Records)}}
+	state := &encryptionState{info: EncryptionInfo{Encrypted: true, Layers: len(list.Records), Methods: make([]string, len(list.Records))}}
 	var allocatedKeys [][]byte
 	delivered := false
 	defer func() {
@@ -1220,6 +1402,9 @@ func (r *Reader) decryptPackageContext(ctx context.Context, settings readerOptio
 					if seedErr == nil {
 						seedErr = xml.Unmarshal(entrySeedData, &entrySeed)
 					}
+					if seedErr == nil && (entrySeed.ID != record.ID || len(entrySeed.Users) == 0) {
+						seedErr = fmt.Errorf("%w: invalid encryption seed", ErrUnsupportedEncryption)
+					}
 					var eKey, eIV []byte
 					var entryCredIndex int
 					if seedErr == nil {
@@ -1304,6 +1489,7 @@ func (r *Reader) decryptPackageContext(ctx context.Context, settings readerOptio
 		}
 		maps.Copy(outerDecrypted, decrypted)
 		state.info.Method = seed.Method
+		state.info.Methods[i] = seed.Method
 		for _, user := range seed.Users {
 			state.info.Users = append(state.info.Users, user.Name)
 		}

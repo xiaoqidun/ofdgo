@@ -540,6 +540,64 @@ func svgScopeDefsIDs(raw []byte, prefix string) []byte {
 	return out
 }
 
+// svgScopeClipURLs 仅在SVG标签属性内为clip-path的ofdgo-clip引用添加作用域前缀，不触碰正文文本
+// 入参: raw 原始SVG字节, prefix 作用域前缀
+// 返回: []byte 作用域化后的SVG字节
+func svgScopeClipURLs(raw []byte, prefix string) []byte {
+	if prefix == "" || len(raw) == 0 {
+		return raw
+	}
+	marker := []byte(`clip-path="url(#ofdgo-clip-`)
+	if !bytes.Contains(raw, marker) {
+		return raw
+	}
+	escaped := []byte(html.EscapeString(prefix))
+	out := make([]byte, 0, len(raw)+64)
+	pos := 0
+	for pos < len(raw) {
+		relOpen := bytes.IndexByte(raw[pos:], '<')
+		if relOpen < 0 {
+			out = append(out, raw[pos:]...)
+			break
+		}
+		tagStart := pos + relOpen
+		out = append(out, raw[pos:tagStart]...)
+		relClose := bytes.IndexByte(raw[tagStart:], '>')
+		if relClose < 0 {
+			out = append(out, raw[tagStart:]...)
+			break
+		}
+		tagEnd := tagStart + relClose + 1
+		tag := raw[tagStart:tagEnd]
+		if !bytes.Contains(tag, marker) {
+			out = append(out, tag...)
+			pos = tagEnd
+			continue
+		}
+		tpos := 0
+		for tpos < len(tag) {
+			idx := bytes.Index(tag[tpos:], marker)
+			if idx < 0 {
+				out = append(out, tag[tpos:]...)
+				break
+			}
+			abs := tpos + idx
+			validBoundary := abs > 0 && (tag[abs-1] == ' ' || tag[abs-1] == '\t' || tag[abs-1] == '\n')
+			insertAt := abs + len(`clip-path="url(#`)
+			if validBoundary {
+				out = append(out, tag[tpos:insertAt]...)
+				out = append(out, escaped...)
+				out = append(out, tag[insertAt:abs+len(marker)]...)
+			} else {
+				out = append(out, tag[tpos:abs+len(marker)]...)
+			}
+			tpos = abs + len(marker)
+		}
+		pos = tagEnd
+	}
+	return out
+}
+
 // writeDigestBytes 按分块响应取消并将像素或编码字节写入哈希计算器
 // 入参: ctx 取消上下文, h 哈希实例, data 输入字节
 // 返回: bool 是否未取消并完成写入
@@ -1092,7 +1150,7 @@ func (s *svgResourceRenderer) encodeImageResource(ctx context.Context, img image
 	if encoded, ok := img.(*EncodedImage); ok {
 		resource.MIME, resource.Data = encoded.MIME(), encoded.Bytes()
 		if options.Mode != CompressionUnchanged {
-			data, err := pdfgo.OptimizeImageResource(ctx, resource.Data, options, target)
+			data, err := pdfgo.OptimizeImageResource(ctx, resource.Data, options.pdfOptions(), target)
 			if ctx.Err() != nil {
 				return SVGImage{}, ctx.Err()
 			}
@@ -1110,7 +1168,7 @@ func (s *svgResourceRenderer) encodeImageResource(ctx context.Context, img image
 					return SVGImage{}, err
 				}
 			}
-			resource.Data, err = pdfgo.EncodeImageResource(ctx, pixels, options)
+			resource.Data, err = pdfgo.EncodeImageResource(ctx, pixels, options.pdfOptions())
 			if err != nil {
 				if ctx.Err() != nil {
 					return SVGImage{}, ctx.Err()
@@ -1140,6 +1198,9 @@ func (s *svgResourceRenderer) encodeImageResource(ctx context.Context, img image
 // 入参: object 图形对象
 // 返回: bool 是否写入分组
 func (s *svgResourceRenderer) beginObject(object *GraphicObject) bool {
+	if s.err != nil {
+		return false
+	}
 	id := s.objects[object]
 	attribute := "data-ofd-object"
 	if id == "" {
@@ -1152,8 +1213,13 @@ func (s *svgResourceRenderer) beginObject(object *GraphicObject) bool {
 		attribute = "data-ofd-child"
 	}
 	s.flushPendingPath()
-	s.objectStack = append(s.objectStack, svgObjectGroup{path: id, composite: object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit"})
-	fmt.Fprintf(s.writer, `<g %s="%s">`, attribute, html.EscapeString(id))
+	if s.err != nil {
+		return false
+	}
+	if _, s.err = fmt.Fprintf(s.writer, `<g %s="%s">`, attribute, html.EscapeString(id)); s.err != nil {
+		return false
+	}
+	s.objectStack = append(s.objectStack, svgObjectGroup{path: id, composite: object.Type == "CompositeObject"})
 	return true
 }
 
@@ -1161,7 +1227,9 @@ func (s *svgResourceRenderer) beginObject(object *GraphicObject) bool {
 func (s *svgResourceRenderer) endObject() {
 	s.flushPendingPath()
 	s.objectStack = s.objectStack[:len(s.objectStack)-1]
-	fmt.Fprint(s.writer, `</g>`)
+	if s.err == nil {
+		_, s.err = fmt.Fprint(s.writer, `</g>`)
+	}
 }
 
 // beginTransparencyGroup 开启SVG标准透明组隔离
@@ -1172,6 +1240,9 @@ func (s *svgResourceRenderer) beginTransparencyGroup(alpha uint8) bool {
 		return false
 	}
 	s.flushPendingPath()
+	if s.err != nil {
+		return false
+	}
 	opacity := math.Round(float64(alpha)/255*10000) / 10000
 	_, s.err = fmt.Fprintf(s.writer, `<g opacity="%s">`, strconv.FormatFloat(opacity, 'f', -1, 64))
 	return s.err == nil
@@ -1189,12 +1260,17 @@ func (s *svgResourceRenderer) endTransparencyGroup() {
 // 入参: id 注解标识
 // 返回: bool 是否写入分组
 func (s *svgResourceRenderer) beginAnnotation(id string) bool {
-	if s.objects == nil {
+	if s.objects == nil || s.err != nil {
 		return false
 	}
 	s.flushPendingPath()
+	if s.err != nil {
+		return false
+	}
+	if _, s.err = fmt.Fprintf(s.writer, `<g data-ofd-object="annotation:%s">`, html.EscapeString(id)); s.err != nil {
+		return false
+	}
 	s.objectStack = append(s.objectStack, svgObjectGroup{path: "annotation:" + id, composite: true})
-	fmt.Fprintf(s.writer, `<g data-ofd-object="annotation:%s">`, html.EscapeString(id))
 	return true
 }
 
@@ -1202,13 +1278,18 @@ func (s *svgResourceRenderer) beginAnnotation(id string) bool {
 // 入参: stamp 签章外观
 // 返回: bool 是否写入分组
 func (s *svgResourceRenderer) beginStamp(stamp Stamp) bool {
-	if s.objects == nil || stamp.ID == "" || stamp.SignatureID == "" {
+	if s.objects == nil || stamp.ID == "" || stamp.SignatureID == "" || s.err != nil {
 		return false
 	}
 	s.flushPendingPath()
+	if s.err != nil {
+		return false
+	}
 	id := stamp.ObjectID()
+	if _, s.err = fmt.Fprintf(s.writer, `<g data-ofd-object="%s">`, html.EscapeString(id)); s.err != nil {
+		return false
+	}
 	s.objectStack = append(s.objectStack, svgObjectGroup{path: id})
-	fmt.Fprintf(s.writer, `<g data-ofd-object="%s">`, html.EscapeString(id))
 	return true
 }
 
@@ -1275,7 +1356,7 @@ func (s *svgResourceRenderer) appendTemplateFragment(frag *svgTemplateFragment) 
 	if len(frag.markup) != 0 {
 		markup := frag.markup
 		if !s.collectClips && s.idPrefix != "" && len(frag.clipDefs) > 0 {
-			markup = bytes.ReplaceAll(markup, []byte(`url(#ofdgo-clip-`), []byte(`url(#`+html.EscapeString(s.idPrefix)+`ofdgo-clip-`))
+			markup = svgScopeClipURLs(markup, s.idPrefix)
 		}
 		if _, err := s.writer.Write(markup); err != nil {
 			s.err = err
@@ -1338,8 +1419,12 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 		idPrefix:  r.svgIDPrefix,
 		precision: r.svgPrecision,
 	}
-	io.WriteString(target, svgCreatorMetadata)
-	io.WriteString(target, `<g style="image-orientation:none">`)
+	if _, err := io.WriteString(target, svgCreatorMetadata); err != nil {
+		return SVGResources{}, err
+	}
+	if _, err := io.WriteString(target, `<g style="image-orientation:none">`); err != nil {
+		return SVGResources{}, err
+	}
 	if images {
 		s.imageNames = make(map[svgImageKey]string)
 	}
@@ -1362,7 +1447,9 @@ func (r *Renderer) renderSVGResources(page *PageContent, writer io.Writer, image
 	if err := ctx.Err(); err != nil {
 		return SVGResources{}, err
 	}
-	io.WriteString(target, `</g>`)
+	if _, err := io.WriteString(target, `</g>`); err != nil {
+		return SVGResources{}, err
+	}
 	s.SetCustomStyle(s.styles.String())
 	if err := s.Close(); err != nil {
 		return SVGResources{}, err

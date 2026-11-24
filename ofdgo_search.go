@@ -142,9 +142,15 @@ func NewTextSearchIndex(ctx context.Context, text *PageText) (*TextSearchIndex, 
 			return nil, err
 		}
 		copy.Runs[i].Boxes = slices.Clone(copy.Runs[i].Boxes)
+	}
+	index, err := copy.searchIndex(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range copy.Runs {
 		copy.Runs[i].Spans = nil
 	}
-	return copy.searchIndex(ctx)
+	return index, nil
 }
 
 // foldText 统一Unicode大小写等价字符，保留字符数量
@@ -171,20 +177,166 @@ func foldRune(char rune) rune {
 	return folded
 }
 
-// adjacentTextRuns 判断绘制顺序相邻的文字是否在同一行连续，缺少定位时保持独立
+// runFlowDirection 依据文本对象内部首尾有效字框估算多字符对象的书写方向单位向量
+// 入参: run 文本对象
+// 返回: float64 X向分量, float64 Y向分量, bool 是否有效
+func runFlowDirection(run TextRun) (float64, float64, bool) {
+	var first, last Box
+	count := 0
+	for _, box := range run.Boxes {
+		if box.W <= 0 || box.H <= 0 {
+			continue
+		}
+		if count == 0 {
+			first = box
+		}
+		last = box
+		count++
+	}
+	if count < 2 {
+		return 0, 0, false
+	}
+	dx := (last.X + last.W/2) - (first.X + first.W/2)
+	dy := (last.Y + last.H/2) - (first.Y + first.H/2)
+	length := math.Hypot(dx, dy)
+	if !finite(length) || length <= 1e-6 {
+		return 0, 0, false
+	}
+	return dx / length, dy / length, true
+}
+
+// spanSegmentMetrics 解析单个文本选区区间的起止点、中点、前进单位方向与字高
+// 入参: span 文本选区区间
+// 返回: float64 起点X, float64 起点Y, float64 终点X, float64 终点Y, float64 中点X, float64 中点Y, float64 方向X, float64 方向Y, float64 字高, bool 是否有效
+func spanSegmentMetrics(span TextSpan) (startX, startY, endX, endY, midX, midY, ux, uy, h float64, ok bool) {
+	m := span.Matrix
+	a, b, c, d, e, f := m[0], m[1], m[2], m[3], m[4], m[5]
+	h = math.Hypot(c, d)
+	if !finite(h) || h <= 0 {
+		return 0, 0, 0, 0, 0, 0, 0, 0, 0, false
+	}
+	w := math.Hypot(a, b)
+	if !finite(w) {
+		return 0, 0, 0, 0, 0, 0, 0, 0, 0, false
+	}
+	if w > 1e-6 {
+		ux, uy = a/w, b/w
+	} else {
+		ux, uy = d/h, -c/h
+	}
+	startX, startY = e+c/2, f+d/2
+	endX, endY = e+a+c/2, f+b+d/2
+	midX, midY = (startX+endX)/2, (startY+endY)/2
+	if !finite(startX) || !finite(startY) || !finite(endX) || !finite(endY) {
+		return 0, 0, 0, 0, 0, 0, 0, 0, 0, false
+	}
+	return startX, startY, endX, endY, midX, midY, ux, uy, h, true
+}
+
+// adjacentTextRuns 判断绘制顺序相邻的横排、竖排或旋转文字是否连续，缺少定位时保持独立
 // 入参: before 前对象, after 后对象
 // 返回: bool 是否可连续搜索
 func adjacentTextRuns(before, after TextRun) bool {
 	if before.Text == "" || after.Text == "" || len(before.Boxes) != utf8.RuneCountInString(before.Text) || len(after.Boxes) == 0 {
 		return false
 	}
+	if len(before.Spans) > 0 && len(after.Spans) > 0 {
+		var aEndX, aEndY, aMidX, aMidY, aux, auy, ah float64
+		aOK := false
+		for i := len(before.Spans) - 1; i >= 0; i-- {
+			_, _, ex, ey, mx, my, ux, uy, h, ok := spanSegmentMetrics(before.Spans[i])
+			if ok {
+				aEndX, aEndY, aMidX, aMidY, aux, auy, ah, aOK = ex, ey, mx, my, ux, uy, h, true
+				break
+			}
+		}
+		var bStartX, bStartY, bMidX, bMidY, bux, buy, bh float64
+		bOK := false
+		for _, sp := range after.Spans {
+			sx, sy, _, _, mx, my, ux, uy, h, ok := spanSegmentMetrics(sp)
+			if ok {
+				bStartX, bStartY, bMidX, bMidY, bux, buy, bh, bOK = sx, sy, mx, my, ux, uy, h, true
+				break
+			}
+		}
+		if aOK && bOK && aux*bux+auy*buy >= 0.9 {
+			minH, maxH := math.Min(ah, bh), math.Max(ah, bh)
+			if minH > 0 && maxH <= minH*2.2 {
+				dx, dy := bStartX-aEndX, bStartY-aEndY
+				along := dx*aux + dy*auy
+				perp := math.Abs(-dx*auy + dy*aux)
+				step := (bMidX-aMidX)*aux + (bMidY-aMidY)*auy
+				if perp <= minH*0.25 && along >= -minH*0.15 && along <= minH*0.35 && step > 0 {
+					return true
+				}
+			}
+		}
+	}
 	a, b := before.Boxes[len(before.Boxes)-1], after.Boxes[0]
-	size := math.Min(a.H, b.H)
-	if size <= 0 || a.W <= 0 || b.W <= 0 {
+	if a.W <= 0 || a.H <= 0 || b.W <= 0 || b.H <= 0 {
 		return false
 	}
-	gap := b.X - a.X - a.W
-	return math.Abs(a.Y+a.H/2-b.Y-b.H/2) <= size*.25 && gap >= -size*.15 && gap <= size*.35 && b.X > a.X
+	aFlowX, aFlowY, aHasFlow := runFlowDirection(before)
+	bFlowX, bFlowY, bHasFlow := runFlowDirection(after)
+	if aHasFlow && bHasFlow && aFlowX*bFlowX+aFlowY*bFlowY < 0.85 {
+		return false
+	}
+	aVertical := aHasFlow && math.Abs(aFlowY) > math.Abs(aFlowX)
+	bVertical := bHasFlow && math.Abs(bFlowY) > math.Abs(bFlowX)
+	aHorizontal := aHasFlow && math.Abs(aFlowX) >= math.Abs(aFlowY)
+	bHorizontal := bHasFlow && math.Abs(bFlowX) >= math.Abs(bFlowY)
+	if !aVertical && !bVertical {
+		size := math.Min(a.H, b.H)
+		gap := b.X - a.X - a.W
+		if math.Abs(a.Y+a.H/2-b.Y-b.H/2) <= size*0.25 && gap >= -size*0.15 && gap <= size*0.35 && b.X > a.X {
+			return true
+		}
+		if (aHasFlow && aFlowX < -0.5) || (bHasFlow && bFlowX < -0.5) {
+			revGap := a.X - b.X - b.W
+			if math.Abs(a.Y+a.H/2-b.Y-b.H/2) <= size*0.25 && revGap >= -size*0.15 && revGap <= size*0.35 && b.X < a.X {
+				return true
+			}
+		}
+	}
+	if !aHorizontal && !bHorizontal {
+		size := math.Min(a.W, b.W)
+		if math.Max(a.W, b.W) <= size*2.2 && math.Abs(a.X+a.W/2-b.X-b.W/2) <= size*0.25 {
+			upward := (aHasFlow && aFlowY < -0.5) || (bHasFlow && bFlowY < -0.5)
+			if !upward {
+				gap := b.Y - a.Y - a.H
+				if gap >= -size*0.15 && gap <= size*0.35 && b.Y > a.Y {
+					return true
+				}
+			} else {
+				gap := a.Y - b.Y - b.H
+				if gap >= -size*0.15 && gap <= size*0.35 && b.Y < a.Y {
+					return true
+				}
+			}
+		}
+	}
+	if aHasFlow || bHasFlow {
+		ux, uy := aFlowX, aFlowY
+		if !aHasFlow {
+			ux, uy = bFlowX, bFlowY
+		}
+		dx := (b.X + b.W/2) - (a.X + a.W/2)
+		dy := (b.Y + b.H/2) - (a.Y + a.H/2)
+		along := dx*ux + dy*uy
+		perp := math.Abs(-dx*uy + dy*ux)
+		aProj := a.W*math.Abs(ux) + a.H*math.Abs(uy)
+		bProj := b.W*math.Abs(ux) + b.H*math.Abs(uy)
+		aCross := a.W*math.Abs(uy) + a.H*math.Abs(ux)
+		bCross := b.W*math.Abs(uy) + b.H*math.Abs(ux)
+		size := math.Min(aCross, bCross)
+		if size > 0 && math.Max(aCross, bCross) <= size*2.2 {
+			gap := along - (aProj+bProj)/2
+			if perp <= size*0.25 && gap >= -size*0.15 && gap <= size*0.35 && along > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // textGlyphSpans 将绘制字形映射到原文字符区间
@@ -1031,8 +1183,8 @@ func (r *Renderer) extractFastPlainPageText(ctx context.Context, page *PageConte
 				}
 				sb.WriteString(string(textCodeRunes(tc.Value)))
 			}
-		case "CompositeGraphicUnit", "CompositeObject":
-			c := obj.CompositeGraphicUnit
+		case "CompositeObject":
+			c := obj.CompositeObject
 			if c.Visible != nil && !*c.Visible {
 				return true
 			}
@@ -1043,16 +1195,13 @@ func (r *Renderer) extractFastPlainPageText(ctx context.Context, page *PageConte
 						return false
 					}
 					visitedUnits[unit] = true
-					if !collectObj(GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: *unit}) {
-						delete(visitedUnits, unit)
-						return false
+					for child := range unit.objects() {
+						if !collectObj(child) {
+							delete(visitedUnits, unit)
+							return false
+						}
 					}
 					delete(visitedUnits, unit)
-				}
-			}
-			for child := range c.objects() {
-				if !collectObj(child) {
-					return false
 				}
 			}
 		}
@@ -1063,7 +1212,7 @@ func (r *Renderer) extractFastPlainPageText(ctx context.Context, page *PageConte
 			if layerOrder(layer.Type) != order {
 				continue
 			}
-			for obj := range (PatternContent{Objects: layer.Objects, TextObject: layer.TextObject, PathObject: layer.PathObject, ImageObject: layer.ImageObject, CompositeGraphicUnit: layer.CompositeGraphicUnit}).objects() {
+			for obj := range (PatternContent{Objects: layer.Objects, TextObject: layer.TextObject, PathObject: layer.PathObject, ImageObject: layer.ImageObject, CompositeObject: layer.CompositeObject}).objects() {
 				if !collectObj(obj) {
 					return false
 				}

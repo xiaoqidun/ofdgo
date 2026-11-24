@@ -20,6 +20,7 @@ import (
 	"encoding/xml"
 	"io"
 	"maps"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -46,21 +47,38 @@ type versionEditGraph struct {
 	used  map[string]bool
 }
 
-// rewrite 按需读取并更新已隔离文件的引用，保留其余XML及相对路径基准
-// 入参: ctx 取消上下文, paths 原路径到新路径的映射
-// 返回: []byte 更新后的XML，未改动时返回已加载原文或nil, error 读取或属性编码错误
+// versionEditLinkRelative 判断结构文件内的引用原文是否为相对路径
+// 入参: source 结构文件原文, link 引用项
+// 返回: bool 是否为相对路径
+func versionEditLinkRelative(source []byte, link versionEditLink) bool {
+	var value string
+	if link.attribute == "" {
+		value = editorImportText(source, link.node)
+	} else {
+		value = link.node.attr(link.attribute)
+	}
+	trimmed := strings.ReplaceAll(strings.TrimSpace(value), "\\", "/")
+	return trimmed != "" && !strings.HasPrefix(trimmed, "/")
+}
+
+// rewrite 按需读取并更新已隔离或跨目录迁移文件的引用，保留其余XML结构
+// 入参: ctx 取消上下文, paths 路径映射表
+// 返回: []byte 重写后的数据, error 读取、解析或取消错误
 func (file *versionEditFile) rewrite(ctx context.Context, paths map[string]string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	needed := false
-	for _, link := range file.links {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if paths[link.target] != "" {
-			needed = true
-			break
+	dirChanged := paths[file.name] != "" && path.Dir(paths[file.name]) != path.Dir(file.name)
+	needed := dirChanged && len(file.links) != 0
+	if !needed {
+		for _, link := range file.links {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if paths[link.target] != "" {
+				needed = true
+				break
+			}
 		}
 	}
 	if !needed {
@@ -80,13 +98,17 @@ func (file *versionEditFile) rewrite(ctx context.Context, paths map[string]strin
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if paths[link.target] == "" {
-			continue
+		mapped := paths[link.target]
+		if mapped == "" {
+			if !dirChanged || !versionEditLinkRelative(source, link) {
+				continue
+			}
+			mapped = link.target
 		}
 		if link.attribute == "" {
-			patches = append(patches, editorXMLContent(source, link.node, editorFontXMLText("/"+paths[link.target])))
+			patches = append(patches, editorXMLContent(source, link.node, editorFontXMLText("/"+mapped)))
 		} else {
-			headers[link.node] = append(headers[link.node], link)
+			headers[link.node] = append(headers[link.node], versionEditLink{node: link.node, attribute: link.attribute, target: mapped})
 		}
 	}
 	for node, links := range headers {
@@ -96,7 +118,7 @@ func (file *versionEditFile) rewrite(ctx context.Context, paths map[string]strin
 			if err != nil {
 				return nil, err
 			}
-			data, err = editorXMLAttribute(data, root, link.attribute, "/"+paths[link.target])
+			data, err = editorXMLAttribute(data, root, link.attribute, "/"+link.target)
 			if err != nil {
 				return nil, err
 			}

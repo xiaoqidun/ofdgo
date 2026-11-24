@@ -259,28 +259,41 @@ func (e *Editor) sourcePartsWithRemaps(ctx context.Context, progress editorProgr
 			return nil, nil, nil, fmt.Errorf("document has no CommonData")
 		}
 		var patches []editorXMLPatch
-		if e.maxID != source.document.CommonData.MaxUnitID {
-			value := common.textXML("MaxUnitID", formatUnitID(e.maxID))
-			if maxID := common.child("MaxUnitID"); maxID != nil {
-				value = maxID.textXML("MaxUnitID", formatUnitID(e.maxID))
-				patches = append(patches, editorXMLPatch{maxID.start, maxID.end, value})
-			} else {
-				patches = append(patches, editorXMLPatch{common.open, common.open, value})
+		if common.open == common.end {
+			var inner []byte
+			if e.maxID != source.document.CommonData.MaxUnitID {
+				inner = append(inner, common.textXML("MaxUnitID", formatUnitID(e.maxID))...)
 			}
-		}
-		if len(resourceFiles) != 0 {
-			position := common.close
-			for _, child := range common.children {
-				if child.name.Local == "TemplatePage" || child.name.Local == "DefaultCS" {
-					position = child.start
-					break
+			for _, name := range resourceFiles {
+				inner = append(inner, common.textXML("DocumentRes", "/"+name)...)
+			}
+			if len(inner) != 0 {
+				patches = append(patches, editorXMLContent(data, common, inner))
+			}
+		} else {
+			if e.maxID != source.document.CommonData.MaxUnitID {
+				value := common.textXML("MaxUnitID", formatUnitID(e.maxID))
+				if maxID := common.child("MaxUnitID"); maxID != nil {
+					value = maxID.textXML("MaxUnitID", formatUnitID(e.maxID))
+					patches = append(patches, editorXMLPatch{maxID.start, maxID.end, value})
+				} else {
+					patches = append(patches, editorXMLPatch{common.open, common.open, value})
 				}
 			}
-			var references []byte
-			for _, name := range resourceFiles {
-				references = append(references, common.textXML("DocumentRes", "/"+name)...)
+			if len(resourceFiles) != 0 {
+				position := common.close
+				for _, child := range common.children {
+					if child.name.Local == "TemplatePage" || child.name.Local == "DefaultCS" {
+						position = child.start
+						break
+					}
+				}
+				var references []byte
+				for _, name := range resourceFiles {
+					references = append(references, common.textXML("DocumentRes", "/"+name)...)
+				}
+				patches = append(patches, editorXMLPatch{position, position, references})
 			}
-			patches = append(patches, editorXMLPatch{position, position, references})
 		}
 		if pagesChanged {
 			pages := root.child("Pages")
@@ -840,7 +853,7 @@ func (e *Editor) outputProtection(ctx context.Context, reader *Reader) (map[int]
 	if reader == nil {
 		return nil, nil, false, ctx.Err()
 	}
-	if e.output != nil && (e.output.protected || len(e.output.protectedDocs) != 0) {
+	if e.output != nil && (e.output.protectionReady || e.output.protected || len(e.output.protectedDocs) != 0) {
 		return e.output.protectedDocs, e.output.protectedFiles, e.output.protected, ctx.Err()
 	}
 	hasSig, err := reader.hasOutputSignatures(ctx)
@@ -1021,7 +1034,7 @@ func (e *Editor) writeSource(writer io.Writer, fonts map[string][]byte, progress
 		if !protected && !protectedFiles[name] {
 			data, ok := parts[name]
 			if !ok {
-				data, err = reader.readFile(name)
+				data, err = reader.readFileViewContext(ctx, name)
 				if err != nil {
 					return 0, err
 				}
@@ -1261,7 +1274,7 @@ func (e *Editor) sourceReader(ctx context.Context, progress editorProgress, sync
 				delete(reader.pageHeaderCache, name)
 			}
 		}
-		if _, err := reader.DocContext(ctx); err != nil {
+		if _, err := reader.docContext(ctx); err != nil {
 			return nil, nil, err
 		}
 		return reader, nil, nil
@@ -1291,7 +1304,7 @@ func (e *Editor) sourceReader(ctx context.Context, progress editorProgress, sync
 	if err := reader.initRootContext(ctx); err != nil {
 		return nil, nil, err
 	}
-	if _, err := reader.DocContext(ctx); err != nil {
+	if _, err := reader.docContext(ctx); err != nil {
 		return nil, nil, err
 	}
 	for name, header := range e.source.reader.pageHeaderCache {

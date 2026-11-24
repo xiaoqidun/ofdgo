@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"image"
 	"io"
@@ -39,18 +40,18 @@ import (
 // outputOptimizationBufferLimit 限制压缩时的单个输出缓冲，单位为字节
 const outputOptimizationBufferLimit = 64 << 20
 
-// 与PDFGo共用输出压缩模式
+// 输出压缩模式：原始、无损和有损
 const (
-	CompressionUnchanged = pdfgo.CompressionUnchanged
-	CompressionLossless  = pdfgo.CompressionLossless
-	CompressionLossy     = pdfgo.CompressionLossy
+	CompressionUnchanged CompressionMode = iota
+	CompressionLossless
+	CompressionLossy
 )
 
-// 与PDFGo共用有损压缩等级
+// 有损压缩预设：轻压、均衡和强压
 const (
-	CompressionLight  = pdfgo.CompressionLight
-	CompressionMedium = pdfgo.CompressionMedium
-	CompressionStrong = pdfgo.CompressionStrong
+	CompressionLight CompressionLevel = iota
+	CompressionMedium
+	CompressionStrong
 )
 
 // 并行预压缩条目的写出方式枚举
@@ -72,32 +73,100 @@ var outputDeflaterPool = sync.Pool{
 }
 
 // CompressionMode 选择原始、无损或有损输出策略
-type CompressionMode = pdfgo.CompressionMode
+type CompressionMode uint8
 
 // CompressionLevel 选择轻压、均衡或强压，仅用于有损模式
-type CompressionLevel = pdfgo.CompressionLevel
+type CompressionLevel uint8
 
 // CompressionOptions 配置输出压缩，原始模式沿用现有输出策略，不额外优化
-// Quality和MaxDPI为零时按Level使用预设，不改变页面尺寸或整页导出精度
+// Quality为有损质量1至100，0按Level使用85、60或40
+// MaxDPI为图片降采样目标1至9600，0按Level使用不限、150或96，不改变页面尺寸或整页导出精度
 // 无损表示不引入额外损失，不保证跨格式转换可逆；有损不栅格化文字和矢量
-type CompressionOptions = pdfgo.CompressionOptions
+type CompressionOptions struct {
+	Mode    CompressionMode  `json:"mode"`
+	Level   CompressionLevel `json:"level,omitempty"`
+	Quality int              `json:"quality,omitempty"`
+	MaxDPI  int              `json:"maxDPI,omitempty"`
+}
+
+// Validate 检查压缩档位、画质及精度范围
+// 返回: error 参数错误
+func (o CompressionOptions) Validate() error {
+	if o.Mode > CompressionLossy {
+		return fmt.Errorf("invalid compression mode %d", o.Mode)
+	}
+	if o.Level > CompressionStrong {
+		return fmt.Errorf("invalid compression level %d", o.Level)
+	}
+	if o.Quality < 0 || o.Quality > 100 {
+		return fmt.Errorf("compression quality must be between 0 and 100")
+	}
+	if o.MaxDPI < 0 || o.MaxDPI > 9600 {
+		return fmt.Errorf("compression max DPI must be between 0 and 9600")
+	}
+	return nil
+}
+
+// ImageQuality 返回有损编码使用的画质
+// 返回: int 编码画质
+func (o CompressionOptions) ImageQuality() int {
+	if o.Quality > 0 {
+		return o.Quality
+	}
+	switch o.Level {
+	case CompressionMedium:
+		return 60
+	case CompressionStrong:
+		return 40
+	default:
+		return 85
+	}
+}
+
+// ImageDPI 返回嵌入图片的降采样目标精度，0表示不降采样
+// 返回: int 目标精度
+func (o CompressionOptions) ImageDPI() int {
+	if o.MaxDPI > 0 {
+		return o.MaxDPI
+	}
+	switch o.Level {
+	case CompressionMedium:
+		return 150
+	case CompressionStrong:
+		return 96
+	default:
+		return 0
+	}
+}
+
+// pdfOptions 转换为PDF底层压缩配置
+// 返回: pdfgo.CompressionOptions PDF压缩选项
+func (o CompressionOptions) pdfOptions() pdfgo.CompressionOptions {
+	return pdfgo.CompressionOptions{
+		Mode:    pdfgo.CompressionMode(o.Mode),
+		Level:   pdfgo.CompressionLevel(o.Level),
+		Quality: o.Quality,
+		MaxDPI:  o.MaxDPI,
+	}
+}
 
 // WriteOptions 配置OFD输出副本，不修改编辑资源和撤销记录
 type WriteOptions struct{ Compression CompressionOptions }
 
 // outputOptimization 保存单次写出的配置、图片路径及压缩进度，复用压缩器
 type outputOptimization struct {
-	ctx            context.Context
-	options        CompressionOptions
-	images         map[string]bool
-	sizes          map[string]image.Point
-	protected      bool
-	protectedDocs  map[int]bool
-	protectedFiles map[string]bool
-	completed      int
-	deflater       *flate.Writer
-	resources      *editorResourceSelection
-	references     *renderCache[editorScanKey, editorScanValue]
+	ctx             context.Context
+	options         CompressionOptions
+	images          map[string]bool
+	sizes           map[string]image.Point
+	protectionReady bool
+	protected       bool
+	protectedDocs   map[int]bool
+	protectedFiles  map[string]bool
+	completed       int
+	deflater        *flate.Writer
+	resources       *editorResourceSelection
+	references      *renderCache[editorScanKey, editorScanValue]
 }
 
 // outputCompressionBuffer 限制候选ZIP编码，不能缩小时终止本次压缩
@@ -906,6 +975,81 @@ func (r *Reader) compressionImageSafety(ctx context.Context, images []ImageInfo)
 		}
 	}
 	return paths, safe, ctx.Err()
+}
+
+// signatureReferenceFiles 收集包内签名列表中全部签名文件、签名值、印章及Reference保护集路径
+// excludeDoc大于等于0时跳过该索引对应的文档
+// 入参: ctx 取消上下文, excludeDoc 排除文档索引
+// 返回: map[string]bool 受保护文件路径, error 读取或取消错误
+func (r *Reader) signatureReferenceFiles(ctx context.Context, excludeDoc int) (map[string]bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r == nil || r.ofd == nil {
+		return nil, nil
+	}
+	protected := make(map[string]bool)
+	for docIndex, body := range r.ofd.DocBody {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if docIndex == excludeDoc || strings.TrimSpace(body.Signatures) == "" {
+			continue
+		}
+		sigListPath := cleanPackagePath(resolveResourcePath("OFD.xml", "", body.Signatures))
+		if !validPackagePath(sigListPath) {
+			return nil, fmt.Errorf("invalid signatures path: %s", body.Signatures)
+		}
+		sigListData, err := r.readFileViewContext(ctx, sigListPath)
+		if err != nil {
+			return nil, err
+		}
+		var sigs Signatures
+		if err := xml.Unmarshal(sigListData, &sigs); err != nil {
+			return nil, err
+		}
+		protected[sigListPath] = true
+		for _, item := range sigs.List {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			sigPath := cleanPackagePath(resolveResourcePath(sigListPath, "", item.BaseLoc))
+			if !validPackagePath(sigPath) {
+				return nil, fmt.Errorf("invalid signature path: %s", item.BaseLoc)
+			}
+			sigData, err := r.readFileViewContext(ctx, sigPath)
+			if err != nil {
+				return nil, err
+			}
+			sigFile, err := parseSignatureFile(sigData)
+			if err != nil {
+				return nil, err
+			}
+			protected[sigPath] = true
+			if strings.TrimSpace(sigFile.SignedValue) != "" {
+				if target := cleanPackagePath(resolveResourcePath(sigPath, "", sigFile.SignedValue)); validPackagePath(target) {
+					protected[target] = true
+				}
+			}
+			if strings.TrimSpace(sigFile.SignedInfo.Seal.BaseLoc) != "" {
+				if target := cleanPackagePath(resolveResourcePath(sigPath, "", sigFile.SignedInfo.Seal.BaseLoc)); validPackagePath(target) {
+					protected[target] = true
+				}
+			}
+			for _, ref := range sigFile.SignedInfo.References.Reference {
+				if strings.TrimSpace(ref.FileRef) == "" {
+					continue
+				}
+				if target := cleanPackagePath(resolveResourcePath(sigPath, "", ref.FileRef)); validPackagePath(target) {
+					protected[target] = true
+				}
+			}
+		}
+	}
+	return protected, ctx.Err()
 }
 
 // hasOutputSignatures 检查全部文档的签名入口，不受当前文档或版本选择影响

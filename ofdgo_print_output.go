@@ -499,7 +499,7 @@ func (p *PrintDocument) WritePDF(ctx context.Context, writer io.Writer) error {
 	if len(indices) == 0 {
 		return codecpdf.WritePrintPDF(ctx, writer, nil, 0, sheets)
 	}
-	var source editorSnapshotBuffer
+	source := editorSnapshotBuffer{encryptSpill: p.renderer != nil && p.renderer.reader != nil && p.renderer.reader.encryption != nil}
 	defer func() { _ = source.Close() }()
 	if err := p.renderer.RenderToMultiPagePDFContext(ctx, &source, indices...); err != nil {
 		return err

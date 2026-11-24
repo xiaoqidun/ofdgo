@@ -122,8 +122,12 @@ func readCIDSubsetFont(data []byte) (*cidSubsetFont, error) {
 	if data[selectOffset] == 3 && binary.BigEndian.Uint16(data[selectOffset+3:]) != 0 {
 		return nil, fmt.Errorf("CFF FDSelect must include glyph zero")
 	}
+	nameIndex, err := encodeCFFIndexChecked(names)
+	if err != nil {
+		return nil, err
+	}
 	font := &cidSubsetFont{
-		prefix:  append(bytes.Clone(data[:int(data[2])]), encodeCFFIndex(names)...),
+		prefix:  append(bytes.Clone(data[:int(data[2])]), nameIndex...),
 		strings: strings, top: top, selects: selects, cids: cids,
 		dicts: make([]cffDict, len(fds)), private: make([]cffDict, len(fds)), fonts: make([]*type2Font, len(fds)),
 	}
@@ -190,26 +194,45 @@ func (f *cidSubsetFont) write(chars [][]byte) ([]byte, error) {
 	if f.charset == nil {
 		f.charset = encodeCFFSubsetCharset(f.cids)
 	}
-	suffix := append(encodeCFFIndex(f.strings), encodeCFFIndex(f.fonts[0].globals)...)
+	stringIndex, err := encodeCFFIndexChecked(f.strings)
+	if err != nil {
+		return nil, err
+	}
+	globalIndex, err := encodeCFFIndexChecked(f.fonts[0].globals)
+	if err != nil {
+		return nil, err
+	}
+	suffix := append(stringIndex, globalIndex...)
 	selects := encodeCFFSubsetFDSelect(f.selects)
-	programs := encodeCFFIndex(chars)
+	programs, err := encodeCFFIndexChecked(chars)
+	if err != nil {
+		return nil, err
+	}
 	private := make([][]byte, len(f.fonts))
 	locals := make([][]byte, len(f.fonts))
 	fds := make([][]byte, len(f.fonts))
 	for index, font := range f.fonts {
-		var err error
 		private[index], err = encodeCFFSubsetPrivate(f.private[index])
 		if err != nil {
 			return nil, err
 		}
 		if _, ok := f.private[index][19]; ok {
-			locals[index] = encodeCFFIndex(font.locals)
+			locals[index], err = encodeCFFIndexChecked(font.locals)
+			if err != nil {
+				return nil, err
+			}
 		}
 		fds[index] = encodeCFFDict(f.dicts[index])
 	}
 	for range 16 {
-		top := encodeCFFIndex([][]byte{encodeCFFDict(f.top)})
-		array := encodeCFFIndex(fds)
+		top, err := encodeCFFIndexChecked([][]byte{encodeCFFDict(f.top)})
+		if err != nil {
+			return nil, err
+		}
+		array, err := encodeCFFIndexChecked(fds)
+		if err != nil {
+			return nil, err
+		}
 		offset := len(f.prefix) + len(top) + len(suffix)
 		f.top[15] = []float64{float64(offset)}
 		offset += len(f.charset)
@@ -224,8 +247,14 @@ func (f *cidSubsetFont) write(chars [][]byte) ([]byte, error) {
 			fds[index] = encodeCFFDict(f.dicts[index])
 			offset += len(private[index]) + len(locals[index])
 		}
-		updatedTop := encodeCFFIndex([][]byte{encodeCFFDict(f.top)})
-		updatedArray := encodeCFFIndex(fds)
+		updatedTop, err := encodeCFFIndexChecked([][]byte{encodeCFFDict(f.top)})
+		if err != nil {
+			return nil, err
+		}
+		updatedArray, err := encodeCFFIndexChecked(fds)
+		if err != nil {
+			return nil, err
+		}
 		if len(updatedTop) != len(top) || len(updatedArray) != len(array) {
 			continue
 		}

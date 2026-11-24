@@ -17,6 +17,8 @@ package ofdgo
 import (
 	"encoding/xml"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // ofdCreator 标识本库生成的文档
@@ -32,12 +34,26 @@ type OFD struct {
 }
 
 // DocBody 文档体信息
-// 包含文档元数据和根节点路径
+// 包含文档元数据、根节点路径、版本列表和签名入口
 type DocBody struct {
-	DocInfo    DocInfo `xml:"DocInfo"`
-	DocRoot    string  `xml:"DocRoot"`
-	Signatures string  `xml:"Signatures"`
+	DocInfo    DocInfo      `xml:"DocInfo"`
+	DocRoot    string       `xml:"DocRoot"`
+	Versions   *DocVersions `xml:"Versions,omitempty"`
+	Signatures string       `xml:"Signatures"`
 	versioned  bool
+}
+
+// DocVersions 文档版本列表
+type DocVersions struct {
+	Version []DocVersion `xml:"Version"`
+}
+
+// DocVersion 文档版本入口
+type DocVersion struct {
+	ID      string `xml:"ID,attr"`
+	Index   int32  `xml:"Index,attr"`
+	Current bool   `xml:"Current,attr,omitempty"`
+	BaseLoc string `xml:"BaseLoc,attr"`
 }
 
 // DocInfo 文档元数据
@@ -93,7 +109,7 @@ func (ofd *OFD) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error
 	})
 }
 
-// UnmarshalXML 读取文档入口并记录版本列表是否存在，版本描述在选择时读取
+// UnmarshalXML 读取文档入口并解析版本列表
 // 入参: decoder XML解码器, start 起始节点
 // 返回: error 解析错误
 func (body *DocBody) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
@@ -108,9 +124,66 @@ func (body *DocBody) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) 
 			return d.DecodeElement(&body.Signatures, &node)
 		case "Versions":
 			body.versioned = true
+			return d.DecodeElement(&body.Versions, &node)
 		}
 		return d.Skip()
 	})
+}
+
+// UnmarshalXML 按原顺序读取标准文档版本条目，跳过外部扩展节点
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (versions *DocVersions) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*versions = DocVersions{}
+	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if node.Name.Local != "Version" {
+			return d.Skip()
+		}
+		var item DocVersion
+		if err := d.DecodeElement(&item, &node); err != nil {
+			return err
+		}
+		versions.Version = append(versions.Version, item)
+		return nil
+	})
+}
+
+// UnmarshalXML 读取文档版本入口属性，忽略带命名空间的属性和未知子节点
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (version *DocVersion) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	*version = DocVersion{
+		ID:      attrValue(start, "ID"),
+		BaseLoc: attrValue(start, "BaseLoc"),
+	}
+	for _, attr := range start.Attr {
+		if attr.Name.Space != "" {
+			continue
+		}
+		value := strings.TrimSpace(attr.Value)
+		switch attr.Name.Local {
+		case "Index":
+			if value != "" {
+				parsed, err := strconv.ParseInt(value, 10, 32)
+				if err != nil {
+					return fmt.Errorf("invalid version Index %q: %w", value, err)
+				}
+				version.Index = int32(parsed)
+			}
+		case "Current":
+			if value != "" {
+				switch value {
+				case "true", "1":
+					version.Current = true
+				case "false", "0":
+					version.Current = false
+				default:
+					return fmt.Errorf("invalid version Current %q", value)
+				}
+			}
+		}
+	}
+	return d.Skip()
 }
 
 // UnmarshalXML 读取文档元数据，不将外部同名字段作为OFD信息

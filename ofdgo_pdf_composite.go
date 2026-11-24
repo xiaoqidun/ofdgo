@@ -176,7 +176,7 @@ type pdfCompositeCache struct {
 	imageProcesses  map[pdfImageProcessKey]*pdfgo.ImageProcess
 	imageColor      pdfCompositeImageColor
 	masks           map[*pdfgo.SoftMask][]pdfCompositeNode
-	meshes          map[*pdfgo.MeshGradient][]codecpdf.MeshTriangle
+	meshes          map[*pdfgo.MeshGradient]*codecpdf.MeshPrepared
 	linearMeshes    *renderCache[pdfLinearMeshKey, []pdfgo.MeshTriangle]
 	patterns        map[pdfgo.Paint]*pdfCompositePattern
 	shadingPatterns map[*pdfgo.ShadingPattern][]pdfCompositeNode
@@ -218,6 +218,9 @@ func (n pdfCompositeNode) direct() bool {
 	}
 	s, fill, stroke := n.style()
 	if (n.image == nil || n.image.Image.ImageMask) && (fill && s.Fill.Shading != nil || stroke && s.Stroke.Shading != nil) {
+		return false
+	}
+	if n.image != nil && n.image.Image.ImageMask && s.Fill.Tiling != nil {
 		return false
 	}
 	if fill && stroke {
@@ -843,7 +846,7 @@ func (c *pdfCompositeCache) clipCache() *renderCache[[32]byte, *pdfCompositeClip
 // 返回: *pdfCompositeCache 当前页面缓存
 func (p *pdfImporter) compositingCache() *pdfCompositeCache {
 	if p.compositeCache == nil {
-		p.compositeCache = &pdfCompositeCache{resources: p.resources, images: map[*pdfgo.Image]*pdfgo.ImageComponents{}, masks: map[*pdfgo.SoftMask][]pdfCompositeNode{}, meshes: map[*pdfgo.MeshGradient][]codecpdf.MeshTriangle{}}
+		p.compositeCache = &pdfCompositeCache{resources: p.resources, images: map[*pdfgo.Image]*pdfgo.ImageComponents{}, masks: map[*pdfgo.SoftMask][]pdfCompositeNode{}, meshes: map[*pdfgo.MeshGradient]*codecpdf.MeshPrepared{}}
 	}
 	return p.compositeCache
 }
@@ -1560,13 +1563,13 @@ func (p *pdfImporter) compositeRegionBounds(node pdfCompositeNode) (Box, error) 
 		return Box{}, err
 	}
 	switch p.editor.Backends().Compiler.(type) {
-	case CanvasBackend, *CanvasBackend, OFDCompiler, *OFDCompiler:
+	case DefaultBackend, *DefaultBackend, OFDCompiler, *OFDCompiler:
 		geometry, err := p.renderer.Geometry()
 		if err != nil {
 			return Box{}, err
 		}
 		switch geometry.(type) {
-		case CanvasBackend, *CanvasBackend:
+		case DefaultBackend, *DefaultBackend:
 			c := pdfCompositor{importer: p, cache: p.compositingCache()}
 			return c.coverageBounds(node)
 		}
@@ -1641,12 +1644,19 @@ func (p *pdfImporter) compositeRegion(backdrop []pdfCompositeNode, node pdfCompo
 			if prevBox.W <= 0 || prevBox.H <= 0 || prevBox.X >= box.X+box.W || prevBox.Y >= box.Y+box.H || prevBox.X+prevBox.W <= box.X || prevBox.Y+prevBox.H <= box.Y {
 				continue
 			}
+			clippedX0 := math.Max(box.X, prevBox.X)
+			clippedY0 := math.Max(box.Y, prevBox.Y)
+			clippedX1 := math.Min(box.X+box.W, prevBox.X+prevBox.W)
+			clippedY1 := math.Min(box.Y+box.H, prevBox.Y+prevBox.H)
+			if clippedX1 <= clippedX0 || clippedY1 <= clippedY0 {
+				continue
+			}
 			filteredBackdrop = append(filteredBackdrop, prev)
 			if useBuckets {
-				tx0 := max(0, min(tilesX-1, int(math.Floor((prevBox.X-box.X-step)/tileMM))))
-				ty0 := max(0, min(tilesY-1, int(math.Floor((prevBox.Y-box.Y-step)/tileMM))))
-				tx1 := max(0, min(tilesX-1, int(math.Floor((prevBox.X+prevBox.W-box.X+step)/tileMM))))
-				ty1 := max(0, min(tilesY-1, int(math.Floor((prevBox.Y+prevBox.H-box.Y+step)/tileMM))))
+				tx0 := max(0, min(tilesX-1, int(math.Floor((clippedX0-box.X-step)/tileMM))))
+				ty0 := max(0, min(tilesY-1, int(math.Floor((clippedY0-box.Y-step)/tileMM))))
+				tx1 := max(0, min(tilesX-1, int(math.Floor((clippedX1-box.X+step)/tileMM))))
+				ty1 := max(0, min(tilesY-1, int(math.Floor((clippedY1-box.Y+step)/tileMM))))
 				for ty := ty0; ty <= ty1; ty++ {
 					rowOff := ty * tilesX
 					for tx := tx0; tx <= tx1; tx++ {

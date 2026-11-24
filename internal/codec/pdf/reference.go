@@ -24,12 +24,31 @@ import (
 	"github.com/xiaoqidun/pdfgo"
 )
 
+// ReferenceSource 保存外部引用PDF的原始字节及可选解密参数
+// Data为空时按PDF标准保留代理外观
+type ReferenceSource struct {
+	Data         []byte
+	Password     []byte
+	PasswordUTF8 bool
+}
+
+// ReferenceSourceResolver 由上层按引用目标提供外部PDF字节与密码
+type ReferenceSourceResolver func(context.Context, pdfgo.ReferenceXObject) (ReferenceSource, error)
+
 // ReferenceCache 保存单次会话拥有的引用文档及页面，零值可用，须串行使用且使用后不应复制
-// Close只释放缓存自行打开的阅读器，不关闭来源文档或调用方提供的阅读器
+// Close只释放缓存自行打开的阅读器，不关闭来源文档
 type ReferenceCache struct {
-	readers map[[32]byte]*pdfgo.Reader
+	readers map[referenceReaderKey]*pdfgo.Reader
 	streams map[*pdfgo.Stream]*pdfgo.Reader
 	pages   map[referencePageKey]*pdfgo.Page
+}
+
+// referenceReaderKey 按文档内容与密码参数区分已打开的引用阅读器
+type referenceReaderKey struct {
+	digest     [32]byte
+	passDigest [32]byte
+	hasPass    bool
+	passUTF8   bool
 }
 
 // referencePageKey 区分目标文档、索引和文本标签，避免重复遍历页面树
@@ -56,42 +75,68 @@ func referenceProxy(ctx context.Context, cause error, warning func(pdfgo.Diagnos
 	return nil, nil
 }
 
+// openReader 按内容与密码打开并缓存引用文档阅读器
+// 入参: data PDF原始字节, password 解密密码, passwordUTF8 是否使用UTF-8密码编码, warning 诊断回调
+// 返回: *pdfgo.Reader 引用阅读器, error 打开错误
+func (c *ReferenceCache) openReader(data, password []byte, passwordUTF8 bool, warning func(pdfgo.Diagnostic)) (*pdfgo.Reader, error) {
+	key := referenceReaderKey{digest: sha256.Sum256(data), hasPass: len(password) != 0, passUTF8: passwordUTF8}
+	if key.hasPass {
+		key.passDigest = sha256.Sum256(password)
+	}
+	if reader := c.readers[key]; reader != nil {
+		return reader, nil
+	}
+	reader, err := pdfgo.NewReaderWithOptions(bytes.NewReader(data), int64(len(data)), pdfgo.ReaderOptions{Password: password, PasswordUTF8: passwordUTF8, Warning: warning})
+	if err != nil {
+		return nil, err
+	}
+	if c.readers == nil {
+		c.readers = make(map[referenceReaderKey]*pdfgo.Reader)
+	}
+	c.readers[key] = reader
+	return reader, nil
+}
+
 // Resolve 解析引用目标，目标不可用时按PDF标准保留代理内容
-// 入参: ctx 取消上下文, source 来源文档, reference 引用目标, fileResolver 外部文件读取, referenceResolver 调用方页面解析, warning 诊断回调
+// 入参: ctx 取消上下文, source 来源文档, reference 引用目标, fileResolver 外部文件读取, referenceResolver 外部引用字节解析, warning 诊断回调
 // 返回: *pdfgo.Page 目标页面，不可用时为空, error 取消或调用方解析错误
-func (c *ReferenceCache) Resolve(ctx context.Context, source *pdfgo.Reader, reference pdfgo.ReferenceXObject, fileResolver pdfgo.FileResolver, referenceResolver pdfgo.ReferenceResolver, warning func(pdfgo.Diagnostic)) (*pdfgo.Page, error) {
+func (c *ReferenceCache) Resolve(ctx context.Context, source *pdfgo.Reader, reference pdfgo.ReferenceXObject, fileResolver pdfgo.FileResolver, referenceResolver ReferenceSourceResolver, warning func(pdfgo.Diagnostic)) (*pdfgo.Page, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	var reader *pdfgo.Reader
 	if referenceResolver != nil {
-		return referenceResolver(ctx, source, reference)
-	}
-	reader := c.streams[reference.File.Embedded]
-	if reader == nil {
-		if reference.File.Embedded == nil && fileResolver == nil {
-			return referenceProxy(ctx, fmt.Errorf("external reference file unavailable"), warning)
+		resolved, err := referenceResolver(ctx, reference)
+		if err != nil {
+			return nil, err
 		}
-		data, err := source.ReadFileData(ctx, reference.File, fileResolver)
+		if len(resolved.Data) == 0 {
+			return nil, ctx.Err()
+		}
+		reader, err = c.openReader(resolved.Data, resolved.Password, resolved.PasswordUTF8, warning)
 		if err != nil {
 			return referenceProxy(ctx, err, warning)
 		}
-		key := sha256.Sum256(data)
-		reader = c.readers[key]
+	} else {
+		reader = c.streams[reference.File.Embedded]
 		if reader == nil {
-			reader, err = pdfgo.NewReaderWithOptions(bytes.NewReader(data), int64(len(data)), pdfgo.ReaderOptions{Warning: warning})
+			if reference.File.Embedded == nil && fileResolver == nil {
+				return referenceProxy(ctx, fmt.Errorf("external reference file unavailable"), warning)
+			}
+			data, err := source.ReadFileData(ctx, reference.File, fileResolver)
 			if err != nil {
 				return referenceProxy(ctx, err, warning)
 			}
-			if c.readers == nil {
-				c.readers = make(map[[32]byte]*pdfgo.Reader)
+			reader, err = c.openReader(data, nil, false, warning)
+			if err != nil {
+				return referenceProxy(ctx, err, warning)
 			}
-			c.readers[key] = reader
-		}
-		if reference.File.Embedded != nil {
-			if c.streams == nil {
-				c.streams = make(map[*pdfgo.Stream]*pdfgo.Reader)
+			if reference.File.Embedded != nil {
+				if c.streams == nil {
+					c.streams = make(map[*pdfgo.Stream]*pdfgo.Reader)
+				}
+				c.streams[reference.File.Embedded] = reader
 			}
-			c.streams[reference.File.Embedded] = reader
 		}
 	}
 	key := referencePageKey{reader: reader, index: reference.PageIndex}

@@ -61,10 +61,26 @@ type pdfEmbeddedFile struct {
 	data   []byte
 }
 
+// pdfDestKey 可比较的运行时跳转目标键
+type pdfDestKey struct {
+	kind      string
+	pageID    string
+	left      float64
+	right     float64
+	top       float64
+	bottom    float64
+	zoom      float64
+	hasLeft   bool
+	hasRight  bool
+	hasTop    bool
+	hasBottom bool
+	hasZoom   bool
+}
+
 // pdfDestinations 保存PDF导入文档的运行时目标语义，不写入OFD包
 type pdfDestinations struct {
 	root    string
-	targets map[Dest]PDFDestinationTarget
+	targets map[pdfDestKey]PDFDestinationTarget
 }
 
 // fromPDFDestinationTarget 将内部pdfgo定位目标转换为根包定位目标
@@ -121,25 +137,57 @@ func toPDFDestinationViewport(viewport PDFDestinationViewport) pdfgo.Destination
 
 // pdfDestinationKey 按OFD模式实际编码的属性生成运行时目标索引
 // 入参: dest OFD目标
-// 返回: Dest 与序列化后目标一致的键
-func pdfDestinationKey(dest Dest) Dest {
-	dest = dest.effective()
+// 返回: pdfDestKey 与序列化后目标一致的键
+func pdfDestinationKey(dest Dest) pdfDestKey {
+	key := pdfDestKey{kind: dest.Type, pageID: dest.PageID}
+	setLeft := func() {
+		if dest.Left != nil {
+			key.left, key.hasLeft = *dest.Left, true
+		}
+	}
+	setTop := func() {
+		if dest.Top != nil {
+			key.top, key.hasTop = *dest.Top, true
+		}
+	}
+	setRight := func() {
+		if dest.Right != nil {
+			key.right, key.hasRight = *dest.Right, true
+		}
+	}
+	setBottom := func() {
+		if dest.Bottom != nil {
+			key.bottom, key.hasBottom = *dest.Bottom, true
+		}
+	}
+	setZoom := func() {
+		if dest.Zoom != nil {
+			key.zoom, key.hasZoom = *dest.Zoom, true
+		}
+	}
 	switch dest.Type {
 	case "Fit":
-		dest.Left, dest.Top, dest.Right, dest.Bottom, dest.Zoom = 0, 0, 0, 0, 0
-		dest.OmitLeft, dest.OmitTop, dest.OmitZoom = true, true, true
 	case "FitH":
-		dest.Left, dest.Right, dest.Bottom, dest.Zoom = 0, 0, 0, 0
-		dest.OmitLeft, dest.OmitZoom = true, true
+		setTop()
 	case "FitV":
-		dest.Top, dest.Right, dest.Bottom, dest.Zoom = 0, 0, 0, 0
-		dest.OmitTop, dest.OmitZoom = true, true
+		setLeft()
 	case "FitR":
-		dest.Zoom, dest.OmitZoom = 0, true
+		setLeft()
+		setTop()
+		setRight()
+		setBottom()
 	case "XYZ":
-		dest.Right, dest.Bottom = 0, 0
+		setLeft()
+		setTop()
+		setZoom()
+	default:
+		setLeft()
+		setTop()
+		setRight()
+		setBottom()
+		setZoom()
 	}
-	return dest
+	return key
 }
 
 // Transform 对PDF定位目标应用二维仿射变换矩阵
@@ -698,7 +746,7 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 			default:
 				return nil, nil
 			}
-			action.Goto = &Goto{Dest: &Dest{Type: "XYZ", PageID: p.editor.pages[index].ID, OmitLeft: true, OmitTop: true, OmitZoom: true}}
+			action.Goto = &Goto{Dest: &Dest{Type: "XYZ", PageID: p.editor.pages[index].ID}}
 			p.editor.setPDFDestination(*action.Goto.Dest, pdfgo.DestinationTarget{Mode: "XYZ", KeepLeft: true, KeepTop: true, KeepZoom: true})
 			*currentPage = index
 		case pdfgo.Name("URI"):
@@ -781,21 +829,49 @@ func (p *pdfImporter) linkAction(annotation pdfgo.Annotation, strict bool, curre
 			target.Right, target.Bottom = box.X+box.W, box.Y+box.H
 			target.KeepLeft, target.KeepTop = false, false
 		}
-		dest := &Dest{Type: string(target.Mode), PageID: p.pageIDs[destination.Page], Left: target.Left, Top: target.Top, Right: target.Right, Bottom: target.Bottom, Zoom: target.Zoom, OmitLeft: target.KeepLeft, OmitTop: target.KeepTop, OmitZoom: target.KeepZoom}
+		dest := &Dest{Type: string(target.Mode), PageID: p.pageIDs[destination.Page]}
+		switch dest.Type {
+		case "XYZ":
+			if !target.KeepLeft {
+				dest.Left = float64Ptr(target.Left)
+			}
+			if !target.KeepTop {
+				dest.Top = float64Ptr(target.Top)
+			}
+			if !target.KeepZoom {
+				dest.Zoom = float64Ptr(target.Zoom)
+			}
+		case "FitH":
+			if !target.KeepTop {
+				dest.Top = float64Ptr(target.Top)
+			}
+		case "FitV":
+			if !target.KeepLeft {
+				dest.Left = float64Ptr(target.Left)
+			}
+		case "FitR":
+			if !target.KeepLeft {
+				dest.Left = float64Ptr(target.Left)
+			}
+			if !target.KeepTop {
+				dest.Top = float64Ptr(target.Top)
+			}
+			dest.Right = float64Ptr(target.Right)
+			dest.Bottom = float64Ptr(target.Bottom)
+		}
 		if target.KeepLeft || target.KeepTop {
 			if strict {
 				return nil, &pdfgo.UnsupportedError{Feature: "destination retained coordinates cannot be represented in OFD"}
 			}
 			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF destination retained coordinates use OFD default zero"})
 		}
-		if dest.Type == "XYZ" && !dest.OmitZoom && dest.Zoom != 0 && (dest.Zoom < 0.1 || dest.Zoom > 64) {
+		if dest.Type == "XYZ" && dest.Zoom != nil && *dest.Zoom != 0 && (*dest.Zoom < 0.1 || *dest.Zoom > 64) {
 			if strict {
 				return nil, &pdfgo.UnsupportedError{Feature: "destination zoom outside OFD range"}
 			}
-			dest.OmitZoom = true
+			dest.Zoom = nil
 			p.warning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PDF destination zoom outside OFD range; current zoom retained"})
 		}
-		*dest = dest.effective()
 		p.editor.setPDFDestination(*dest, target)
 		action.Goto = &Goto{Dest: dest}
 		*currentPage = p.pageIndexes[destination.Page]
@@ -1011,7 +1087,11 @@ func (p *pdfImporter) embeddedLinkAction(object pdfgo.Object, strict bool) (*Act
 // 入参: dest OFD动作目标, target 保留空坐标的PDF定位语义
 func (e *Editor) setPDFDestination(dest Dest, target pdfgo.DestinationTarget) {
 	if e.pdfDestinations == nil {
-		e.pdfDestinations = &pdfDestinations{root: "Doc_0/Document.xml", targets: make(map[Dest]PDFDestinationTarget)}
+		e.pdfDestinations = &pdfDestinations{root: "Doc_0/Document.xml", targets: make(map[pdfDestKey]PDFDestinationTarget)}
+	}
+	zoom := 0.0
+	if dest.Zoom != nil {
+		zoom = *dest.Zoom
 	}
 	e.pdfDestinations.targets[pdfDestinationKey(dest)] = PDFDestinationTarget{
 		Mode:     string(target.Mode),
@@ -1019,9 +1099,9 @@ func (e *Editor) setPDFDestination(dest Dest, target pdfgo.DestinationTarget) {
 		Top:      target.Top,
 		Right:    target.Right,
 		Bottom:   target.Bottom,
-		Zoom:     dest.effective().Zoom,
+		Zoom:     zoom,
 		KeepLeft: target.KeepLeft,
 		KeepTop:  target.KeepTop,
-		KeepZoom: dest.OmitZoom || dest.Zoom == 0,
+		KeepZoom: dest.Zoom == nil || *dest.Zoom == 0,
 	}
 }

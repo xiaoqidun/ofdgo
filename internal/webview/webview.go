@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"mime"
 	"net/http"
 	"net/url"
@@ -56,6 +57,8 @@ const (
 	svgStreamMaxBytes      = 256 << 20
 	svgStreamTTL           = 60 * time.Second
 	engineCacheMaxBytes    = 192 << 20
+	webviewAppCSP          = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' blob: data:; media-src 'self' blob: data:; connect-src 'self' blob: data:; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+	nativeDataCSP          = "sandbox; default-src 'none'"
 )
 
 // host 连接桌面系统能力和共用文档业务
@@ -223,7 +226,7 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 	if err != nil {
 		return err
 	}
-	instance, err := guigo.OpenWindowInstance(ctx, "OFDGo:"+key, data, h.receiveLaunch)
+	instance, err := guigo.OpenInstance(ctx, guigo.InstanceOptions{AppID: "OFDGo:" + key, Payload: data, Window: true}, h.receiveLaunch)
 	if err != nil || instance == nil {
 		return err
 	}
@@ -254,36 +257,7 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 	for _, name := range []string{"engine.open", "engine.close", "engine.call", "engine.start", "engine.cancel", "engine.finish", "batch", "open", "save", "directory", "temp.directory", "temp.remove", "file", "release", "drop.release", "child", "remove", "write.begin", "write.data", "write.commit", "write.abort", "fonts", "ready", "launch.done", "title", "window.info", "window.drag", "window.close", "appearance", "update.check", "update.open", "association.query", "association.register", "association.remove", "print.capabilities", "print.dialog", "print.printers", "print.query", "print.properties", "print"} {
 		bindings["ofdgo.host."+name] = func(ctx context.Context, args any) (any, error) { return h.call(ctx, name, args) }
 	}
-	static := http.FileServerFS(webuiassets.NativeFS)
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/__native/") {
-			if h.serveMemoryResource(w, r) {
-				return
-			}
-			files.serve(w, r)
-			return
-		}
-		if strings.HasSuffix(r.URL.Path, ".wasm") || strings.HasSuffix(r.URL.Path, "wasm_exec.js") || strings.HasSuffix(r.URL.Path, "ofdgo_work.js") {
-			http.NotFound(w, r)
-			return
-		}
-		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
-			data, err := h.themeIndex()
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("X-OFDGo-Build-Version", build.Version)
-			w.Header().Set("Cache-Control", "no-store")
-			w.Write(data)
-			return
-		}
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("X-OFDGo-Build-Version", build.Version)
-		static.ServeHTTP(w, r)
-	})
-	options.Handler = handler
+	options.Handler = h.httpHandler()
 	options.ResourceHandler = h.resource
 	options.Bindings = bindings
 	options.OnReady = func(window *guigo.Window) {
@@ -306,18 +280,104 @@ func Run(ctx context.Context, paths []string, dataDir string) error {
 		h.emit("ofdgo.window", info)
 	}
 	options.OnClosing = func(ctx context.Context) bool {
-		h.mu.Lock()
-		allowed := h.closeAllowed || !h.frontendReady
-		h.mu.Unlock()
-		if !allowed {
-			h.emit("ofdgo.closing", nil)
-		}
-		return allowed
+		return h.handleClosing()
 	}
 	options.OnError = func(err error) {
 		h.emit("ofdgo.error", err.Error())
 	}
 	return guigo.Run(ctx, options)
+}
+
+// setAppSecurityHeaders 为桌面主界面及应用静态资源写入同源安全响应头
+// 入参: header 目标响应头
+func setAppSecurityHeaders(header http.Header) {
+	header.Set("Content-Security-Policy", webviewAppCSP)
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("X-Frame-Options", "DENY")
+	header.Set("Referrer-Policy", "no-referrer")
+}
+
+// setNativeDataSecurityHeaders 为用户文档衍生资源端点写入沙箱与防嗅探安全响应头
+// 入参: header 目标响应头, attachment 是否附加下载处置头
+func setNativeDataSecurityHeaders(header http.Header, attachment bool) {
+	header.Set("Content-Security-Policy", nativeDataCSP)
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Referrer-Policy", "no-referrer")
+	if attachment {
+		header.Set("Content-Disposition", "attachment")
+	}
+}
+
+// safeNativeResourceMIME 拦截可能触发同源脚本执行的响应媒体类型
+// 入参: mimeType 原始媒体类型
+// 返回: string 安全的媒体类型
+func safeNativeResourceMIME(mimeType string) string {
+	mediaType := strings.TrimSpace(strings.ToLower(mimeType))
+	if cut, _, ok := strings.Cut(mediaType, ";"); ok {
+		mediaType = strings.TrimSpace(cut)
+	}
+	switch mediaType {
+	case "", "text/html", "application/xhtml+xml", "text/javascript", "application/javascript", "application/x-javascript", "text/ecmascript", "application/ecmascript":
+		return "application/octet-stream"
+	}
+	return mimeType
+}
+
+// httpHandler 创建桌面端内置HTTP处理器并统一附加安全响应头
+// 返回: http.Handler HTTP处理器
+func (h *host) httpHandler() http.Handler {
+	static := http.FileServerFS(webuiassets.NativeFS)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/__native/") {
+			if h.serveMemoryResource(w, r) {
+				return
+			}
+			if h.files != nil {
+				h.files.serve(w, r)
+				return
+			}
+			setNativeDataSecurityHeaders(w.Header(), true)
+			http.NotFound(w, r)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, ".wasm") || strings.HasSuffix(r.URL.Path, "wasm_exec.js") || strings.HasSuffix(r.URL.Path, "ofdgo_work.js") {
+			setAppSecurityHeaders(w.Header())
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			data, err := h.themeIndex()
+			if err != nil {
+				setAppSecurityHeaders(w.Header())
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			setAppSecurityHeaders(w.Header())
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("X-OFDGo-Build-Version", build.Version)
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write(data)
+			return
+		}
+		setAppSecurityHeaders(w.Header())
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-OFDGo-Build-Version", build.Version)
+		static.ServeHTTP(w, r)
+	})
+}
+
+// handleClosing 处理窗口关闭请求，向前端投递失败时直接放行关闭
+// 返回: bool 是否允许立即关闭窗口
+func (h *host) handleClosing() bool {
+	h.mu.Lock()
+	allowed := h.closeAllowed || !h.frontendReady
+	h.mu.Unlock()
+	if !allowed {
+		if err := h.emitError("ofdgo.closing", nil); err != nil {
+			return true
+		}
+	}
+	return allowed
 }
 
 // newDocResourceStore 创建带总字节上限的文档只读资源内存池
@@ -511,6 +571,9 @@ func queryAssociations() (any, error) {
 // 入参: scope 作用范围, remove 是否撤销
 // 返回: error 操作错误
 func changeAssociations(scope string, remove bool) error {
+	if scope != string(guigo.AssociationUser) && scope != string(guigo.AssociationMachine) {
+		return fmt.Errorf("关联范围无效")
+	}
 	options, err := associationOptions()
 	if err != nil {
 		return err
@@ -540,9 +603,20 @@ func associationError(err error) error {
 // 入参: ctx 请求上下文, version 当前版本, endpoint 官网地址
 // 返回: bool 是否有更新, error 检查错误
 func applicationUpdate(ctx context.Context, version, endpoint string) (bool, error) {
+	return applicationUpdateWithTransport(ctx, nil, version, endpoint)
+}
+
+// applicationUpdateWithTransport 使用可选传输层检查远程更新，并禁止HTTPS重定向降级为HTTP
+// 入参: ctx 请求上下文, transport 可选HTTP传输层, version 当前版本, endpoint 官网地址
+// 返回: bool 是否有更新, error 检查错误
+func applicationUpdateWithTransport(ctx context.Context, transport http.RoundTripper, version, endpoint string) (bool, error) {
 	current, ok := parseBuildVersion(version)
 	if !ok {
 		return false, nil
+	}
+	parsedEndpoint, err := url.Parse(endpoint)
+	if err != nil || (parsedEndpoint.Scheme != "https" && parsedEndpoint.Scheme != "http") || parsedEndpoint.Host == "" {
+		return false, errors.New("更新地址无效")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
@@ -551,7 +625,26 @@ func applicationUpdate(ctx context.Context, version, endpoint string) (bool, err
 		return false, err
 	}
 	request.Header.Set("Cache-Control", "no-store")
-	response, err := http.DefaultClient.Do(request)
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("重定向次数过多")
+			}
+			wasHTTPS := strings.EqualFold(parsedEndpoint.Scheme, "https")
+			for _, prev := range via {
+				if strings.EqualFold(prev.URL.Scheme, "https") {
+					wasHTTPS = true
+					break
+				}
+			}
+			if wasHTTPS && !strings.EqualFold(req.URL.Scheme, "https") {
+				return errors.New("禁止从HTTPS降级到HTTP")
+			}
+			return nil
+		},
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		return false, err
 	}
@@ -1237,6 +1330,10 @@ func (s *docResourceStore) evictOneLocked() bool {
 // 入参: engineID 会话标识, data SVG字节数据
 // 返回: string 一次性SVG流路径
 func (s *svgStreamStore) put(engineID string, data []byte) string {
+	size := int64(len(data))
+	if s.maxBytes > 0 && size > s.maxBytes {
+		return ""
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -1244,11 +1341,13 @@ func (s *svgStreamStore) put(engineID string, data []byte) string {
 	}
 	now := time.Now()
 	s.pruneExpiredLocked(now)
-	size := int64(len(data))
 	for s.maxBytes > 0 && len(s.order) > 0 && s.totalBytes+size > s.maxBytes {
 		if !s.evictOldestLocked() {
 			break
 		}
+	}
+	if s.maxBytes > 0 && s.totalBytes+size > s.maxBytes {
+		return ""
 	}
 	id := rand.Text()
 	s.items[id] = &svgStreamItem{engineID: engineID, data: data, createdAt: now}
@@ -1504,6 +1603,8 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 	var contentType string
 	var svgRelease func(bool)
 	cacheControl := "no-store"
+	nativeData := false
+	attachment := false
 	transferred := false
 	defer func() {
 		if !transferred {
@@ -1530,8 +1631,9 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 			return nil, nil
 		}
 		reader, size = bytes.NewReader(item.data), int64(len(item.data))
-		contentType = item.mime
+		contentType = safeNativeResourceMIME(item.mime)
 		cacheControl = "private, max-age=3600"
+		nativeData = true
 	} else if strings.HasPrefix(r.URL.Path, "/__native/svg/") {
 		id := strings.TrimPrefix(r.URL.Path, "/__native/svg/")
 		if id == "" || strings.Contains(id, "/") || h.svgStreams == nil {
@@ -1544,12 +1646,20 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 		reader, size = bytes.NewReader(data), int64(len(data))
 		contentType = "image/svg+xml; charset=utf-8"
 		svgRelease = releaseSVG
+		nativeData = true
+		attachment = true
 	} else if strings.HasPrefix(r.URL.Path, "/__native/data/") {
+		if h.files == nil {
+			return nil, nil
+		}
 		var err error
 		reader, size, close, err = h.files.resource(strings.TrimPrefix(r.URL.Path, "/__native/data/"))
 		if err != nil {
 			return nil, nil
 		}
+		contentType = "application/octet-stream"
+		nativeData = true
+		attachment = true
 	} else {
 		name := strings.TrimPrefix(r.URL.Path, "/")
 		if name == "" {
@@ -1578,8 +1688,16 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 		}
 		contentType = http.DetectContentType(header)
 	}
+	if nativeData {
+		contentType = safeNativeResourceMIME(contentType)
+	}
 	headers := http.Header{"Content-Type": {contentType}, "Content-Length": {strconv.FormatInt(size, 10)}, "Cache-Control": {cacheControl}, "Accept-Ranges": {"bytes"}}
 	headers.Set("X-OFDGo-Build-Version", build.Version)
+	if nativeData {
+		setNativeDataSecurityHeaders(headers, attachment)
+	} else {
+		setAppSecurityHeaders(headers)
+	}
 	start, length, status := int64(0), size, http.StatusOK
 	if value := r.Header.Get("Range"); value != "" && r.Method == http.MethodGet {
 		rangeStart, rangeLength, ok := parseByteRange(value, size)
@@ -1612,6 +1730,7 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 // 返回: bool 是否已由内存资源通道处理
 func (h *host) serveMemoryResource(w http.ResponseWriter, r *http.Request) bool {
 	if strings.HasPrefix(r.URL.Path, "/__native/resource/") {
+		setNativeDataSecurityHeaders(w.Header(), false)
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return true
@@ -1636,6 +1755,7 @@ func (h *host) serveMemoryResource(w http.ResponseWriter, r *http.Request) bool 
 		if contentType == "" {
 			contentType = http.DetectContentType(item.data[:min(len(item.data), 512)])
 		}
+		contentType = safeNativeResourceMIME(contentType)
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Cache-Control", "private, max-age=3600")
 		w.Header().Set("X-OFDGo-Build-Version", build.Version)
@@ -1643,6 +1763,7 @@ func (h *host) serveMemoryResource(w http.ResponseWriter, r *http.Request) bool 
 		return true
 	}
 	if strings.HasPrefix(r.URL.Path, "/__native/svg/") {
+		setNativeDataSecurityHeaders(w.Header(), true)
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return true
@@ -1800,13 +1921,21 @@ func (h *host) call(ctx context.Context, name string, value any) (any, error) {
 			return window.PrintCapabilities(ctx)
 		}
 		if name == "print.dialog" {
-			return nil, window.ShowPrintUI(ctx, text("kind"))
+			kind := guigo.PrintDialogKind(text("kind"))
+			if kind != guigo.PrintDialogSystem && kind != guigo.PrintDialogBrowser {
+				return nil, fmt.Errorf("打印对话框类型无效")
+			}
+			return nil, window.ShowPrintUI(ctx, kind)
 		}
 		if name == "print.printers" {
 			return window.ListPrinters(ctx)
 		}
 		if name == "print.properties" {
-			return nil, window.ShowPrinterProperties(ctx, text("printer"))
+			printer := strings.TrimSpace(text("printer"))
+			if printer == "" || strings.ContainsRune(printer, 0) {
+				return nil, fmt.Errorf("打印机名称无效")
+			}
+			return nil, window.ShowPrinterProperties(ctx, printer)
 		}
 		data, err := json.Marshal(args)
 		if err != nil {
@@ -2047,7 +2176,7 @@ func (h *host) call(ctx context.Context, name string, value any) (any, error) {
 			var err error
 			if flag("directory") {
 				var directory string
-				directory, err = window.OpenDirectory(options)
+				directory, err = window.OpenDirectory(ctx, options)
 				if err == nil {
 					allowed := make(map[string]bool)
 					for _, filter := range options.Filters {
@@ -2092,10 +2221,10 @@ func (h *host) call(ctx context.Context, name string, value any) (any, error) {
 					})
 				}
 			} else if flag("multiple") {
-				names, err = window.OpenFiles(options)
+				names, err = window.OpenFiles(ctx, options)
 			} else {
 				var file string
-				file, err = window.OpenFile(options)
+				file, err = window.OpenFile(ctx, options)
 				if err == nil {
 					names = []string{file}
 				}
@@ -2127,7 +2256,7 @@ func (h *host) call(ctx context.Context, name string, value any) (any, error) {
 			return guigo.Result{Value: result, Discard: func() { h.files.discardEntries(registered) }}, nil
 		}
 		if name == "save" {
-			file, err := window.SaveFile(options)
+			file, err := window.SaveFile(ctx, options)
 			if err != nil {
 				return nil, dialogError(err)
 			}
@@ -2138,7 +2267,7 @@ func (h *host) call(ctx context.Context, name string, value any) (any, error) {
 			id := handleID(handle)
 			return guigo.Result{Value: handle, Discard: func() { h.files.release(id) }}, nil
 		}
-		file, err := window.OpenDirectory(options)
+		file, err := window.OpenDirectory(ctx, options)
 		if err != nil {
 			return nil, dialogError(err)
 		}
@@ -2238,12 +2367,15 @@ func (h *host) call(ctx context.Context, name string, value any) (any, error) {
 		return h.fonts, nil
 	case "title":
 		h.mu.Lock()
-		window := h.window
+		window, closing := h.window, h.closeAllowed
 		h.mu.Unlock()
-		if window == nil {
+		if window == nil || closing {
 			return nil, nil
 		}
-		return nil, window.SetTitle(text("title"))
+		if err := window.SetTitle(text("title")); err != nil && !errors.Is(err, guigo.ErrClosed) {
+			return nil, err
+		}
+		return nil, nil
 	case "window.info", "window.drag", "window.close":
 		h.mu.Lock()
 		window := h.window
@@ -2276,7 +2408,7 @@ func (h *host) call(ctx context.Context, name string, value any) (any, error) {
 			return true, nil
 		}
 		values, ok := args["regions"].([]any)
-		if !ok {
+		if !ok || len(values) > 256 {
 			return nil, fmt.Errorf("拖动区域无效")
 		}
 		regions := make([]guigo.Rect, 0, len(values))
@@ -2289,7 +2421,7 @@ func (h *host) call(ctx context.Context, name string, value any) (any, error) {
 			y, yOK := item["y"].(float64)
 			width, widthOK := item["width"].(float64)
 			height, heightOK := item["height"].(float64)
-			if !xOK || !yOK || !widthOK || !heightOK {
+			if !xOK || !yOK || !widthOK || !heightOK || math.IsNaN(x) || math.IsInf(x, 0) || math.IsNaN(y) || math.IsInf(y, 0) || math.IsNaN(width) || math.IsInf(width, 0) || math.IsNaN(height) || math.IsInf(height, 0) || width < 0 || height < 0 {
 				return nil, fmt.Errorf("拖动区域无效")
 			}
 			regions = append(regions, guigo.Rect{X: x, Y: y, Width: width, Height: height})
@@ -2523,14 +2655,30 @@ func (h *host) openWriter(ctx context.Context, value any, name string) (io.Write
 	entry := h.files.entries[id]
 	directory := entry != nil && entry.directory
 	h.files.mu.Unlock()
+	type createdChild struct {
+		id      string
+		created bool
+	}
+	var rollback []createdChild
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			for i := len(rollback) - 1; i >= 0; i-- {
+				h.files.discardChild(rollback[i].id, rollback[i].created)
+			}
+		}
+	}()
 	if directory {
 		parts := strings.Split(strings.ReplaceAll(name, "\\", "/"), "/")
 		for i, part := range parts {
-			child, _, _, err := h.files.child(id, part, i < len(parts)-1, true)
+			child, registered, created, err := h.files.child(id, part, i < len(parts)-1, true)
 			if err != nil {
 				return nil, err
 			}
 			id = child["nativeHandle"].(string)
+			if registered {
+				rollback = append(rollback, createdChild{id: id, created: created})
+			}
 		}
 		h.files.mu.Lock()
 		owned := h.files.entries[id] != nil && h.files.entries[id].owned
@@ -2539,7 +2687,12 @@ func (h *host) openWriter(ctx context.Context, value any, name string) (io.Write
 			return nil, fmt.Errorf("输出文件已存在")
 		}
 	}
-	return h.files.begin(ctx, id)
+	writer, err := h.files.begin(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	succeeded = true
+	return writer, nil
 }
 
 // reserveOutput 为一次转换预留独立输出文件或目录

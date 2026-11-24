@@ -59,7 +59,7 @@ func buildLinkAnnotation(item LinkAnnotation) (Annotation, error) {
 	return Annotation{
 		Type:    "Link",
 		Creator: item.Creator,
-		Appearance: Appearance{
+		Appearance: &Appearance{
 			Boundary: editorBoxString(item.Box),
 			Objects:  []GraphicObject{{Type: "PathObject", PathObject: object}},
 		},
@@ -160,8 +160,8 @@ func (e *Editor) SetObjectLink(page int, ids []string, link *AnnotationLink) err
 			actions = &objects[i].PathObject.Actions
 		case "ImageObject":
 			actions = &objects[i].ImageObject.Actions
-		case "CompositeObject", "CompositeGraphicUnit":
-			actions = &objects[i].CompositeGraphicUnit.Actions
+		case "CompositeObject":
+			actions = &objects[i].CompositeObject.Actions
 		default:
 			return fmt.Errorf("object %q cannot contain links", ids[i])
 		}
@@ -213,8 +213,8 @@ func (e *Editor) SetObjectActions(page int, ids []string, actions []Action) erro
 			objects[i].PathObject.Actions = cloneEditorData(actions)
 		case "ImageObject":
 			objects[i].ImageObject.Actions = cloneEditorData(actions)
-		case "CompositeObject", "CompositeGraphicUnit":
-			objects[i].CompositeGraphicUnit.Actions = cloneEditorData(actions)
+		case "CompositeObject":
+			objects[i].CompositeObject.Actions = cloneEditorData(actions)
 		default:
 			return fmt.Errorf("object %q cannot contain actions", ids[i])
 		}

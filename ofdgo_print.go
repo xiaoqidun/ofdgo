@@ -717,15 +717,14 @@ func (p *PrintDocument) Close() error {
 	if p.renderer == nil {
 		return nil
 	}
-	p.renderer.ClearCache()
-	err := p.renderer.reader.Close()
+	err := p.renderer.Close()
 	p.renderer = nil
 	return err
 }
 
 // PreparePrint 固定当前阅读入口、版本及配置，底层输入由调用方保持存活
-// 入参: ctx 准备上下文, options 内容排版选项
-// 返回: *PrintDocument 独立打印任务, error 布局或读取错误
+// 入参: ctx 准备上下文, options 排版选项
+// 返回: *PrintDocument 打印任务, error 准备错误
 func (r *Renderer) PreparePrint(ctx context.Context, options PrintOptions) (*PrintDocument, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("nil print context")
@@ -744,7 +743,7 @@ func (r *Renderer) PreparePrint(ctx context.Context, options PrintOptions) (*Pri
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = view.reader.Close()
+			_ = view.Close()
 		}
 	}()
 	doc, err := view.reader.docStructureContext(ctx)

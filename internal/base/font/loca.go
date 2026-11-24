@@ -254,9 +254,12 @@ func trueTypeGlyphSize(data []byte, count int) (int, []uint16, error) {
 }
 
 // trueTypePointCount 按完整轮廓计算虚拟点编号，局部复用分量计数，不执行字形指令
-// 入参: tables 字体表, id 字形编号, counts 本次计数缓存, active 递归访问集合
+// 入参: tables 字体表, id 字形编号, counts 本次计数缓存, active 递归访问集合, depth 当前嵌套深度
 // 返回: int 不含虚拟点的轮廓点数, error 结构或循环引用错误
-func trueTypePointCount(tables map[string][]byte, id uint16, counts map[uint16]int, active map[uint16]bool) (int, error) {
+func trueTypePointCount(tables map[string][]byte, id uint16, counts map[uint16]int, active map[uint16]bool, depth int) (int, error) {
+	if depth > maxTTCompositeDepth {
+		return 0, fmt.Errorf("TrueType composite depth limit exceeded")
+	}
 	if count, ok := counts[id]; ok {
 		return count, nil
 	}
@@ -284,7 +287,7 @@ func trueTypePointCount(tables map[string][]byte, id uint16, counts map[uint16]i
 		count = int(binary.BigEndian.Uint16(data[10+2*(contours-1):])) + 1
 	} else {
 		for _, ref := range refs {
-			points, err := trueTypePointCount(tables, ref, counts, active)
+			points, err := trueTypePointCount(tables, ref, counts, active, depth+1)
 			if err != nil {
 				return 0, err
 			}

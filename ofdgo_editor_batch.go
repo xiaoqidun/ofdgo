@@ -187,8 +187,8 @@ func editorObjectID(object GraphicObject) string {
 		return object.PathObject.ID
 	case "ImageObject":
 		return object.ImageObject.ID
-	case "CompositeObject", "CompositeGraphicUnit":
-		return object.CompositeGraphicUnit.ID
+	case "CompositeObject":
+		return object.CompositeObject.ID
 	}
 	return ""
 }
@@ -752,7 +752,7 @@ func (v *editorValidation) appendOwnedObjects(ctx context.Context, page int, obj
 		case "ImageObject":
 			objects[i].ImageObject.ID = id
 		case "CompositeObject":
-			objects[i].CompositeGraphicUnit.ID = id
+			objects[i].CompositeObject.ID = id
 		}
 	}
 	layers := copyEditorPage(e.pages[page]).Content.Layer

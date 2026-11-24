@@ -114,9 +114,9 @@ func collectObjectReferences(object GraphicObject, used map[string]bool) {
 		}
 		clips = object.ImageObject.Clips
 		actions = object.ImageObject.Actions
-	case "CompositeObject", "CompositeGraphicUnit":
-		collectCompositeReferences(object.CompositeGraphicUnit, used)
-		actions = object.CompositeGraphicUnit.Actions
+	case "CompositeObject":
+		collectCompositeReferences(object.CompositeObject, used)
+		actions = object.CompositeObject.Actions
 	}
 	collectActionReferences(actions, used)
 	if clips == nil {

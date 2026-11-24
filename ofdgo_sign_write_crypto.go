@@ -687,13 +687,42 @@ func (key *signatureWriteKey) sign(data []byte, property string, options Signatu
 	}{asn1.RawValue{FullBytes: tbs}, key.cert.Raw, asn1.ObjectIdentifier{1, 2, 156, 10197, 1, 501}, asn1.BitString{Bytes: signature, BitLength: len(signature) * 8}})
 }
 
+// validateSM2DERSignature 校验SM2签名值为合法规范的ASN.1 DER编码且分量位于曲线阶内
+// 入参: sig 签名值字节
+// 返回: error 校验错误
+func validateSM2DERSignature(sig []byte) error {
+	var rs struct {
+		R, S *big.Int
+	}
+	rest, err := asn1.Unmarshal(sig, &rs)
+	if err != nil || len(rest) != 0 || rs.R == nil || rs.S == nil || rs.R.Sign() <= 0 || rs.S.Sign() <= 0 {
+		return fmt.Errorf("invalid SM2 ASN.1 DER signature")
+	}
+	order := sm2.P256().Params().N
+	if rs.R.Cmp(order) >= 0 || rs.S.Cmp(order) >= 0 {
+		return fmt.Errorf("SM2 signature scalar out of range")
+	}
+	canonical, err := asn1.Marshal(rs)
+	if err != nil || !bytes.Equal(canonical, sig) {
+		return fmt.Errorf("non-canonical SM2 ASN.1 DER signature")
+	}
+	return nil
+}
+
 // signMessage 通过crypto.Signer调用成熟实现或硬件签署器
 // SM2签署器必须接受gmsm的SM2SignerOption，接收原文并计算默认用户标识的ZA
-// 入参: data 原文, signer 签署器
-// 返回: []byte 签名值, error 错误信息
+// 入参: data 待签名原文, signer 签署器
+// 返回: []byte 签名值, error 签名错误
 func (key *signatureWriteKey) signMessage(data []byte, signer crypto.Signer) ([]byte, error) {
 	if key.method == signMethodSM2SM3 {
-		return signer.Sign(rand.Reader, data, sm2.NewSM2SignerOption(true, nil))
+		sig, err := signer.Sign(rand.Reader, data, sm2.NewSM2SignerOption(true, nil))
+		if err != nil {
+			return nil, err
+		}
+		if err := validateSM2DERSignature(sig); err != nil {
+			return nil, err
+		}
+		return sig, nil
 	}
 	hashAlg, ok := signatureDigestHash(key.digest)
 	if !ok {

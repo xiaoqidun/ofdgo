@@ -46,6 +46,7 @@ type semanticCompiler struct {
 	patterns                             *renderCache[patternCellKey, []RasterCommand]
 	patternReferences                    map[*Pattern]bool
 	patternPage                          *Matrix
+	pageScopes                           map[pdfPageScopeNode]*pdfPageScopeNode
 }
 
 // newSemanticCompiler 绑定当前字体和几何能力
@@ -811,6 +812,11 @@ func (c *semanticCompiler) fillPattern(clip GeometryPath, pattern *PatternPaint,
 	}
 	for x, end := int(startXF), int(endXF); x <= end; x++ {
 		for y, end := int(startYF), int(endYF); y <= end; y++ {
+			if c.renderer.pageContext != nil {
+				if err := c.renderer.pageContext.Err(); err != nil {
+					return err
+				}
+			}
 			tile := matrix.Multiply(TranslationMatrix(float64(x)*xstep, float64(y)*ystep))
 			if x%2 != 0 && (pattern.ReflectMethod == "Column" || pattern.ReflectMethod == "RowAndColumn") {
 				tile = tile.Multiply(Matrix{a: -1, d: 1, e: pattern.Width})
@@ -853,7 +859,10 @@ func (c *semanticCompiler) shadingClip(path GeometryPath, paint Paint, matrix Ma
 	if gradient.Kind == RasterLinear {
 		dx, dy := gradient.End.X-gradient.Start.X, gradient.End.Y-gradient.Start.Y
 		axis := Matrix{a: dx, b: dy, c: -dy, d: dx, e: gradient.Start.X, f: gradient.Start.Y}
-		inv, _ := axis.Invert()
+		inv, ok := axis.Invert()
+		if !ok {
+			return nil, nil
+		}
 		box, err := c.geometry.Bounds(local)
 		if err != nil {
 			return nil, err

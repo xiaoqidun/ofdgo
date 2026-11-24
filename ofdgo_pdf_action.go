@@ -287,6 +287,7 @@ func (p *pdfImporter) destinationBounds(page *pdfgo.Page) (Box, error) {
 	}
 	matrix, width, height := codecpdf.PageMatrix(page)
 	editor := NewEditor()
+	defer editor.Close()
 	editor.SetResources(p.resources)
 	editor.SetRenderBackends(p.editor.Backends())
 	editor.SetFontDirs(p.editor.fontDirs...)
@@ -303,8 +304,8 @@ func (p *pdfImporter) destinationBounds(page *pdfgo.Page) (Box, error) {
 		matrix:  matrix, pageBox: page.CropBox, pageWidth: width, pageHeight: height,
 		rasterDPI: p.rasterDPI, fontIDs: make(map[*pdfgo.Font]string),
 		resolveFile: p.resolveFile, resolveReference: p.resolveReference,
-		references: &codecpdf.ReferenceCache{},
-		halftones:  p.halftones, halftoneWarnings: make(map[*pdfgo.Halftone]bool),
+		references:       &codecpdf.ReferenceCache{},
+		halftoneWarnings: make(map[*pdfgo.Halftone]bool),
 	}
 	defer local.references.Close()
 	if err := local.compositePage(nil, func(visitor pdfgo.Visitor) error {

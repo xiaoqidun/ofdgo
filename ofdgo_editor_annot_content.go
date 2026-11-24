@@ -117,23 +117,9 @@ func (e *Editor) AnnotationTexts(index int, id string) ([]string, error) {
 	seen := make(map[string]bool)
 	visiting := make(map[*CompositeGraphicUnit]bool)
 	collected := make(map[*CompositeGraphicUnit]bool)
-	var collect func(CompositeGraphicUnit) error
-	collect = func(unit CompositeGraphicUnit) error {
-		if unit.ResourceID != "" {
-			ref, _ := reader.resolveCompositeScoped(content.pageResources, unit.ResourceID)
-			if ref == nil || visiting[ref] {
-				return fmt.Errorf("invalid composite resource %q", unit.ResourceID)
-			}
-			if !collected[ref] {
-				visiting[ref] = true
-				if err := collect(*ref); err != nil {
-					return err
-				}
-				delete(visiting, ref)
-				collected[ref] = true
-			}
-		}
-		for object := range unit.objects() {
+	var collect func([]GraphicObject) error
+	collect = func(objects []GraphicObject) error {
+		for _, object := range objects {
 			switch object.Type {
 			case "TextObject":
 				value := object.TextObject.Text()
@@ -141,16 +127,34 @@ func (e *Editor) AnnotationTexts(index int, id string) ([]string, error) {
 					seen[value] = true
 					texts = append(texts, value)
 				}
-			case "CompositeObject", "CompositeGraphicUnit":
-				if err := collect(object.CompositeGraphicUnit); err != nil {
-					return err
+			case "CompositeObject":
+				resID := object.CompositeObject.ResourceID
+				if resID != "" {
+					ref, _ := reader.resolveCompositeScoped(content.pageResources, resID)
+					if ref == nil || visiting[ref] {
+						return fmt.Errorf("invalid composite resource %q", resID)
+					}
+					if !collected[ref] {
+						visiting[ref] = true
+						var children []GraphicObject
+						for child := range ref.objects() {
+							children = append(children, child)
+						}
+						if err := collect(children); err != nil {
+							return err
+						}
+						delete(visiting, ref)
+						collected[ref] = true
+					}
 				}
 			}
 		}
 		return nil
 	}
-	if err := collect(CompositeGraphicUnit{Objects: annotation.Appearance.Objects}); err != nil {
-		return nil, err
+	if annotation.Appearance != nil {
+		if err := collect(annotation.Appearance.Objects); err != nil {
+			return nil, err
+		}
 	}
 	return texts, nil
 }
@@ -174,6 +178,9 @@ func (e *Editor) prepareAnnotationWithIDs(index int, annotation Annotation) (str
 	if !slices.Contains([]string{"Link", "Path", "Highlight", "Stamp", "Watermark"}, annotation.Type) {
 		return "", nil, nil, fmt.Errorf("invalid annotation type %q", annotation.Type)
 	}
+	if annotation.Appearance == nil {
+		return "", nil, nil, fmt.Errorf("annotation has no appearance")
+	}
 	if _, err := creationBox(annotation.Appearance.Boundary); err != nil {
 		return "", nil, nil, err
 	}
@@ -196,7 +203,7 @@ func (e *Editor) prepareAnnotationWithIDs(index int, annotation Annotation) (str
 		for _, object := range annotation.Appearance.ImageObject {
 			objects = append(objects, GraphicObject{Type: "ImageObject", ImageObject: object})
 		}
-		if len(annotation.Appearance.CompositeGraphicUnit) != 0 {
+		if len(annotation.Appearance.CompositeObject) != 0 {
 			return "", nil, nil, fmt.Errorf("use composite copy to insert existing complex content")
 		}
 	}

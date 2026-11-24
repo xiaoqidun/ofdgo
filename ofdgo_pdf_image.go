@@ -254,9 +254,12 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 	if mark.Style.BlendMode != "" && mark.Style.BlendMode != "Normal" && mark.Style.BlendMode != "Compatible" {
 		return &pdfgo.UnsupportedError{Feature: "image blend mode " + string(mark.Style.BlendMode)}
 	}
-	if mark.Image.ImageMask && (mark.Style.Fill.Axial != nil || mark.Style.Fill.Radial != nil || mark.Style.Fill.Function != nil || mark.Style.Fill.Mesh != nil || mark.Style.Fill.Shading != nil) {
+	if mark.Image.ImageMask && (mark.Style.Fill.Axial != nil || mark.Style.Fill.Radial != nil || mark.Style.Fill.Function != nil || mark.Style.Fill.Mesh != nil || mark.Style.Fill.Shading != nil || mark.Style.Fill.Tiling != nil) {
 		if p.warning != nil {
 			return p.compositeRegion(nil, pdfCompositeNode{image: &mark}, &pdfgo.ColorSpace{Model: "DeviceRGB"}, false)
+		}
+		if mark.Style.Fill.Tiling != nil {
+			return &pdfgo.UnsupportedError{Feature: "tiling pattern stencil image"}
 		}
 		return &pdfgo.UnsupportedError{Feature: "gradient stencil image"}
 	}
@@ -397,7 +400,7 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 				decoded = &codecpdf.StencilImage{Source: decoded, Fill: key.tint}
 			}
 			if encodeErr == nil && len(data) == 0 && decoded != nil && !source.ImageMask && p.compression.Mode == CompressionLossy {
-				data, encodeErr = pdfgo.EncodeImageResource(p.ctx, decoded, p.compression)
+				data, encodeErr = pdfgo.EncodeImageResource(p.ctx, decoded, p.compression.pdfOptions())
 				if encodeErr == nil {
 					optimized = true
 				} else if errors.Is(encodeErr, io.ErrShortBuffer) {
@@ -424,7 +427,7 @@ func (p *pdfImporter) image(mark pdfgo.ImageMark) error {
 			}
 			if encodeErr == nil && !source.ImageMask && p.compression.Mode == CompressionLossy {
 				if !optimized {
-					data, encodeErr = pdfgo.OptimizeImageResource(p.ctx, data, p.compression, key.size)
+					data, encodeErr = pdfgo.OptimizeImageResource(p.ctx, data, p.compression.pdfOptions(), key.size)
 					if encodeErr == nil {
 						optimized = true
 					}
@@ -474,7 +477,7 @@ func (p *pdfImporter) appendImage(mark pdfgo.ImageMark, id string) error {
 		enabled := true
 		interpolate = &enabled
 	}
-	object := ImageObject{Boundary: pdfBoundary(box), ResourceID: id, CTM: pdfNumbers(m[0], m[1], m[2], m[3], m[4]-box.X, m[5]-box.Y), Alpha: &alpha, Clips: clips, Interpolate: interpolate}
+	object := ImageObject{Boundary: pdfBoundary(box), ResourceID: id, CTM: pdfNumbers(m[0], m[1], m[2], m[3], m[4]-box.X, m[5]-box.Y), Alpha: &alpha, Clips: clips, interpolate: interpolate}
 	p.appendSequenceObject(GraphicObject{Type: "ImageObject", ImageObject: object}, mark.Sequence)
 	p.report.ImageObjects++
 	return nil

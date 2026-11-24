@@ -151,7 +151,7 @@ func readSignatureCRL(raw []byte, cert, issuer *smx509.Certificate, at time.Time
 	if !bytes.Equal(crl.RawIssuer, issuer.RawSubject) {
 		return signatureCRL{}, fmt.Errorf("CRL issuer mismatch")
 	}
-	if len(crl.AuthorityKeyId) != 0 && !bytes.Equal(crl.AuthorityKeyId, issuer.SubjectKeyId) {
+	if len(crl.AuthorityKeyId) != 0 && len(issuer.SubjectKeyId) != 0 && !bytes.Equal(crl.AuthorityKeyId, issuer.SubjectKeyId) {
 		return signatureCRL{}, fmt.Errorf("CRL authority key mismatch")
 	}
 	if err := crl.CheckSignatureFrom(issuer); err != nil {

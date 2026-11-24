@@ -576,6 +576,11 @@ func (r *Reader) retireVersionFiles(ctx context.Context, candidates map[string]b
 	if err != nil {
 		return err
 	}
+	signedFiles, err := view.signatureReferenceFiles(ctx, -1)
+	if err != nil {
+		return err
+	}
+	maps.Copy(files, signedFiles)
 	for name := range files {
 		if err := ctx.Err(); err != nil {
 			return err

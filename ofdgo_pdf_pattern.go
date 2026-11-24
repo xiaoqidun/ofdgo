@@ -214,6 +214,9 @@ func (p *pdfImporter) tilingPattern(source *pdfgo.TilingPattern, base pdfgo.Pain
 	if cached, ok := p.patternCells.get(key); ok {
 		pattern := cloneEditorData(cached.pattern)
 		if cached.origin.sequence != nil || len(cached.origin.related) != 0 {
+			if p.patternOrigins == nil {
+				p.patternOrigins = make(map[*Pattern]pdfObjectOrigin)
+			}
 			p.patternOrigins[pattern] = cached.origin
 		}
 		return pattern, p.ctx.Err()
@@ -518,6 +521,15 @@ func (p *pdfImporter) buildTilingPattern(source *pdfgo.TilingPattern, base pdfgo
 	cell.rasterDPI *= m.MaxScale()
 	if !finite(cell.rasterDPI) || cell.rasterDPI < 0 {
 		return nil, fmt.Errorf("invalid PDF tiling pattern raster scale")
+	}
+	maxDPI := max(p.rasterDPI*16, 2400)
+	if dim := max(cell.pageWidth, cell.pageHeight); dim > 0 {
+		if dimLimit := 4096 * 25.4 / dim; finite(dimLimit) && dimLimit > 0 {
+			maxDPI = min(maxDPI, max(p.rasterDPI, dimLimit))
+		}
+	}
+	if cell.rasterDPI > maxDPI {
+		cell.rasterDPI = maxDPI
 	}
 	cell.objects = nil
 	nodes, err := cell.collectCompositeNodes(func(visitor pdfgo.Visitor) error {

@@ -46,7 +46,7 @@ func signatureWriteStamps(r *Reader, stamps []SignatureStamp) ([]SignatureStamp,
 	if err != nil {
 		return nil, err
 	}
-	doc, err := r.Doc()
+	doc, err := r.docInternal()
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +201,7 @@ func (r *Reader) SignaturePageStamps(pages []int, box Box) ([]SignatureStamp, er
 	if r == nil || len(pages) == 0 || !signatureWriteBoxValid(box) {
 		return nil, fmt.Errorf("invalid page stamp parameters")
 	}
-	doc, err := r.Doc()
+	doc, err := r.docInternal()
 	if err != nil {
 		return nil, err
 	}
@@ -225,7 +225,7 @@ func (r *Reader) SignatureSeamStamps(pages []int, box Box) ([]SignatureStamp, er
 	if r == nil || len(pages) < 2 || !signatureWriteBoxValid(box) || box.X < 0 || box.Y < 0 {
 		return nil, fmt.Errorf("invalid seam stamp parameters")
 	}
-	doc, err := r.Doc()
+	doc, err := r.docInternal()
 	if err != nil {
 		return nil, err
 	}
@@ -404,19 +404,24 @@ func (e *Editor) signatureStamp(page int, path ObjectPath) (Stamp, error) {
 }
 
 // changeSignatureStamps 原子修改或移除签章外观，保留签名值，由验签反映修改后的真实状态
-// 入参: page 页面索引, paths 签章路径, matrix 平移或正向缩放，nil删除外观
-// 返回: error 路径、变换、读取或提交错误
-func (e *Editor) changeSignatureStamps(page int, paths []ObjectPath, matrix *Matrix) error {
+// 入参: ctx 取消上下文, page 页面索引, paths 签章外观路径列表, matrix 变换矩阵
+// 返回: error 修改或提交错误
+func (e *Editor) changeSignatureStamps(ctx context.Context, page int, paths []ObjectPath, matrix *Matrix) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if matrix != nil && (matrix.b != 0 || matrix.c != 0 || matrix.a <= 0 || matrix.d <= 0) {
 		return fmt.Errorf("signature appearances support translation and positive scaling")
 	}
-	ctx := context.Background()
-	reader, err := e.reader(nil)
+	reader, err := e.readerContext(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer reader.Close()
-	doc, err := reader.Doc()
+	doc, err := reader.docContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -424,7 +429,7 @@ func (e *Editor) changeSignatureStamps(page int, paths []ObjectPath, matrix *Mat
 		return fmt.Errorf("page index %d out of range", page)
 	}
 	listName := reader.ResPath(doc.Signatures)
-	data, err := reader.readFile(listName)
+	data, err := reader.readFileViewContext(ctx, listName)
 	if err != nil {
 		return err
 	}
@@ -433,7 +438,16 @@ func (e *Editor) changeSignatureStamps(page int, paths []ObjectPath, matrix *Mat
 		return err
 	}
 	files := make(map[string]*signatureStampEdit)
+	seen := make(map[[2]string]bool, len(paths))
 	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		key := [2]string{path.Signature, path.ID}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		index := slices.IndexFunc(list.List, func(signature Signature) bool { return signature.ID == path.Signature })
 		if index < 0 {
 			return fmt.Errorf("signature not found: %s", path.Signature)
@@ -441,11 +455,11 @@ func (e *Editor) changeSignatureStamps(page int, paths []ObjectPath, matrix *Mat
 		name := signatureRefPath(listName, list.List[index].BaseLoc)
 		file := files[path.Signature]
 		if file == nil {
-			data, err := reader.readFile(name)
+			data, err := reader.readFileViewContext(ctx, name)
 			if err != nil {
 				return err
 			}
-			root, err := parseEditorXML(data)
+			root, err := parseEditorXMLContext(ctx, data)
 			if err != nil {
 				return err
 			}

@@ -142,11 +142,11 @@ func encodeRichTextEntryFragment(pageID, objectID string, payload []byte) ([]byt
 
 // richTextPlacement 根据局部逻辑坐标确定物理组合边界，负向装饰不会被资源裁剪
 // 入参: meta 编辑框与资源尺寸, matrix 逻辑坐标到页面变换
-// 返回: CompositeGraphicUnit 组合几何
-func richTextPlacement(meta richTextMetadata, matrix Matrix) CompositeGraphicUnit {
+// 返回: CompositeObject 组合几何
+func richTextPlacement(meta richTextMetadata, matrix Matrix) CompositeObject {
 	matrix = matrix.Multiply(TranslationMatrix(-meta.Offset[0], -meta.Offset[1]))
 	box := matrix.TransformBox(meta.Extent)
-	return CompositeGraphicUnit{Boundary: editorBoxString(box), CTM: TranslationMatrix(-box.X, -box.Y).Multiply(matrix).String()}
+	return CompositeObject{Boundary: editorBoxString(box), CTM: TranslationMatrix(-box.X, -box.Y).Multiply(matrix).String()}
 }
 
 // richTextDigest 对已编码图元计算不含字体、颜色空间和字形编号的内容摘要
@@ -459,11 +459,11 @@ func (e *Editor) RichTextFrame(page int, id string) (Box, Matrix, error) {
 	if err != nil {
 		return Box{}, Matrix{}, err
 	}
-	box, err := creationBox(object.CompositeGraphicUnit.Boundary)
+	box, err := creationBox(object.CompositeObject.Boundary)
 	if err != nil {
 		return Box{}, Matrix{}, err
 	}
-	return entry.metadata.Frame, TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(object.CompositeGraphicUnit.CTM)).Multiply(TranslationMatrix(entry.metadata.Offset[0], entry.metadata.Offset[1])), nil
+	return entry.metadata.Frame, TranslationMatrix(box.X, box.Y).Multiply(NewMatrix(object.CompositeObject.CTM)).Multiply(TranslationMatrix(entry.metadata.Offset[0], entry.metadata.Offset[1])), nil
 }
 
 // AddCompositeRichText 向内部范围添加富文本，使用页面坐标并保存编辑标引
@@ -684,19 +684,19 @@ func (e *Editor) updateRichTextFrame(page int, id string, value RichText, offset
 		if err != nil {
 			return err
 		}
-		object.CompositeGraphicUnit.ID = id
+		object.CompositeObject.ID = id
 		placement := richTextPlacement(meta, matrix)
-		object.CompositeGraphicUnit.Boundary = placement.Boundary
-		object.CompositeGraphicUnit.CTM = placement.CTM
+		object.CompositeObject.Boundary = placement.Boundary
+		object.CompositeObject.CTM = placement.CTM
 		if old.Type == "CompositeObject" {
-			unit := old.CompositeGraphicUnit
+			unit := old.CompositeObject
 			if unit.Clips != nil {
 				return fmt.Errorf("clipped rich text requires explicit clip removal before reflow")
 			}
-			unit.ResourceID = object.CompositeGraphicUnit.ResourceID
+			unit.ResourceID = object.CompositeObject.ResourceID
 			unit.Boundary = placement.Boundary
 			unit.CTM = placement.CTM
-			object.CompositeGraphicUnit = unit
+			object.CompositeObject = unit
 		}
 		index := -1
 		if old.Type == "CompositeObject" {
@@ -727,11 +727,11 @@ func (e *Editor) richTextObject(page int, object GraphicObject) (RichText, error
 	if err != nil {
 		return RichText{}, err
 	}
-	unit, err := e.compositeDefinition(object.CompositeGraphicUnit.ResourceID)
-	if err != nil {
+	unit, err := e.compositeDefinition(object.CompositeObject.ResourceID)
+	if err != nil || unit.unit == nil {
 		return RichText{}, fmt.Errorf("rich text resource: %w", err)
 	}
-	objects := unit.object.CompositeGraphicUnit.Objects
+	objects := unit.unit.Objects
 	if richTextDigest(objects) != entry.metadata.Digest {
 		return RichText{}, fmt.Errorf("rich text content no longer matches its editing metadata")
 	}
@@ -785,7 +785,7 @@ func (e *Editor) updateCompositeRichText(page int, path ObjectPath, index int, v
 			if offset == 0 && (width == 0 || width == frame.W) && reflect.DeepEqual(normalizeRichText(current), normalizeRichText(value)) {
 				return nil
 			}
-			if node.object.CompositeGraphicUnit.Clips != nil {
+			if node.object.CompositeObject.Clips != nil {
 				return fmt.Errorf("clipped rich text requires explicit clip removal before reflow")
 			}
 			entry, err := e.richTextEntry(page, editorObjectID(node.object))
@@ -796,7 +796,7 @@ func (e *Editor) updateCompositeRichText(page int, path ObjectPath, index int, v
 			if !node.boundaryInCTM {
 				object = compositeBoundary(object, node.parent, true)
 			}
-			unit := &object.CompositeGraphicUnit
+			unit := &object.CompositeObject
 			box, err := creationBox(unit.Boundary)
 			if err != nil {
 				return err
@@ -810,7 +810,7 @@ func (e *Editor) updateCompositeRichText(page int, path ObjectPath, index int, v
 				return err
 			}
 			placement := richTextPlacement(meta, matrix)
-			unit.ResourceID, unit.Boundary, unit.CTM = next.CompositeGraphicUnit.ResourceID, placement.Boundary, placement.CTM
+			unit.ResourceID, unit.Boundary, unit.CTM = next.CompositeObject.ResourceID, placement.Boundary, placement.CTM
 			if !node.boundaryInCTM {
 				object = compositeBoundary(object, node.parent, false)
 			}
@@ -837,11 +837,11 @@ func (e *Editor) updateCompositeRichText(page int, path ObjectPath, index int, v
 // 入参: page 页面索引, object 当前成员, meta 编辑信息, index 原入口或-1
 // 返回: error 资源或提交错误
 func (e *Editor) putCompositeRichTextMetadata(page int, object GraphicObject, meta richTextMetadata, index int) error {
-	unit, err := e.compositeDefinition(object.CompositeGraphicUnit.ResourceID)
-	if err != nil {
+	unit, err := e.compositeDefinition(object.CompositeObject.ResourceID)
+	if err != nil || unit.unit == nil {
 		return err
 	}
-	meta.Digest = richTextDigest(unit.object.CompositeGraphicUnit.Objects)
+	meta.Digest = richTextDigest(unit.unit.Objects)
 	return e.putRichTextMetadata(page, editorObjectID(object), meta, index)
 }
 
@@ -915,15 +915,15 @@ func (e *Editor) prepareRichText(box Box, value RichText) (GraphicObject, richTe
 		return GraphicObject{}, richTextMetadata{}, err
 	}
 	unit, err := e.compositeDefinition(resource)
-	if err != nil {
+	if err != nil || unit.unit == nil {
 		return GraphicObject{}, richTextMetadata{}, err
 	}
-	meta := richTextMetadata{Version: 1, Value: cloneEditorData(value), Frame: Box{W: box.W, H: box.H}, Extent: extent, Offset: [2]float64{padX, padY}, Anchors: result.anchors, Digest: richTextDigest(unit.object.CompositeGraphicUnit.Objects)}
+	meta := richTextMetadata{Version: 1, Value: cloneEditorData(value), Frame: Box{W: box.W, H: box.H}, Extent: extent, Offset: [2]float64{padX, padY}, Anchors: result.anchors, Digest: richTextDigest(unit.unit.Objects)}
 	for i := range meta.Value.Runs {
 		meta.Value.Runs[i].Format.Font = ""
 	}
-	object := GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: richTextPlacement(meta, TranslationMatrix(box.X, box.Y))}
-	object.CompositeGraphicUnit.ResourceID = resource
+	object := GraphicObject{Type: "CompositeObject", CompositeObject: richTextPlacement(meta, TranslationMatrix(box.X, box.Y))}
+	object.CompositeObject.ResourceID = resource
 	return object, meta, nil
 }
 
@@ -1631,14 +1631,15 @@ func (e *Editor) restoreCompositeNodeTextLayout(n *editorCompositeNode) {
 	n.states[id] = state
 }
 
-// collectCompositeStates 汇总复合图元及其引用的会话资源内部的全部成员编辑状态
-// 入参: unit 复合图元
+// collectCompositeStates 汇总复合对象及其引用的会话资源内部的全部成员编辑状态
+// 入参: obj 复合对象
 // 返回: map[string]editorCompositeState 合并后的成员状态
-func (e *Editor) collectCompositeStates(unit CompositeGraphicUnit) map[string]editorCompositeState {
+func (e *Editor) collectCompositeStates(obj CompositeObject) map[string]editorCompositeState {
 	var result map[string]editorCompositeState
 	visiting := make(map[string]bool)
-	var visit func(CompositeGraphicUnit)
-	visit = func(cur CompositeGraphicUnit) {
+	var visitComposite func(CompositeObject)
+	var visitUnit func(CompositeGraphicUnit)
+	visitComposite = func(cur CompositeObject) {
 		if len(cur.states) != 0 {
 			if result == nil {
 				result = make(map[string]editorCompositeState)
@@ -1661,19 +1662,21 @@ func (e *Editor) collectCompositeStates(unit CompositeGraphicUnit) map[string]ed
 						break
 					}
 				}
-				if def, err := e.compositeDefinition(cur.ResourceID); err == nil {
-					visit(def.object.CompositeGraphicUnit)
+				if def, err := e.compositeDefinition(cur.ResourceID); err == nil && def.unit != nil {
+					visitUnit(*def.unit)
 				}
 				delete(visiting, key)
 			}
 		}
-		for child := range cur.objects() {
-			if child.Type == "CompositeObject" || child.Type == "CompositeGraphicUnit" {
-				visit(child.CompositeGraphicUnit)
+	}
+	visitUnit = func(unit CompositeGraphicUnit) {
+		for child := range unit.objects() {
+			if child.Type == "CompositeObject" {
+				visitComposite(child.CompositeObject)
 			}
 		}
 	}
-	visit(unit)
+	visitComposite(obj)
 	return result
 }
 
@@ -1721,8 +1724,8 @@ func (e *Editor) restoreObjectTextLayouts(pageID string, object *GraphicObject, 
 		if object.TextObject.layout == nil {
 			object.TextObject.layout = lookup(object.TextObject.ID, object.TextObject.textDigest())
 		}
-	case "CompositeObject", "CompositeGraphicUnit":
-		states := maps.Clone(object.CompositeGraphicUnit.states)
+	case "CompositeObject":
+		states := maps.Clone(object.CompositeObject.states)
 		recordText := func(text *TextObject) {
 			if text.ID == "" {
 				return
@@ -1750,52 +1753,57 @@ func (e *Editor) restoreObjectTextLayouts(pageID string, object *GraphicObject, 
 			states[text.ID] = st
 		}
 		visiting := make(map[string]bool)
+		var visitObject func(*CompositeObject)
 		var visitUnit func(*CompositeGraphicUnit)
+		visitObject = func(comp *CompositeObject) {
+			if comp.ResourceID == "" {
+				return
+			}
+			resKey := editorResourceID(comp.ResourceID)
+			if resKey == "" {
+				resKey = comp.ResourceID
+			}
+			if visiting[resKey] {
+				return
+			}
+			visiting[resKey] = true
+			for _, res := range e.resources {
+				if sameResourceID(res.composite, comp.ResourceID) && len(res.states) != 0 {
+					if states == nil {
+						states = make(map[string]editorCompositeState)
+					}
+					for k, v := range res.states {
+						if _, exists := states[k]; !exists {
+							states[k] = v
+						}
+					}
+					break
+				}
+			}
+			if def, err := e.compositeDefinition(comp.ResourceID); err == nil && def.unit != nil {
+				visitUnit(def.unit)
+			}
+			delete(visiting, resKey)
+		}
 		visitUnit = func(unit *CompositeGraphicUnit) {
 			for i := range unit.Objects {
 				switch unit.Objects[i].Type {
 				case "TextObject":
 					recordText(&unit.Objects[i].TextObject)
-				case "CompositeObject", "CompositeGraphicUnit":
-					visitUnit(&unit.Objects[i].CompositeGraphicUnit)
+				case "CompositeObject":
+					visitObject(&unit.Objects[i].CompositeObject)
 				}
 			}
 			for i := range unit.TextObject {
 				recordText(&unit.TextObject[i])
 			}
-			for i := range unit.CompositeGraphicUnit {
-				visitUnit(&unit.CompositeGraphicUnit[i])
-			}
-			if unit.ResourceID != "" {
-				resKey := editorResourceID(unit.ResourceID)
-				if resKey == "" {
-					resKey = unit.ResourceID
-				}
-				if !visiting[resKey] {
-					visiting[resKey] = true
-					for _, res := range e.resources {
-						if sameResourceID(res.composite, unit.ResourceID) && len(res.states) != 0 {
-							if states == nil {
-								states = make(map[string]editorCompositeState)
-							}
-							for k, v := range res.states {
-								if _, exists := states[k]; !exists {
-									states[k] = v
-								}
-							}
-							break
-						}
-					}
-					if def, err := e.compositeDefinition(unit.ResourceID); err == nil {
-						visitUnit(&def.object.CompositeGraphicUnit)
-					}
-					delete(visiting, resKey)
-				}
+			for i := range unit.CompositeObject {
+				visitObject(&unit.CompositeObject[i])
 			}
 		}
-		visitUnit(&object.CompositeGraphicUnit)
+		visitObject(&object.CompositeObject)
 		if len(states) != 0 {
-			object.CompositeGraphicUnit.states = states
+			object.CompositeObject.states = states
 		}
 	}
 }
@@ -1858,31 +1866,32 @@ func (e *Editor) collectTextLayoutGroups(ctx context.Context, pages []PageConten
 		}
 		return nil
 	}
-	var visitComposite func(string, string, CompositeGraphicUnit, map[string]editorCompositeState, map[string]bool) error
-	visitComposite = func(pageID, altPageID string, unit CompositeGraphicUnit, inherited map[string]editorCompositeState, visiting map[string]bool) error {
+	var visitComposite func(string, string, CompositeObject, map[string]editorCompositeState, map[string]bool) error
+	var visitUnit func(string, string, CompositeGraphicUnit, map[string]editorCompositeState, map[string]bool) error
+	visitComposite = func(pageID, altPageID string, comp CompositeObject, inherited map[string]editorCompositeState, visiting map[string]bool) error {
 		if ctx != nil {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 		}
 		states := inherited
-		if len(unit.states) != 0 {
+		if len(comp.states) != 0 {
 			states = maps.Clone(inherited)
 			if states == nil {
-				states = make(map[string]editorCompositeState, len(unit.states))
+				states = make(map[string]editorCompositeState, len(comp.states))
 			}
-			maps.Copy(states, unit.states)
+			maps.Copy(states, comp.states)
 		}
-		if unit.ResourceID != "" && e != nil {
-			resKey := editorResourceID(unit.ResourceID)
+		if comp.ResourceID != "" && e != nil {
+			resKey := editorResourceID(comp.ResourceID)
 			if resKey == "" {
-				resKey = unit.ResourceID
+				resKey = comp.ResourceID
 			}
 			if !visiting[resKey] {
 				visiting[resKey] = true
 				resStates := states
 				for _, res := range e.resources {
-					if sameResourceID(res.composite, unit.ResourceID) && len(res.states) != 0 {
+					if sameResourceID(res.composite, comp.ResourceID) && len(res.states) != 0 {
 						resStates = maps.Clone(states)
 						if resStates == nil {
 							resStates = make(map[string]editorCompositeState, len(res.states))
@@ -1891,13 +1900,21 @@ func (e *Editor) collectTextLayoutGroups(ctx context.Context, pages []PageConten
 						break
 					}
 				}
-				if def, err := e.compositeDefinition(unit.ResourceID); err == nil {
-					if err := visitComposite(pageID, altPageID, def.object.CompositeGraphicUnit, resStates, visiting); err != nil {
+				if def, err := e.compositeDefinition(comp.ResourceID); err == nil && def.unit != nil {
+					if err := visitUnit(pageID, altPageID, *def.unit, resStates, visiting); err != nil {
 						delete(visiting, resKey)
 						return err
 					}
 				}
 				delete(visiting, resKey)
+			}
+		}
+		return nil
+	}
+	visitUnit = func(pageID, altPageID string, unit CompositeGraphicUnit, states map[string]editorCompositeState, visiting map[string]bool) error {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return err
 			}
 		}
 		for child := range unit.objects() {
@@ -1919,8 +1936,8 @@ func (e *Editor) collectTextLayoutGroups(ctx context.Context, pages []PageConten
 				if err := recordText(pageID, child.TextObject, layout); err != nil {
 					return err
 				}
-			case "CompositeObject", "CompositeGraphicUnit":
-				if err := visitComposite(pageID, altPageID, child.CompositeGraphicUnit, states, visiting); err != nil {
+			case "CompositeObject":
+				if err := visitComposite(pageID, altPageID, child.CompositeObject, states, visiting); err != nil {
 					return err
 				}
 			}
@@ -1950,8 +1967,8 @@ func (e *Editor) collectTextLayoutGroups(ctx context.Context, pages []PageConten
 				if err := recordText(pageID, objects[i].TextObject, layout); err != nil {
 					return err
 				}
-			case "CompositeObject", "CompositeGraphicUnit":
-				if err := visitComposite(pageID, altPageID, objects[i].CompositeGraphicUnit, objects[i].CompositeGraphicUnit.states, make(map[string]bool)); err != nil {
+			case "CompositeObject":
+				if err := visitComposite(pageID, altPageID, objects[i].CompositeObject, objects[i].CompositeObject.states, make(map[string]bool)); err != nil {
 					return err
 				}
 			}
@@ -2025,18 +2042,21 @@ func (e *Editor) collectTextLayoutGroups(ctx context.Context, pages []PageConten
 				annots, _ = annotReader.pageAnnotationsContext(readCtx, page.ID)
 			}
 			for _, annot := range annots {
+				if annot.Appearance == nil {
+					continue
+				}
 				annotStates := e.source.annotationStates[page.ID+"/"+editorResourceID(annot.ID)]
 				if annotStates == nil {
 					annotStates = e.source.annotationStates[page.ID+"/"+annot.ID]
 				}
 				unit := CompositeGraphicUnit{
-					Objects:              annot.Appearance.Objects,
-					TextObject:           annot.Appearance.TextObject,
-					PathObject:           annot.Appearance.PathObject,
-					ImageObject:          annot.Appearance.ImageObject,
-					CompositeGraphicUnit: annot.Appearance.CompositeGraphicUnit,
+					Objects:         annot.Appearance.Objects,
+					TextObject:      annot.Appearance.TextObject,
+					PathObject:      annot.Appearance.PathObject,
+					ImageObject:     annot.Appearance.ImageObject,
+					CompositeObject: annot.Appearance.CompositeObject,
 				}
-				if err := visitComposite(page.ID, "", unit, annotStates, make(map[string]bool)); err != nil {
+				if err := visitUnit(page.ID, "", unit, annotStates, make(map[string]bool)); err != nil {
 					return nil, err
 				}
 			}
@@ -2423,8 +2443,20 @@ func (e *Editor) copyRichTextMetadata(ctx context.Context, source *Editor, sourc
 		if err != nil {
 			return err
 		}
-		if err := copyObject(GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: CompositeGraphicUnit{Objects: before.Appearance.Objects}}, GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: CompositeGraphicUnit{Objects: after.Appearance.Objects}}); err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if before.Appearance == nil || after.Appearance == nil {
+			continue
+		}
+		snapshot, err := source.captureRichTextSnapshotObjects(sourcePage, before.Appearance.Objects)
+		if err != nil {
+			return err
+		}
+		if snapshot != nil {
+			if err := e.putRichTextSnapshotObjects(page, after.Appearance.Objects, snapshot); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -2466,7 +2498,7 @@ func (e *Editor) richTextColors(object *GraphicObject) error {
 func (e *Editor) copiedRichTextMetadata(objects []GraphicObject) (map[int]*richTextSnapshot, error) {
 	result := make(map[int]*richTextSnapshot)
 	for i, object := range objects {
-		if object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
+		if object.Type != "CompositeObject" {
 			continue
 		}
 		if object.origin != nil && e.snapshotOrigin(object) == nil {
@@ -2510,7 +2542,7 @@ func (e *Editor) attachRichTextSnapshot(page int, object *GraphicObject) error {
 // 入参: page 页面索引, object 根对象
 // 返回: *richTextSnapshot 不可变快照，无标引时为空, error 标引或资源错误
 func (e *Editor) captureRichTextSnapshot(page int, object GraphicObject) (*richTextSnapshot, error) {
-	if object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
+	if object.Type != "CompositeObject" {
 		return nil, nil
 	}
 	index := e.richTextMetadataIndex()
@@ -2520,7 +2552,7 @@ func (e *Editor) captureRichTextSnapshot(page int, object GraphicObject) (*richT
 	active := make(map[string]bool)
 	var capture func(GraphicObject) (*richTextSnapshot, error)
 	capture = func(object GraphicObject) (*richTextSnapshot, error) {
-		if object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
+		if object.Type != "CompositeObject" {
 			return nil, nil
 		}
 		entry, err := e.richTextEntry(page, editorObjectID(object))
@@ -2534,22 +2566,25 @@ func (e *Editor) captureRichTextSnapshot(page int, object GraphicObject) (*richT
 		if !errors.Is(err, ErrNotRichText) {
 			return nil, err
 		}
-		unit := object.CompositeGraphicUnit
-		if unit.ResourceID != "" {
-			if active[unit.ResourceID] {
-				return nil, fmt.Errorf("cyclic composite resource")
-			}
-			active[unit.ResourceID] = true
-			defer delete(active, unit.ResourceID)
-			definition, err := e.compositeDefinition(unit.ResourceID)
-			if err != nil {
-				return nil, err
-			}
-			unit = definition.object.CompositeGraphicUnit
+		resID := object.CompositeObject.ResourceID
+		if resID == "" {
+			return nil, nil
+		}
+		if active[resID] {
+			return nil, fmt.Errorf("cyclic composite resource")
+		}
+		active[resID] = true
+		defer delete(active, resID)
+		definition, err := e.compositeDefinition(resID)
+		if err != nil {
+			return nil, err
+		}
+		if definition.unit == nil {
+			return nil, nil
 		}
 		var snapshot *richTextSnapshot
 		i := 0
-		for child := range unit.objects() {
+		for child := range definition.unit.objects() {
 			value, err := capture(child)
 			if err != nil {
 				return nil, err
@@ -2567,6 +2602,30 @@ func (e *Editor) captureRichTextSnapshot(page int, object GraphicObject) (*richT
 	return capture(object)
 }
 
+// captureRichTextSnapshotObjects 捕获对象列表内的富文本标引快照
+// 入参: page 页面索引, objects 图形对象列表
+// 返回: *richTextSnapshot 不可变快照，无标引时为空, error 标引或资源错误
+func (e *Editor) captureRichTextSnapshotObjects(page int, objects []GraphicObject) (*richTextSnapshot, error) {
+	index := e.richTextMetadataIndex()
+	if index.err != nil || len(index.entries) == 0 {
+		return nil, index.err
+	}
+	var snapshot *richTextSnapshot
+	for i, child := range objects {
+		value, err := e.captureRichTextSnapshot(page, child)
+		if err != nil {
+			return nil, err
+		}
+		if value != nil {
+			if snapshot == nil {
+				snapshot = &richTextSnapshot{children: make(map[int]*richTextSnapshot)}
+			}
+			snapshot.children[i] = value
+		}
+	}
+	return snapshot, nil
+}
+
 // putRichTextSnapshot 恢复复制后的嵌套标引，按目标标准内容更新摘要和字体映射
 // 入参: page 目标页, object 复制后的对象, snapshot 来源不可变语义
 // 返回: error 结构或标引错误
@@ -2580,16 +2639,25 @@ func (e *Editor) putRichTextSnapshot(page int, object GraphicObject, snapshot *r
 		}
 		return e.putCompositeRichTextMetadata(page, object, *snapshot.metadata, index)
 	}
-	unit := object.CompositeGraphicUnit
-	if unit.ResourceID != "" {
-		definition, err := e.compositeDefinition(unit.ResourceID)
-		if err != nil {
-			return err
+	resID := object.CompositeObject.ResourceID
+	if resID == "" {
+		if len(snapshot.children) != 0 {
+			return fmt.Errorf("copied composite structure differs")
 		}
-		unit = definition.object.CompositeGraphicUnit
+		return nil
+	}
+	definition, err := e.compositeDefinition(resID)
+	if err != nil {
+		return err
+	}
+	if definition.unit == nil {
+		if len(snapshot.children) != 0 {
+			return fmt.Errorf("copied composite structure differs")
+		}
+		return nil
 	}
 	i, count := 0, 0
-	for child := range unit.objects() {
+	for child := range definition.unit.objects() {
 		if value := snapshot.children[i]; value != nil {
 			if err := e.putRichTextSnapshot(page, child, value); err != nil {
 				return err
@@ -2597,6 +2665,25 @@ func (e *Editor) putRichTextSnapshot(page int, object GraphicObject, snapshot *r
 			count++
 		}
 		i++
+	}
+	if count != len(snapshot.children) {
+		return fmt.Errorf("copied composite structure differs")
+	}
+	return nil
+}
+
+// putRichTextSnapshotObjects 恢复对象列表中的嵌套富文本标引
+// 入参: page 目标页, objects 目标图形对象列表, snapshot 来源不可变语义
+// 返回: error 结构或标引错误
+func (e *Editor) putRichTextSnapshotObjects(page int, objects []GraphicObject, snapshot *richTextSnapshot) error {
+	count := 0
+	for i, child := range objects {
+		if value := snapshot.children[i]; value != nil {
+			if err := e.putRichTextSnapshot(page, child, value); err != nil {
+				return err
+			}
+			count++
+		}
 	}
 	if count != len(snapshot.children) {
 		return fmt.Errorf("copied composite structure differs")
@@ -2646,8 +2733,8 @@ func (e *Editor) updateCompositePlainRichText(page int, path ObjectPath, index i
 			return err
 		}
 		unit := richTextPlacement(meta, inverse.Multiply(matrix))
-		unit.ID, unit.ResourceID = node.object.TextObject.ID, next.CompositeGraphicUnit.ResourceID
-		next.CompositeGraphicUnit = unit
+		unit.ID, unit.ResourceID = node.object.TextObject.ID, next.CompositeObject.ResourceID
+		next.CompositeObject = unit
 		if !node.boundaryInCTM {
 			next = compositeBoundary(next, node.parent, false)
 		}
@@ -2675,29 +2762,30 @@ func (e *Editor) copyImportedTextLayouts(ctx context.Context, source *Editor, so
 		digest string
 		layout *textLayout
 	}
-	captureTree := func(ed *Editor, pageID string, obj GraphicObject, baseStates map[string]editorCompositeState) []capturedText {
+	captureUnitTree := func(ed *Editor, pageID string, rootUnit CompositeGraphicUnit, baseStates map[string]editorCompositeState) []capturedText {
 		var list []capturedText
 		visiting := make(map[string]bool)
+		var visitComposite func(CompositeObject, map[string]editorCompositeState)
 		var visitUnit func(CompositeGraphicUnit, map[string]editorCompositeState)
-		visitUnit = func(unit CompositeGraphicUnit, inherited map[string]editorCompositeState) {
+		visitComposite = func(comp CompositeObject, inherited map[string]editorCompositeState) {
 			states := inherited
-			if len(unit.states) != 0 {
+			if len(comp.states) != 0 {
 				states = maps.Clone(inherited)
 				if states == nil {
-					states = make(map[string]editorCompositeState, len(unit.states))
+					states = make(map[string]editorCompositeState, len(comp.states))
 				}
-				maps.Copy(states, unit.states)
+				maps.Copy(states, comp.states)
 			}
-			if unit.ResourceID != "" {
-				resKey := editorResourceID(unit.ResourceID)
+			if comp.ResourceID != "" {
+				resKey := editorResourceID(comp.ResourceID)
 				if resKey == "" {
-					resKey = unit.ResourceID
+					resKey = comp.ResourceID
 				}
 				if !visiting[resKey] {
 					visiting[resKey] = true
 					resStates := states
 					for _, res := range ed.resources {
-						if sameResourceID(res.composite, unit.ResourceID) && len(res.states) != 0 {
+						if sameResourceID(res.composite, comp.ResourceID) && len(res.states) != 0 {
 							resStates = maps.Clone(states)
 							if resStates == nil {
 								resStates = make(map[string]editorCompositeState, len(res.states))
@@ -2706,12 +2794,14 @@ func (e *Editor) copyImportedTextLayouts(ctx context.Context, source *Editor, so
 							break
 						}
 					}
-					if def, err := ed.compositeDefinition(unit.ResourceID); err == nil {
-						visitUnit(def.object.CompositeGraphicUnit, resStates)
+					if def, err := ed.compositeDefinition(comp.ResourceID); err == nil && def.unit != nil {
+						visitUnit(*def.unit, resStates)
 					}
 					delete(visiting, resKey)
 				}
 			}
+		}
+		visitUnit = func(unit CompositeGraphicUnit, states map[string]editorCompositeState) {
 			for child := range unit.objects() {
 				switch child.Type {
 				case "TextObject":
@@ -2726,11 +2816,15 @@ func (e *Editor) copyImportedTextLayouts(ctx context.Context, source *Editor, so
 						layout = ed.lookupTextLayout(pageID, child.TextObject.ID, digest)
 					}
 					list = append(list, capturedText{digest: digest, layout: layout})
-				case "CompositeObject", "CompositeGraphicUnit":
-					visitUnit(child.CompositeGraphicUnit, states)
+				case "CompositeObject":
+					visitComposite(child.CompositeObject, states)
 				}
 			}
 		}
+		visitUnit(rootUnit, baseStates)
+		return list
+	}
+	captureTree := func(ed *Editor, pageID string, obj GraphicObject, baseStates map[string]editorCompositeState) []capturedText {
 		switch obj.Type {
 		case "TextObject":
 			digest := obj.TextObject.textDigest()
@@ -2738,31 +2832,34 @@ func (e *Editor) copyImportedTextLayouts(ctx context.Context, source *Editor, so
 			if layout == nil {
 				layout = ed.lookupTextLayout(pageID, obj.TextObject.ID, digest)
 			}
-			list = append(list, capturedText{digest: digest, layout: layout})
-		case "CompositeObject", "CompositeGraphicUnit":
-			visitUnit(obj.CompositeGraphicUnit, baseStates)
+			return []capturedText{{digest: digest, layout: layout}}
+		case "CompositeObject":
+			return captureUnitTree(ed, pageID, CompositeGraphicUnit{Objects: []GraphicObject{obj}}, baseStates)
 		}
-		return list
+		return nil
 	}
-	applyCompositeStates := func(obj GraphicObject, captured []capturedText, existing map[string]editorCompositeState) map[string]editorCompositeState {
+	applyUnitStates := func(rootUnit CompositeGraphicUnit, captured []capturedText, existing map[string]editorCompositeState) map[string]editorCompositeState {
 		cursor := 0
 		states := maps.Clone(existing)
 		visiting := make(map[string]bool)
+		var visitComposite func(CompositeObject)
 		var visitUnit func(CompositeGraphicUnit)
-		visitUnit = func(unit CompositeGraphicUnit) {
-			if unit.ResourceID != "" {
-				resKey := editorResourceID(unit.ResourceID)
+		visitComposite = func(comp CompositeObject) {
+			if comp.ResourceID != "" {
+				resKey := editorResourceID(comp.ResourceID)
 				if resKey == "" {
-					resKey = unit.ResourceID
+					resKey = comp.ResourceID
 				}
 				if !visiting[resKey] {
 					visiting[resKey] = true
-					if def, err := e.compositeDefinition(unit.ResourceID); err == nil {
-						visitUnit(def.object.CompositeGraphicUnit)
+					if def, err := e.compositeDefinition(comp.ResourceID); err == nil && def.unit != nil {
+						visitUnit(*def.unit)
 					}
 					delete(visiting, resKey)
 				}
 			}
+		}
+		visitUnit = func(unit CompositeGraphicUnit) {
 			for child := range unit.objects() {
 				switch child.Type {
 				case "TextObject":
@@ -2781,12 +2878,12 @@ func (e *Editor) copyImportedTextLayouts(ctx context.Context, source *Editor, so
 							states[child.TextObject.ID] = st
 						}
 					}
-				case "CompositeObject", "CompositeGraphicUnit":
-					visitUnit(child.CompositeGraphicUnit)
+				case "CompositeObject":
+					visitComposite(child.CompositeObject)
 				}
 			}
 		}
-		visitUnit(obj.CompositeGraphicUnit)
+		visitUnit(rootUnit)
 		return states
 	}
 	positions := e.objectPositions(&e.pages[page])
@@ -2798,7 +2895,7 @@ func (e *Editor) copyImportedTextLayouts(ctx context.Context, source *Editor, so
 		if err != nil {
 			return err
 		}
-		captured := captureTree(source, srcPageID, before, before.CompositeGraphicUnit.states)
+		captured := captureTree(source, srcPageID, before, before.CompositeObject.states)
 		hasAny := slices.ContainsFunc(captured, func(c capturedText) bool { return c.layout != nil })
 		if !hasAny {
 			continue
@@ -2815,11 +2912,11 @@ func (e *Editor) copyImportedTextLayouts(ctx context.Context, source *Editor, so
 				copiedOrigin.object.TextObject.layout = captured[0].layout
 				e.origins[copied[i]] = &copiedOrigin
 			}
-		} else if target.Type == "CompositeObject" || target.Type == "CompositeGraphicUnit" {
-			target.CompositeGraphicUnit.states = applyCompositeStates(*target, captured, target.CompositeGraphicUnit.states)
+		} else if target.Type == "CompositeObject" {
+			target.CompositeObject.states = applyUnitStates(CompositeGraphicUnit{Objects: []GraphicObject{*target}}, captured, target.CompositeObject.states)
 			if origin := e.origins[copied[i]]; origin != nil {
 				copiedOrigin := *origin
-				copiedOrigin.object.CompositeGraphicUnit.states = target.CompositeGraphicUnit.states
+				copiedOrigin.object.CompositeObject.states = target.CompositeObject.states
 				e.origins[copied[i]] = &copiedOrigin
 			}
 		}
@@ -2836,6 +2933,9 @@ func (e *Editor) copyImportedTextLayouts(ctx context.Context, source *Editor, so
 		if err != nil {
 			return err
 		}
+		if before.Appearance == nil || after.Appearance == nil {
+			continue
+		}
 		var srcStates map[string]editorCompositeState
 		if source.source != nil {
 			srcStates = source.source.annotationStates[srcPageID+"/"+editorResourceID(annotations[i])]
@@ -2843,18 +2943,18 @@ func (e *Editor) copyImportedTextLayouts(ctx context.Context, source *Editor, so
 				srcStates = source.source.annotationStates[srcPageID+"/"+annotations[i]]
 			}
 		}
-		srcObj := GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: CompositeGraphicUnit{Objects: before.Appearance.Objects, TextObject: before.Appearance.TextObject, PathObject: before.Appearance.PathObject, ImageObject: before.Appearance.ImageObject, CompositeGraphicUnit: before.Appearance.CompositeGraphicUnit}}
-		captured := captureTree(source, srcPageID, srcObj, srcStates)
+		srcUnit := CompositeGraphicUnit{Objects: before.Appearance.Objects, TextObject: before.Appearance.TextObject, PathObject: before.Appearance.PathObject, ImageObject: before.Appearance.ImageObject, CompositeObject: before.Appearance.CompositeObject}
+		captured := captureUnitTree(source, srcPageID, srcUnit, srcStates)
 		if !slices.ContainsFunc(captured, func(c capturedText) bool { return c.layout != nil }) {
 			continue
 		}
-		dstObj := GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: CompositeGraphicUnit{Objects: after.Appearance.Objects, TextObject: after.Appearance.TextObject, PathObject: after.Appearance.PathObject, ImageObject: after.Appearance.ImageObject, CompositeGraphicUnit: after.Appearance.CompositeGraphicUnit}}
+		dstUnit := CompositeGraphicUnit{Objects: after.Appearance.Objects, TextObject: after.Appearance.TextObject, PathObject: after.Appearance.PathObject, ImageObject: after.Appearance.ImageObject, CompositeObject: after.Appearance.CompositeObject}
 		key := dstPageID + "/" + editorResourceID(copiedNotes[i])
 		var existing map[string]editorCompositeState
 		if e.source != nil {
 			existing = e.source.annotationStates[key]
 		}
-		updatedStates := applyCompositeStates(dstObj, captured, existing)
+		updatedStates := applyUnitStates(dstUnit, captured, existing)
 		if len(updatedStates) != 0 && e.source != nil {
 			statesByID := maps.Clone(e.source.annotationStates)
 			if statesByID == nil {

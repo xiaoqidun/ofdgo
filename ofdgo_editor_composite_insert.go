@@ -75,8 +75,8 @@ func (e *Editor) copyObjectsToComposite(page int, path ObjectPath, objects []Gra
 		if owner.ref != nil {
 			owner = owner.ref
 		}
-		box, _ := ParseBox(owner.object.CompositeGraphicUnit.Boundary)
-		parent := owner.parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(NewMatrix(owner.object.CompositeGraphicUnit.CTM))
+		box, _ := ParseBox(owner.object.CompositeObject.Boundary)
+		parent := owner.parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(NewMatrix(owner.object.CompositeObject.CTM))
 		inverse, ok := parent.Invert()
 		if !ok {
 			return fmt.Errorf("composite insertion requires an invertible transform")
@@ -156,9 +156,9 @@ func (e *Editor) copyObjectsToComposite(page int, path ObjectPath, objects []Gra
 				}
 			}
 			node.parent, node.boundaryInCTM = IdentityMatrix(), true
-			node.setStates(object.CompositeGraphicUnit.states)
+			node.setStates(object.CompositeObject.states)
 			node.drawParams = []string{targetLayerStyle}
-			if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
+			if object.Type == "CompositeObject" {
 				if err := node.convertCoordinates(IdentityMatrix(), true); err != nil {
 					return err
 				}
@@ -243,7 +243,7 @@ func (e *Editor) isolateCompositeStyle(node *editorCompositeNode) error {
 				return err
 			}
 		}
-		parameter := node.object.CompositeGraphicUnit.DrawParam
+		parameter := node.object.CompositeObject.DrawParam
 		if node.object.Type == "PathObject" {
 			parameter = node.object.PathObject.DrawParam
 		}
@@ -255,7 +255,7 @@ func (e *Editor) isolateCompositeStyle(node *editorCompositeNode) error {
 		if object.Type == "PathObject" {
 			object.PathObject.DrawParam = id
 		} else {
-			object.CompositeGraphicUnit.DrawParam = id
+			object.CompositeObject.DrawParam = id
 		}
 		return node.update(object)
 	}
@@ -314,7 +314,10 @@ func (e *Editor) isolateCompositeDefaultPaint(node *editorCompositeNode) error {
 		if object.Type != "CompositeObject" && object.Type != "CompositeGraphicUnit" {
 			return nil
 		}
-		id := object.CompositeGraphicUnit.ResourceID
+		id := ""
+		if object.Type == "CompositeObject" {
+			id = object.CompositeObject.ResourceID
+		}
 		replacement := id
 		if id != "" {
 			key := resourceKey{editorResourceID(id), base.FillColor != nil, base.StrokeColor != nil}
@@ -396,11 +399,11 @@ func (e *Editor) isolateCompositeDefaultPaint(node *editorCompositeNode) error {
 			if err != nil {
 				return err
 			}
-			current.data, current.node, current.object, current.changed = next.data, next.node, next.object, true
+			current.data, current.node, current.object, current.unit, current.changed = next.data, next.node, next.object, next.unit, true
 		}
 		if replacement != id {
 			object = current.object
-			object.CompositeGraphicUnit.ResourceID = replacement
+			object.CompositeObject.ResourceID = replacement
 			return current.update(object)
 		}
 		return nil
@@ -445,7 +448,7 @@ func (e *Editor) addEditorDrawParamContext(ctx context.Context, draw DrawParam) 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	draw.ID, draw.ResourceID, draw.BaseLoc, draw.Link = "", "", "", ""
+	draw.ID = ""
 	for _, resource := range e.resources {
 		if err := ctx.Err(); err != nil {
 			return "", err

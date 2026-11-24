@@ -231,7 +231,7 @@ func (r *Reader) readInvoiceXML(ctx context.Context, data []byte, source Invoice
 	if !structureInvoiceReferences(structure) {
 		return report, nil
 	}
-	doc, err := r.DocContext(ctx)
+	doc, err := r.docContext(ctx)
 	if err != nil {
 		return report, err
 	}
@@ -276,11 +276,8 @@ func (r *Reader) readInvoiceXML(ctx context.Context, data []byte, source Invoice
 							id := editorResourceID(object.TextObject.ID)
 							texts[id] = append(texts[id], object.TextObject.Text())
 						}
-						if object.Type == "CompositeGraphicUnit" || object.Type == "CompositeObject" {
-							for child := range object.CompositeGraphicUnit.objects() {
-								collect(child)
-							}
-							if resID := object.CompositeGraphicUnit.ResourceID; resID != "" {
+						if object.Type == "CompositeObject" {
+							if resID := object.CompositeObject.ResourceID; resID != "" {
 								if unit, _ := r.resolveCompositeScoped(content.pageResources, resID); unit != nil && !visitedUnits[unit] {
 									visitedUnits[unit] = true
 									for child := range unit.objects() {
@@ -668,7 +665,7 @@ func (e *Editor) importInvoiceReferences(ctx context.Context, data []byte, optio
 // 入参: ctx 取消上下文, invoice 解引用发票
 // 返回: []InvoiceBinding 事实关联, error 文档读取错误
 func (r *Reader) invoiceReferenceBindings(ctx context.Context, invoice Invoice) ([]InvoiceBinding, error) {
-	doc, err := r.DocContext(ctx)
+	doc, err := r.docContext(ctx)
 	if err != nil {
 		return nil, err
 	}

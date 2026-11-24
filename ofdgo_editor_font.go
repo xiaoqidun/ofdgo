@@ -735,6 +735,23 @@ func (e *Editor) subsetSnapshotFonts(ctx context.Context, progress editorProgres
 		return nil, err
 	}
 	defer view.Close()
+	protectedFiles, sigErr := view.signatureReferenceFiles(ctx, -1)
+	if sigErr != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, nil
+	}
+	if len(protectedFiles) != 0 {
+		for name := range candidates {
+			if protectedFiles[cleanPackagePath(name)] {
+				delete(candidates, name)
+			}
+		}
+		if len(candidates) == 0 {
+			return nil, ctx.Err()
+		}
+	}
 	refs, resources, references, safe, err := scanEditorResources(ctx, view, view.files, nil, maps.Clone(view.fileNames), progress, true)
 	if err != nil || !safe {
 		return nil, err
@@ -1207,21 +1224,12 @@ func (e *Editor) collectMemoryObjectFontUsage(ctx context.Context, object Graphi
 				return false, err
 			}
 		}
-	case "CompositeObject", "CompositeGraphicUnit":
-		if object.CompositeGraphicUnit.ResourceID != "" || object.CompositeGraphicUnit.DrawParam != "" {
+	case "CompositeObject":
+		if object.CompositeObject.ResourceID != "" || object.CompositeObject.DrawParam != "" {
 			hasResourceRef = true
 		}
-		if err := collectClips(object.CompositeGraphicUnit.Clips); err != nil {
+		if err := collectClips(object.CompositeObject.Clips); err != nil {
 			return false, err
-		}
-		for child := range object.CompositeGraphicUnit.objects() {
-			ref, err := e.collectMemoryObjectFontUsage(ctx, child, used, mapped)
-			if err != nil {
-				return false, err
-			}
-			if ref {
-				hasResourceRef = true
-			}
 		}
 	}
 	return hasResourceRef, nil

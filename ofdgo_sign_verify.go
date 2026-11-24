@@ -51,12 +51,19 @@ var signatureMethodReplacer = strings.NewReplacer("-", "", "_", "", " ", "")
 // signatureCSTZone 表示无时区签名时间默认使用的CST东八区
 var signatureCSTZone = time.FixedZone("CST", 8*3600)
 
+// signerCertTime 记录单个SignerInfo证书及其独立声明的签名时间
+type signerCertTime struct {
+	cert []byte
+	at   time.Time
+}
+
 // SignatureVerifyReport 签名验证报告
 // Valid表示签名完整性、签章外观位置、签名时间语义及调用方指定的全部策略均通过
 // Checked表示对应检查已得出结论，未检查时不能将OK的零值视为失败
 // SealCertTimeOK按印章制章时间检查制章证书的有效期状态，存在可信制章时间戳时优先按其检查
 type SignatureVerifyReport struct {
 	signerCerts          [][]byte
+	signerTimes          []signerCertTime
 	DocIndex             int
 	VersionID            string
 	DocRoot              string
@@ -282,9 +289,9 @@ func canonicalSignatureDigestKey(method string) (string, bool) {
 	return h.String(), true
 }
 
-// parseSignatureFile 解析签名文件并校验关键结构节点唯一性
+// parseSignatureFile 解析签名文件，按OFD命名空间过滤并校验关键结构节点唯一性
 // 入参: data 签名文件XML数据
-// 返回: *SignatureFile 签名文件结构, error 错误信息
+// 返回: *SignatureFile 签名结构, error 解析错误
 func parseSignatureFile(data []byte) (*SignatureFile, error) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	var root xml.StartElement
@@ -298,7 +305,7 @@ func parseSignatureFile(data []byte) (*SignatureFile, error) {
 			break
 		}
 	}
-	if root.Name.Local != "Signature" {
+	if root.Name.Local != "Signature" || classifyOFDNamespace(root.Name.Space) == ofdXMLUnknown {
 		return nil, fmt.Errorf("unexpected signature root element: %s", root.Name.Local)
 	}
 	sigFile := SignatureFile{XMLName: root.Name}
@@ -311,13 +318,20 @@ func parseSignatureFile(data []byte) (*SignatureFile, error) {
 		}
 		switch elem := tok.(type) {
 		case xml.StartElement:
+			if !ofdXMLChild(root.Name, elem.Name) {
+				if err := dec.Skip(); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			elem = ofdXMLStart(elem)
 			switch elem.Name.Local {
 			case "SignedInfo":
 				signedInfoCount++
 				if signedInfoCount > 1 {
 					return nil, fmt.Errorf("duplicate SignedInfo element")
 				}
-				if err := decodeSignatureSignedInfo(dec, &sigFile.SignedInfo); err != nil {
+				if err := decodeSignatureSignedInfo(dec, elem.Name, &sigFile.SignedInfo); err != nil {
 					return nil, err
 				}
 			case "SignedValue":
@@ -356,10 +370,10 @@ func parseSignatureFile(data []byte) (*SignatureFile, error) {
 	}
 }
 
-// decodeSignatureSignedInfo 解析SignedInfo并校验References与Seal节点唯一性
-// 入参: dec XML解码器, info 目标SignedInfo结构
-// 返回: error 错误信息
-func decodeSignatureSignedInfo(dec *xml.Decoder, info *SignedInfo) error {
+// decodeSignatureSignedInfo 解析SignedInfo，按OFD命名空间过滤并校验References与Seal节点唯一性
+// 入参: dec XML解码器, parent 父节点名称, info 签名信息接收结构
+// 返回: error 解析错误
+func decodeSignatureSignedInfo(dec *xml.Decoder, parent xml.Name, info *SignedInfo) error {
 	refsCount := 0
 	sealCount := 0
 	for {
@@ -369,6 +383,13 @@ func decodeSignatureSignedInfo(dec *xml.Decoder, info *SignedInfo) error {
 		}
 		switch elem := tok.(type) {
 		case xml.StartElement:
+			if !ofdXMLChild(parent, elem.Name) {
+				if err := dec.Skip(); err != nil {
+					return err
+				}
+				continue
+			}
+			elem = ofdXMLStart(elem)
 			switch elem.Name.Local {
 			case "Provider":
 				if err := dec.DecodeElement(&info.Provider, &elem); err != nil {
@@ -1136,7 +1157,7 @@ func (r *Reader) VerifySignaturesContext(ctx context.Context, opts ...SignatureV
 	if r.ofd == nil || len(r.ofd.DocBody) == 0 {
 		return nil, fmt.Errorf("no docbody found")
 	}
-	if _, err := r.DocContext(ctx); err != nil {
+	if _, err := r.docContext(ctx); err != nil {
 		return nil, err
 	}
 	cache := make(map[[2]string][]byte)
@@ -1352,10 +1373,26 @@ func (report *SignatureVerifyReport) applySignatureCertificatePolicy(options *si
 	}
 }
 
-// applySignatureTimePolicy 应用签名时间、印章有效期与制章时间策略
-// 入参: trustedSealTime 可信制章时间戳时间，为nil时使用印章声明制章时间
+// applySignatureTimePolicy 应用签名时间、印章有效期与制章时间策略，多SignerInfo各自独立校验其SigningTime
+// 入参: trustedSealTime 可信印章时间戳
 func (report *SignatureVerifyReport) applySignatureTimePolicy(trustedSealTime *time.Time) {
-	if !report.SignatureTime.IsZero() {
+	if len(report.signerTimes) != 0 {
+		if !report.SignatureTimeChecked {
+			report.SignatureTimeChecked, report.SignatureTimeOK = true, true
+		}
+		checkedCerts := make(map[string]bool, len(report.signerTimes))
+		for _, item := range report.signerTimes {
+			checkedCerts[string(item.cert)] = true
+			report.SignatureTimeOK = report.SignatureTimeOK && signatureCertsValidAt([][]byte{item.cert}, item.at)
+		}
+		if !report.SignatureTime.IsZero() {
+			for _, cert := range report.signerCerts {
+				if !checkedCerts[string(cert)] {
+					report.SignatureTimeOK = report.SignatureTimeOK && signatureCertsValidAt([][]byte{cert}, report.SignatureTime)
+				}
+			}
+		}
+	} else if !report.SignatureTime.IsZero() {
 		if len(report.signerCerts) > 0 {
 			if !report.SignatureTimeChecked {
 				report.SignatureTimeChecked, report.SignatureTimeOK = true, true
@@ -1497,6 +1534,7 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigLis
 				}
 			}
 			report.signerCerts = result.SignerCerts
+			report.signerTimes = result.SignerTimes
 			report.DataHashChecked = result.DataHashChecked
 			report.DataHashOK = result.DataHashOK
 			report.SignedValueChecked = result.SignedChecked
@@ -1517,7 +1555,7 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigLis
 			report.Error = err.Error()
 			return report
 		}
-		if result.SignatureTime.IsZero() && strings.TrimSpace(report.SignatureDateTime) != "" {
+		if strings.TrimSpace(report.SignatureDateTime) != "" {
 			sigTime, timeErr := parseSignatureDateTime(report.SignatureDateTime)
 			if timeErr != nil {
 				report.SignatureTimeChecked = true
@@ -1525,7 +1563,9 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigLis
 				report.Error = timeErr.Error()
 				return report
 			}
-			report.SignatureTime = sigTime
+			if result.SignatureTime.IsZero() {
+				report.SignatureTime = sigTime
+			}
 		}
 		trustedTime, _ := report.applySignatureTimestamps(ctx, options, signedValue, result.Timestamps)
 		report.applySignatureTimePolicy(nil)
@@ -1575,10 +1615,10 @@ func (r *Reader) verifySignature(ctx context.Context, sigListPath string, sigLis
 		return report
 	}
 	var dateTimeErr error
-	if report.SignatureTime.IsZero() && strings.TrimSpace(report.SignatureDateTime) != "" {
+	if strings.TrimSpace(report.SignatureDateTime) != "" {
 		var parsedTime time.Time
 		parsedTime, dateTimeErr = parseSignatureDateTime(report.SignatureDateTime)
-		if dateTimeErr == nil {
+		if dateTimeErr == nil && report.SignatureTime.IsZero() {
 			report.SignatureTime = parsedTime
 		}
 	}

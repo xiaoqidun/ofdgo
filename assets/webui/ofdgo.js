@@ -740,6 +740,7 @@ function createDocumentState() {
 		dirty: false,
 		editorInfo: null,
 		editorViews: new Map(),
+		signatureDetails: new Set(),
 		savedRevision: null,
 		saveHandle: null,
 		saveStamp: null,
@@ -821,7 +822,7 @@ function createDocumentState() {
 			return this.doc?.pageCount > 1 ? this.pageLayoutPreference : 1;
 		},
 		renderAnnotations: true,
-		renderBackend: "canvas",
+		renderBackend: "default",
 		renderMode: "svg",
 		renderDPI: DEFAULT_IMAGE_DPI,
 		pageCache: new Map(),
@@ -2221,7 +2222,7 @@ el.viewerPanel.addEventListener("dblclick", openOFDFromViewer);
 document.addEventListener("dragover", (event) => {
 	if (event.dataTransfer.types.includes("Files")) {
 		event.preventDefault();
-		event.dataTransfer.dropEffect = document.body.hasAttribute("data-busy") ? "none" : "copy";
+		event.dataTransfer.dropEffect = workspace.closing || document.body.hasAttribute("data-busy") || formDialogOpen() ? "none" : "copy";
 	}
 });
 document.addEventListener("drop", openOFDFromDrop);
@@ -3008,16 +3009,30 @@ async function closeWorkspace() {
 		for (const tab of workspace.tabs) cancelDocumentPreparation(tab);
 		await Promise.all(workspace.tabs.filter(tab => tab.state.saving && tab.saveCompletion).map(tab => tab.saveCompletion));
 		if (workspace.tabs.some(tab => tab.state.saving)) { setStatus("文档正在保存，请稍后关闭"); return; }
-		if (batch.running && !await requestConfirmation("批量转换尚未完成，是否退出？", null)) return;
-		if (workspace.tabs.some(tab => tab.opening || tab.state.exporting) && !await requestConfirmation("文档正在处理，是否取消并退出？", null)) return;
+		if (batch.running) {
+			if (!await requestConfirmation("批量转换尚未完成，是否退出？", null)) return;
+			cancelBatch();
+			if (batchElements.Panel.open) batchElements.Panel.close();
+		}
+		if (workspace.tabs.some(tab => tab.opening || tab.state.exporting)) {
+			if (!await requestConfirmation("文档正在处理，是否取消并退出？", null)) return;
+			for (const tab of workspace.tabs) {
+				tab.opening?.controller.abort();
+				tab.download?.abort();
+				if (tab.state.exportCancel) tab.state.exportCancel();
+				const requestID = operationRequest(tab)?.id || tab.state.exportRequestID;
+				if (requestID) cancelOperation(requestID);
+			}
+		}
 		const activeDirty = state.dirty || canvasEditor.textChanged() || canvasEditor.cropChanged() || canvasEditor.nudgeChanged();
 		const dirty = activeDirty || workspace.tabs.some(tab => tab.state.dirty);
 		if (dirty && !workspace.switching && !workspace.tabs.some(tab => tab.closing)) {
+			if (sealPreview) finishSealPosition(false);
 			for (const panel of [el.aboutPanel, el.appearancePanel, el.objectPicker, ...(!state.annotationEdit ? [el.annotationNote] : []), ...(!batch.running ? [batchElements.Panel] : [])]) {
 				if (panel.open) panel.close();
 			}
 		}
-		if (dirty && (workspace.switching || workspace.tabs.some(tab => tab.closing) || formDialogOpen() || (activeDirty && document.body.hasAttribute("data-busy")))) {
+		if (dirty && (workspace.switching || workspace.tabs.some(tab => tab.closing))) {
 			setStatus("操作正在进行，请完成或取消后关闭");
 			return;
 		}
@@ -3026,7 +3041,8 @@ async function closeWorkspace() {
 			return;
 		}
 		const count = workspace.tabs.filter(tab => tab.state.dirty || tab === workspace.active && (canvasEditor.textChanged() || canvasEditor.cropChanged() || canvasEditor.nudgeChanged())).length;
-		const action = await requestCloseAction("退出程序", `有${count}个文档尚未保存`, "保存");
+		const canSave = !formDialogOpen() && !(activeDirty && document.body.hasAttribute("data-busy"));
+		const action = await requestCloseAction("退出程序", `有${count}个文档尚未保存`, canSave ? "保存" : null);
 		if (action === "cancel") return;
 		if (action === "save") {
 			if (!await commitDocumentView()) return;
@@ -3389,7 +3405,8 @@ async function mountDocumentTab(tab) {
 }
 
 async function releaseDocumentTab(tab) {
-	if (tab.closed) return;
+	if (tab.closed || tab.releasing) return;
+	tab.releasing = true;
 	releaseCreateImages(tab);
 	const clipboard = workspace.objectClipboard;
 	if (clipboard?.tab === tab) {
@@ -3421,6 +3438,7 @@ async function releaseDocumentTab(tab) {
 	tab.state.detachedPages.clear();
 	tab.state.pageInFlight.clear();
 	tab.state.editorViews.clear();
+	tab.state.signatureDetails?.clear();
 	tab.resources.views.clear();
 	if (tab.resources.url) URL.revokeObjectURL(tab.resources.url);
 	tab.resources.url = null;
@@ -3547,11 +3565,13 @@ async function closeFile(tab = documentTab(), keepTab = false) {
 			if (!await confirmDocumentClose(tab) || tab.closed || workspace.closing) return;
 		}
 		while (workspace.switching) await nextFrame();
+		if (tab.closed) return;
 		const selected = workspace.active === tab;
 		workspace.switching = true;
 		const focused = el.documentTitleBar.contains(document.activeElement);
 		try {
 			const index = workspace.tabs.indexOf(tab);
+			if (index < 0) return;
 			if (selected) detachDocumentView();
 			if (keepTab) {
 				const empty = createDocumentTab();
@@ -4020,11 +4040,36 @@ async function toggleEditor() {
 	if (state.editorInfo && (state.editing || !state.editorSyncPending)) {
 		const wasmSeq = state.wasmSeq;
 		const current = () => !tab.closed && tab.state === state && isForegroundDocument(tab) && wasmSeq === state.wasmSeq;
+		if (!await canvasEditor.commitNudge() || !current()) return;
 		if (!await canvasEditor.commitText() || !current()) return;
 		if (!await canvasEditor.commitCrop() || !current()) return;
+		const nextEditing = !state.editing;
+		let synced;
+		try {
+			synced = await callWASM("ofdgoSetEditing", nextEditing);
+		} catch (err) {
+			if (current()) showError(err, false);
+			return;
+		}
+		if (!current()) return;
 		const anchor = pageView.scaleAnchor(0);
-		state.editing = !state.editing;
+		state.editing = nextEditing;
+		if (state.doc && synced) {
+			state.doc.attachments = synced.attachments || [];
+			state.doc.attachmentError = synced.attachmentError || "";
+		}
+		tab.resources.views.clear();
 		state.detachedPages.clear();
+		let droppedCache = false;
+		if (state.editing) {
+			for (const [pageIdx, page] of [...state.pageCache]) {
+				if (!Array.isArray(page.objects)) {
+					state.pageCache.delete(pageIdx);
+					droppedCache = true;
+				}
+			}
+			if (droppedCache) pageView.releasePageResources(state);
+		}
 		renderDocumentFonts();
 		canvasEditor.clear();
 		canvasEditor.setTool("");
@@ -4035,11 +4080,12 @@ async function toggleEditor() {
 		}
 		updateControls();
 		renderOutlines(false);
-		if (state.renderMode !== "svg") {
+		if (state.renderMode !== "svg" || droppedCache) {
 			try {
 				await refreshPageDisplay(anchor);
 			} catch (err) {
 				state.editing = !state.editing;
+				await callWASM("ofdgoSetEditing", state.editing).catch(() => {});
 				if (!isForegroundDocument(tab)) return;
 				renderDocumentFonts();
 				updateControls();
@@ -4420,12 +4466,17 @@ async function createDocument(event) {
 	tab.opening = request;
 	if (images) releaseCreateImages(previous, false);
 	el.createPanel.close();
-	const replace = !workspace.switching && !previous.state.doc && !previous.opening && !previous.state.dirty && !previous.error;
 	const index = workspace.tabs.indexOf(previous);
+	const replace = index >= 0 && !workspace.switching && !previous.state.doc && !previous.opening && !previous.state.dirty && !previous.error;
 	if (replace) workspace.tabs[index] = tab;
 	else workspace.tabs.push(tab);
-	if (!await activateDocumentTab(tab) && replace && workspace.active !== tab) {
-		workspace.tabs[index] = previous;
+	if (!await activateDocumentTab(tab) && workspace.active !== tab) {
+		const currentIndex = workspace.tabs.findIndex(item => item.id === tab.id);
+		if (replace) {
+			if (currentIndex >= 0) workspace.tabs[currentIndex] = previous;
+		} else if (currentIndex >= 0) {
+			workspace.tabs.splice(currentIndex, 1);
+		}
 		await releaseDocumentTab(tab);
 		renderDocumentTabs();
 		return;
@@ -4489,7 +4540,7 @@ function editAnnotationDetails(item) {
 function openObjectPicker(items = canvasEditor.pageItems(state.pageIndex)) {
 	el.objectPickerTitle.textContent = "选择对象";
 	el.objectPickerList.replaceChildren();
-	const labels = { TextObject: "文字", PathObject: "图形", ImageObject: "图片", CompositeObject: "组合", CompositeGraphicUnit: "组合", Annotation: "注解", Signature: "签章" };
+	const labels = { TextObject: "文字", PathObject: "图形", ImageObject: "图片", CompositeObject: "组合", Annotation: "注解", Signature: "签章" };
 	const kinds = { Path: "批注", Stamp: "印章", Watermark: "水印", Link: "链接", Highlight: "高亮" };
 	for (const item of [...items].reverse()) {
 		const button = document.createElement("button");
@@ -4692,7 +4743,7 @@ function mountEditorObjects(index, page, surface) {
 			if (children) append(children);
 		}
 	};
-	append(page.objects);
+	append(page.objects || []);
 	canvasEditor.mount(index, { ...page, objects }, surface);
 }
 
@@ -6121,7 +6172,7 @@ async function openOFDFromDrop(event) {
 		return;
 	}
 	event.preventDefault();
-	if (workspace.closing) return;
+	if (workspace.closing || document.body.hasAttribute("data-busy") || formDialogOpen()) return;
 	const files = Array.from(event.dataTransfer.files);
 	const handles = Array.from(event.dataTransfer.items).map(item => item.getAsFileSystemHandle?.().catch(() => null));
 	if (files.some(isDocumentFile)) {
@@ -6267,11 +6318,13 @@ async function boot() {
 			await nativeHost.start(openNativeFiles, error => showError(error, !state.doc));
 			watchApplicationUpdates();
 		}
-		try {
-			const remote = remoteDocumentOptions(window.location.hash);
-			if (remote && openSeq === state.openSeq) await openOFD({ name: remote.name }, remote);
-		} catch (err) {
-			if (openSeq === state.openSeq) showError(err, !state.doc);
+		if (!nativeHost) {
+			try {
+				const remote = remoteDocumentOptions(window.location.hash);
+				if (remote && openSeq === state.openSeq) await openOFD({ name: remote.name }, remote);
+			} catch (err) {
+				if (openSeq === state.openSeq) showError(err, !state.doc);
+			}
 		}
 	} catch (err) {
 		if (openSeq === state.openSeq) {
@@ -6774,7 +6827,10 @@ async function recoverWASM() {
 	}
 }
 
+const MAX_REMOTE_DOCUMENT_BYTES = 256 * 1024 * 1024;
+
 function remoteDocumentOptions(hash) {
+	if (nativeHost) return null;
 	const params = new URLSearchParams(hash.replace(/^#/, ""));
 	for (const key of ["url", "name", "page"]) {
 		if (params.getAll(key).length > 1) throw new Error(`重复的链接参数：${key}`);
@@ -6793,6 +6849,7 @@ function remoteDocumentName(name) {
 }
 
 async function downloadRemoteDocument(options, tab = documentTab(), controller = new AbortController()) {
+	if (nativeHost) throw new Error("桌面端不支持自动拉取远程文档");
 	tab.download = controller;
 	if (isForegroundDocument(tab)) {
 		remoteDownload = controller;
@@ -6804,6 +6861,10 @@ async function downloadRemoteDocument(options, tab = documentTab(), controller =
 		const response = await fetch(options.url, { mode: "cors", credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store", signal: controller.signal });
 		if (!response.ok) throw new Error(`文件下载失败（HTTP ${response.status}）`);
 		const total = Number(response.headers.get("Content-Length")) || 0;
+		if (total > MAX_REMOTE_DOCUMENT_BYTES) {
+			await response.body?.cancel?.().catch(() => {});
+			throw new Error("远程文档超出 256 MB 大小限制");
+		}
 		if (!response.body) throw new Error("下载内容为空");
 		const chunks = [];
 		let received = 0;
@@ -6812,8 +6873,12 @@ async function downloadRemoteDocument(options, tab = documentTab(), controller =
 			while (true) {
 				const { done, value } = await reader.read();
 				if (done) break;
-				chunks.push(value);
 				received += value.byteLength;
+				if (received > MAX_REMOTE_DOCUMENT_BYTES) {
+					await reader.cancel().catch(() => {});
+					throw new Error("远程文档超出 256 MB 大小限制");
+				}
+				chunks.push(value);
 				setProgress(`正在下载文档 · ${(received / 1048576).toFixed(1)} MB`, total > 0 && received <= total ? received / total * 20 : null, "", tab);
 			}
 		} finally { reader.releaseLock(); }
@@ -8248,7 +8313,7 @@ async function loadDocumentSettings() {
 			if (!isForegroundDocument(tab) || sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
 			if (state.editing) {
 				const page = await pageView.loadPageData(settings.page);
-				data.objects = (page.objects || []).filter(item => ["TextObject", "PathObject", "CompositeObject", "CompositeGraphicUnit"].includes(item.type) && !item.scoped);
+				data.objects = (page.objects || []).filter(item => ["TextObject", "PathObject", "CompositeObject"].includes(item.type) && !item.scoped);
 			}
 		}
 		if (!isForegroundDocument(tab) || sequence !== settings.sequence || openSeq !== state.openSeq || !settingsElements.Panel.open) return;
@@ -9284,7 +9349,7 @@ function renderDestinationFields(container, dest = {}) {
 	if (dest?.PageID && index < 0) pages.push([dest.PageID, "页面缺失"]);
 	settingsSelect(container, "页码", "DestPage", pages, index >= 0 ? pageIDAt(state.doc, index) : dest?.PageID || pageIDAt(state.doc, settings.page));
 	for (const [id, label] of [["Left", "左侧"], ["Top", "顶部"], ["Right", "右侧"], ["Bottom", "底部"], ["Zoom", "缩放"]]) {
-		const field = settingsField(container, label, id, dest?.[`Omit${id}`] ? "" : dest?.[id] ?? "", "number");
+		const field = settingsField(container, label, id, dest?.[id] ?? "", "number");
 		field.placeholder = id === "Zoom" ? "保持" : "默认";
 	}
 	updateDestinationFields();
@@ -9301,8 +9366,10 @@ function updateDestinationFields() {
 
 function destinationFromSettings() {
 	const dest = {Type: settingsValue("DestType"), PageID: settingsValue("DestPage")};
-	for (const id of ["Left", "Top", "Right", "Bottom", "Zoom"]) dest[id] = Number(settingsValue(id));
-	for (const id of ["Left", "Top", "Zoom"]) dest[`Omit${id}`] = settingsValue(id) === "";
+	for (const id of ["Left", "Top", "Right", "Bottom", "Zoom"]) {
+		const raw = settingsValue(id);
+		dest[id] = raw === "" ? null : Number(raw);
+	}
 	return dest;
 }
 
@@ -9418,17 +9485,14 @@ function renderStyleResourceSettings(kind) {
 		if (value.Profile) settingsField(content, "移除配置", "ClearProfile", false, "checkbox");
 	} else {
 		settingsSelect(content, "继承", "Relative", [["", "无"], ...settings.data.resources.filter(item => item.kind === "DrawParam" && item.id !== settings.resource.id).map(item => [item.id, item.name])], referenceIDKey(value.Relative));
-		settingsSelect(content, "字体", "Font", [["", "继承"], ...settings.data.resources.filter(item => item.kind === "Font").map(item => [item.id, item.name])], referenceIDKey(value.Font));
 		const grid = document.createElement("div");
 		grid.className = "settings-grid";
 		content.append(grid);
-		for (const [id, label, unit] of [["Size", "字号", "mm"], ["Weight", "字重", ""], ["LineWidth", "线宽", "mm"], ["MiterLimit", "截断值", ""]]) {
+		for (const [id, label, unit] of [["LineWidth", "线宽", "mm"], ["MiterLimit", "截断值", ""]]) {
 			const field = settingsField(grid, label, id, value[id] || (value[`${id}Set`] ? 0 : ""), "number", unit);
 			field.min = "0";
 			field.placeholder = "继承";
-			if (id === "Weight") { field.step = "100"; field.max = "900"; }
 		}
-		settingsField(content, "斜体", "Italic", value.Italic, "checkbox");
 		settingsSelect(content, "端点", "Cap", [["", "继承"], ["Butt", "平头"], ["Round", "圆头"], ["Square", "方头"]], value.Cap || "");
 		settingsSelect(content, "转角", "Join", [["", "继承"], ["Miter", "尖角"], ["Round", "圆角"], ["Bevel", "斜角"]], value.Join || "");
 		settingsField(content, "间隔", "DashPattern", value.DashPattern || "").title = "虚线间隔";
@@ -9471,7 +9535,7 @@ async function loadSettingsObjects() {
 		const fragment = document.createDocumentFragment();
 		fragment.append(new Option("选择", ""));
 		for (const item of data.objects || []) {
-			if (["TextObject", "PathObject", "CompositeObject", "CompositeGraphicUnit"].includes(item.type) && !item.scoped) {
+			if (["TextObject", "PathObject", "CompositeObject"].includes(item.type) && !item.scoped) {
 				fragment.append(new Option(`${item.id} · ${item.text || "图元"}`, item.id));
 			}
 		}
@@ -9501,12 +9565,11 @@ async function writeStyleResource(kind) {
 		}
 		else if (settingsValue("ClearProfile")) profile = new Uint8Array();
 	} else {
-		for (const id of ["Relative", "Font", "Cap", "Join", "DashPattern"]) value[id] = settingsValue(id);
-		for (const id of ["Size", "Weight", "LineWidth", "MiterLimit"]) value[id] = Number(settingsValue(id));
+		for (const id of ["Relative", "Cap", "Join", "DashPattern"]) value[id] = settingsValue(id);
+		for (const id of ["LineWidth", "MiterLimit"]) value[id] = Number(settingsValue(id));
 		value.LineWidthSet = settingsValue("LineWidth") !== "";
 		value.MiterLimitSet = settingsValue("MiterLimit") !== "";
 		value.DashOffset = settingsValue("DashOffset") === "" ? null : Number(settingsValue("DashOffset"));
-		value.Italic = settingsValue("Italic");
 		for (const key of ["FillColor", "StrokeColor"]) {
 			const mode = settingsValue(key + "Mode");
 			if (mode === "inherit") value[key] = null;
@@ -9653,7 +9716,7 @@ function renderBookmarkSettings() {
 	settingsButton("定位", () => {
 		settingsElements.Panel.close();
 		const d = entry.Dest;
-		navigateDestination({type: d.Type, pageID: d.PageID, left: d.Left, top: d.Top, right: d.Right, bottom: d.Bottom, zoom: d.Zoom, omitLeft: d.OmitLeft, omitTop: d.OmitTop, omitZoom: d.OmitZoom}, false);
+		navigateDestination({type: d.Type, pageID: d.PageID, left: d.Left ?? null, top: d.Top ?? null, right: d.Right ?? null, bottom: d.Bottom ?? null, zoom: d.Zoom ?? null}, false);
 	}, !entry, "Locate");
 	if (!state.editing) return;
 	settingsButton(entry ? "修改" : "添加", async () => {
@@ -9677,8 +9740,6 @@ function renderPermissionsSettings() {
 		printScreen: true,
 		print: true,
 		copies: -1,
-		copy: true,
-		contentRegist: true,
 		validPeriod: null,
 	};
 	const group = settingsSection("权限声明");
@@ -9721,8 +9782,6 @@ function renderPermissionsSettings() {
 			printScreen: Boolean(settingsValue("PermPrintScreen")),
 			print: Boolean(settingsValue("PermPrint")),
 			copies: parsedCopies,
-			copy: permissions.copy ?? true,
-			contentRegist: permissions.contentRegist ?? true,
 			...(start || end ? { validPeriod: { startDate: start, endDate: end } } : {}),
 		};
 		await commitSettings("ofdgoUpdatePermissions", JSON.stringify(payload));
@@ -9837,7 +9896,7 @@ async function pickSettingsObject(event, picking) {
 	if (picking.settings === "locate") { finishResourcePick(); return; }
 	const available = canvasEditor.itemsAt(event).filter(item => !item.scoped && !item.draft && item.type !== "Annotation"
 		&& (picking.settings !== "invoice" || item.type === "TextObject")
-		&& (picking.settings !== "style" || ["TextObject", "PathObject", "CompositeObject", "CompositeGraphicUnit"].includes(item.type))
+		&& (picking.settings !== "style" || ["TextObject", "PathObject", "CompositeObject"].includes(item.type))
 		&& (picking.settings !== "layer" || item.index === settings.page && !settings.data.page.layers[settings.selected]?.ObjectIDs?.includes(item.id)));
 	if (!available.length) return;
 	const choose = async item => {
@@ -10190,7 +10249,7 @@ async function loadResourceTargets(preferred) {
 	const items = await callTabWASM(tab, "ofdgoResourceTargets", page, resource.kind, resource.id);
 	if (!isForegroundDocument(tab) || !resourceElements.Panel.open || sequence !== state.openSeq || resource !== resourceManager.selected || page !== Number(resourceElements.Page.value)) return;
 	resourceManager.targets = items || [];
-	const types = {TextObject: "文字", PathObject: "图形", ImageObject: "图片", CompositeObject: "组合", CompositeGraphicUnit: "组合"};
+	const types = {TextObject: "文字", PathObject: "图形", ImageObject: "图片", CompositeObject: "组合"};
 	for (const item of resourceManager.targets) resourceElements.Object.add(new Option(`${item.id} · ${(item.text || types[item.type] || "图元").slice(0, 50)}${item.bound ? " · 已绑定" : ""}`, item.id));
 	const selected = canvasEditor.selected;
 	if (!preferred && selected?.index === page && !selected.scoped) preferred = selected.id;
@@ -10659,14 +10718,17 @@ function finishSealPosition(returnToForm = true) {
 	sealPosition.Layer.remove();
 	sealPosition.Image.removeAttribute("src");
 	el.viewerPanel.classList.remove("seal-picking");
-	canvasEditor.enabled = preview.enabled;
-	if (preview.sidebar && COMPACT_LAYOUT.matches) {
-		Object.assign(state, preview.sidebar);
-		updateSidebarState();
+	const sameTab = !preview.tab || isForegroundDocument(preview.tab);
+	if (sameTab) {
+		canvasEditor.enabled = preview.enabled;
+		if (preview.sidebar && COMPACT_LAYOUT.matches) {
+			Object.assign(state, preview.sidebar);
+			updateSidebarState();
+		}
+		setBusy(document.body.hasAttribute("data-busy"));
+		if (returnToForm && preview.sequence === state.openSeq && !el.signPanel.open) el.signPanel.showModal();
+		if (preview.sequence === state.openSeq) setStatus(preview.status);
 	}
-	setBusy(document.body.hasAttribute("data-busy"));
-	if (returnToForm && preview.sequence === state.openSeq && !el.signPanel.open) el.signPanel.showModal();
-	if (preview.sequence === state.openSeq) setStatus(preview.status);
 }
 
 async function openSealPosition() {
@@ -10687,13 +10749,13 @@ async function openSealPosition() {
 		if (!active()) return;
 		const result = await callTabWASM(tab, "ofdgoPreviewSignatureSeal", data, `1-${count}`);
 		if (!active() || sequence !== state.openSeq || !el.signPanel.open || file !== el.signSeal.files?.[0]) return;
-		sealPreview = {pages:result.pages, selected, range, mode, ratio:keepRatio ? result.width / result.height : 0, sequence, enabled:canvasEditor.enabled, status:el.statusText.textContent, url:URL.createObjectURL(new Blob([result.svg], {type:"image/svg+xml"}))};
+		sealPreview = {tab, pages:result.pages, selected, range, mode, ratio:keepRatio ? result.width / result.height : 0, sequence, enabled:canvasEditor.enabled, status:el.statusText.textContent, url:URL.createObjectURL(new Blob([result.svg], {type:"image/svg+xml"}))};
 		preview = sealPreview;
 		sealPosition.Image.src = sealPreview.url;
 		await sealPosition.Image.decode();
 		if (sealPreview !== preview) return;
 		if (!active() || sequence !== state.openSeq || !el.signPanel.open) {
-			if (active()) finishSealPosition(false);
+			finishSealPosition(false);
 			return;
 		}
 		canvasEditor.enabled = false;
@@ -10708,13 +10770,12 @@ async function openSealPosition() {
 		setStatus("拖动选取签章区域，Esc 取消");
 		el.viewerPanel.focus({preventScroll:true});
 	} catch (error) {
-		if (active() && sequence === state.openSeq && (!preview || sealPreview === preview)) {
-			finishSealPosition();
-			el.signStatus.textContent = error.message;
-		}
+		if (preview && sealPreview === preview) finishSealPosition(active() && sequence === state.openSeq);
+		if (active() && sequence === state.openSeq) el.signStatus.textContent = error.message;
 	}
 	finally {
-		if (preview && sealPreview !== preview) URL.revokeObjectURL(preview.url);
+		if (preview && sealPreview === preview && !active()) finishSealPosition(false);
+		else if (preview && sealPreview !== preview) URL.revokeObjectURL(preview.url);
 		if (!tab.closed && wasmSeq === state.wasmSeq) setBusy(false, "", 0, "", tab);
 	}
 }
@@ -11321,6 +11382,7 @@ function cancelBatch() {
 			request.resolve(null);
 		}
 	}
+	if (batch.confirming && el.confirmPanel.open) el.confirmPanel.close("cancel");
 	notifyCredentialsAvailable();
 	for (const slot of batch.workers) slot.cancel?.();
 	for (const [id, request] of batch.requests) request.slot.worker.postMessage({ type: "cancel", id });
@@ -11464,13 +11526,32 @@ async function runBatch() {
 							options.credentials?.keyPassword?.fill(0);
 							const unlock = batch.credentials.then(async () => {
 								if (batch.canceled) throw new DOMException("已取消转换", "AbortError");
-								return requestBatchCredentials(code, err.code === "pdfPassword", item.file.name);
+								const credentials = await requestBatchCredentials(code, err.code === "pdfPassword", item.file.name);
+								if (!credentials || batch.canceled) {
+									credentials?.password?.fill(0);
+									credentials?.key?.fill(0);
+									credentials?.keyPassword?.fill(0);
+									return null;
+								}
+								const preservesEncryption = err.code === "pdfPassword" && format.value === "pdf" && compression.mode !== 0 && !options.pages;
+								if (!preservesEncryption) {
+									batch.confirming = true;
+									try {
+										if (!await requestConfirmation("转换结果将不保留原加密，是否继续？", null) || batch.canceled) {
+											credentials.password?.fill(0);
+											credentials.key?.fill(0);
+											credentials.keyPassword?.fill(0);
+											return null;
+										}
+									} finally {
+										batch.confirming = false;
+									}
+								}
+								return credentials;
 							});
 							batch.credentials = unlock.then(() => {}, () => {});
 							options.credentials = await unlock;
-							if (!options.credentials) throw new DOMException("已取消解锁", "AbortError");
-							const preservesEncryption = err.code === "pdfPassword" && format.value === "pdf" && compression.mode !== 0 && !options.pages;
-							if (!preservesEncryption && (!await requestConfirmation("转换结果将不保留原加密，是否继续？", null) || batch.canceled)) throw new DOMException("已取消转换", "AbortError");
+							if (!options.credentials || batch.canceled) throw new DOMException("已取消转换", "AbortError");
 						}
 					}
 				} catch (err) {
@@ -12152,7 +12233,7 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 				} else {
 					pageView.setScale(height / Math.max(1, size.height * MM_TO_PX), false);
 				}
-				const omit = dest.type === "FitH" ? dest.omitTop : dest.omitLeft;
+				const omit = dest.type === "FitH" ? dest.top == null : dest.left == null;
 				if (omit) {
 					point = { x: 0, y: 0 };
 					omitInline = true;
@@ -12162,19 +12243,19 @@ async function navigateDestination(dest, openAction, sourcePage = state.pageInde
 				}
 			} else if (dest.type === "FitR") {
 				const left = dest.left ?? 0, top = dest.top ?? 0;
-				if (dest.right <= left || dest.bottom <= top) return;
+				if (dest.right == null || dest.bottom == null || dest.right <= left || dest.bottom <= top) return;
 				const a = destinationPoint(page, left, top), b = destinationPoint(page, dest.right, dest.bottom);
 				pageView.setScale(Math.min(width / Math.abs(b.x - a.x), height / Math.abs(b.y - a.y)) / MM_TO_PX, false);
 				point = { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y) };
 			} else {
-				const keepZoom = dest.omitZoom || !(dest.zoom > 0);
-				if (keepZoom && dest.omitLeft && dest.omitTop && openAction && index === sourcePage) return;
+				const keepZoom = dest.zoom == null || !(dest.zoom > 0);
+				if (keepZoom && dest.left == null && dest.top == null && openAction && index === sourcePage) return;
 				if (!keepZoom) pageView.setScale(dest.zoom, false);
 				else if (fitMode !== "free") pageView.applyFit(false);
 				else pageView.setScale(scale, false);
-				const omitX = sideways ? dest.omitTop : dest.omitLeft;
-				const omitY = sideways ? dest.omitLeft : dest.omitTop;
-				const rotated = destinationPoint(page, dest.omitLeft ? 0 : (dest.left ?? 0), dest.omitTop ? 0 : (dest.top ?? 0));
+				const omitX = sideways ? dest.top == null : dest.left == null;
+				const omitY = sideways ? dest.left == null : dest.top == null;
+				const rotated = destinationPoint(page, dest.left ?? 0, dest.top ?? 0);
 				point = { x: omitX ? 0 : rotated.x, y: omitY ? 0 : rotated.y };
 				omitInline = Boolean(omitX);
 			}
@@ -14065,7 +14146,18 @@ function renderSignatures() {
 		return;
 	}
 	const fragment = document.createDocumentFragment();
-	for (const signature of signatures) {
+	const scope = documentPanelScope(state);
+	const detailsState = state.signatureDetails ||= new Set();
+	for (const [sigIndex, signature] of signatures.entries()) {
+		const sigKey = signature.id || String(sigIndex);
+		const bindDetails = (node, section) => {
+			const key = `${scope}\0${sigKey}\0${section}`;
+			node.open = detailsState.has(key);
+			node.addEventListener("toggle", () => {
+				if (node.open) detailsState.add(key);
+				else detailsState.delete(key);
+			});
+		};
 		const row = document.createElement("div");
 		row.className = `signature-row ${signature.status}`;
 		const head = document.createElement("div");
@@ -14096,6 +14188,7 @@ function renderSignatures() {
 		appendInfoLine(row, "保护文件", signatureReferenceText(signature), signatureReferenceStatus(signature));
 		appendInfoLine(row, "错误", signature.error, "fail");
 		const checks = document.createElement("details");
+		bindDetails(checks, "checks");
 		const checksTitle = document.createElement("summary");
 		checksTitle.textContent = "校验详情";
 		checks.append(checksTitle);
@@ -14126,6 +14219,7 @@ function renderSignatures() {
 		row.append(checks);
 		if (signature.timestamps?.length) {
 			const details = document.createElement("details");
+			bindDetails(details, "timestamps");
 			const title = document.createElement("summary");
 			const allTrusted = signature.timestamps.every(item => item.valid && item.certTrustChecked && item.certTrustOK);
 			title.textContent = allTrusted ? "可信时戳" : "时戳详情";
@@ -14149,6 +14243,7 @@ function renderSignatures() {
 		}
 		if (signature.revocations?.length) {
 			const details = document.createElement("details");
+			bindDetails(details, "revocations");
 			const title = document.createElement("summary");
 			title.textContent = "撤销详情";
 			details.append(title);
@@ -14173,6 +14268,7 @@ function renderSignatures() {
 			row.append(details);
 		}
 		const details = document.createElement("details");
+		bindDetails(details, "info");
 		const title = document.createElement("summary");
 		title.textContent = "签章信息";
 		details.append(title);

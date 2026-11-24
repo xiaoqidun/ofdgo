@@ -50,7 +50,7 @@ type pdfWarningKey struct {
 
 // pdfWarningEntry 保存带重复计数的原始告警，供并发与注解合并使用
 type pdfWarningEntry struct {
-	diagnostic pdfgo.Diagnostic
+	diagnostic PDFDiagnostic
 	count      int
 }
 
@@ -62,32 +62,67 @@ type pdfWarningState struct {
 }
 
 // ErrPDFPassword 表示PDF需要正确的用户或所有者密码
-var ErrPDFPassword = pdfgo.ErrPassword
+var ErrPDFPassword = errors.New("pdf password required")
+
+// PDFDiagnostic 记录PDF导入过程中可恢复的问题或未保留的语义，Page从1开始，未知页码为0
+// Offset为解码后当前页面或表单内容流内的字节位置
+type PDFDiagnostic struct {
+	Page    int
+	Offset  int64
+	Message string
+}
+
+// PDFFileSpecification 描述PDF引用的外部文件，不自动访问网络或本地路径
+type PDFFileSpecification struct {
+	Name        string
+	Description string
+	FileSystem  string
+}
+
+// PDFFileResolver 由调用方按文件说明读取外部文件字节
+type PDFFileResolver func(context.Context, PDFFileSpecification) ([]byte, error)
+
+// PDFReference 描述PDF引用表单的目标文件、页面选择及文件标识
+// HasPageLabel为true时按PageLabel选择页面，否则使用从0开始的PageIndex
+type PDFReference struct {
+	File         PDFFileSpecification
+	PageIndex    int64
+	PageLabel    string
+	HasPageLabel bool
+	ID           [][]byte
+}
+
+// PDFReferenceSource 提供外部引用PDF的原始字节及可选解密参数
+// Data为空时按PDF标准保留代理外观
+type PDFReferenceSource struct {
+	Data         []byte
+	Password     []byte
+	PasswordUTF8 bool
+}
+
+// PDFReferenceResolver 由调用方按引用描述提供外部目标PDF数据
+type PDFReferenceResolver func(context.Context, PDFReference) (PDFReferenceSource, error)
 
 // PDFImportOptions 指定PDF转换的密码、运行时后端、进度通知与检查策略
 // Password默认使用PDF安全处理器编码，PasswordUTF8启用UTF-8输入及标准密码准备，空值尝试空密码
 // Strict禁止日期兼容、恢复缺失资源或丢失内容语义，默认在报告中记录警告
-// RendererOptions复用渲染器字体来源和后端配置，Backends优先于其中的后端设置
+// RendererOptions复用渲染器字体来源和后端配置，可通过WithRenderBackends指定自定义后端
 // RasterDPI指定局部合成与三维绘制精度，0沿用渲染器DPI，默认300dpi，Strict禁用局部合成
 // OnProgress按open、pages、convert及write.*阶段报告进度，total为0表示总量未知
 // ResolveFile读取PDF引用的外部媒体、附件、页面及三维纹理，默认不访问网络或本地路径
-// ResolveReference可提供已解密的引用页面，目标阅读器由调用方维护
-// Halftones提供只读设备命名网屏，所属阅读器由调用方维护，连续色调输出不网屏化
+// ResolveReference提供外部引用PDF字节与可选解密密码，Data为空时按标准保留代理外观
 // Compression配置转换输出，有损模式按图片实际尺寸降采样，原始及无损模式保持完整采样
 // Resources用于导入、局部合成与返回编辑器的共享资源预算
 type PDFImportOptions struct {
 	Resources        *Resources
 	Password         []byte
 	PasswordUTF8     bool
-	Backends         *RenderBackends
 	RendererOptions  []RendererOption
-	Progress         func(int) error
 	OnProgress       func(stage string, completed, total int) error
 	Strict           bool
 	RasterDPI        float64
-	ResolveFile      pdfgo.FileResolver
-	ResolveReference pdfgo.ReferenceResolver
-	Halftones        map[string]*pdfgo.Halftone
+	ResolveFile      PDFFileResolver
+	ResolveReference PDFReferenceResolver
 	Compression      CompressionOptions
 }
 
@@ -98,7 +133,7 @@ type PDFImportReport struct {
 	PathObjects  int
 	ImageObjects int
 	Links        int
-	Warnings     []pdfgo.Diagnostic
+	Warnings     []PDFDiagnostic
 }
 
 // PDFImport 按页转换PDF，实例需串行使用，输入源由调用方持有至Close
@@ -155,7 +190,7 @@ type pdfImporter struct {
 	fontPrograms            map[pdfFontProgramKey]*pdfImportedFont
 	symbolFonts             map[*pdfgo.Font]*pdfImportedFont
 	fontWarnings            map[string]bool
-	clipTexts               map[*pdfgo.TextClip][]TextObject
+	clipTexts               map[*pdfgo.TextClip]pdfClipTextEntry
 	textOrigins             map[*pdfgo.ReplacementText]pdfObjectOrigin
 	clipPaths               *renderCache[[32]byte, pdfClipPath]
 	cmykSpace               string
@@ -203,11 +238,11 @@ type pdfImporter struct {
 	patternOrigins          map[*Pattern]pdfObjectOrigin
 	annotationData          []byte
 	resolveFile             pdfgo.FileResolver
-	resolveReference        pdfgo.ReferenceResolver
+	resolveReference        codecpdf.ReferenceSourceResolver
 	references              *codecpdf.ReferenceCache
 	usedReferences          bool
 	halftoneWarnings        map[*pdfgo.Halftone]bool
-	halftones               map[string]*pdfgo.Halftone
+	halftoneWarningMessages map[string]bool
 	transferBackdrop        bool
 	transferModel           pdfgo.Name
 	compression             CompressionOptions
@@ -336,9 +371,6 @@ func NewPDFImport(ctx context.Context, input *Input, options PDFImportOptions) (
 		return nil, fmt.Errorf("invalid PDF raster DPI")
 	}
 	renderer := NewRenderer(&Reader{resources: options.Resources}, options.RendererOptions...)
-	if options.Backends != nil {
-		WithRenderBackends(*options.Backends)(renderer)
-	}
 	if options.RasterDPI != 0 {
 		renderer.dpi = options.RasterDPI
 	}
@@ -376,7 +408,7 @@ func NewPDFImport(ctx context.Context, input *Input, options PDFImportOptions) (
 	}
 	reader, err := pdfgo.NewReaderWithOptions(&pdfImportInput{input: input, importer: importer}, input.Size(), readOptions)
 	if err != nil {
-		return nil, err
+		return nil, wrapPDFOpenError(err)
 	}
 	defer func() {
 		if !keep {
@@ -410,9 +442,8 @@ func NewPDFImport(ctx context.Context, input *Input, options PDFImportOptions) (
 		}
 	}
 	importer.pageIndexes = make(map[pdfgo.Reference]int)
-	importer.resolveFile = options.ResolveFile
-	importer.resolveReference = options.ResolveReference
-	importer.halftones = options.Halftones
+	importer.resolveFile = adaptPDFFileResolver(options.ResolveFile)
+	importer.resolveReference = adaptPDFReferenceResolver(options.ResolveReference)
 	importer.compression = options.Compression
 	importer.references = &codecpdf.ReferenceCache{}
 	defer func() {
@@ -601,11 +632,8 @@ func clearGraphicObjectID(object *GraphicObject) {
 		object.PathObject.ID = ""
 	case "ImageObject":
 		object.ImageObject.ID = ""
-	case "CompositeObject", "CompositeGraphicUnit":
-		object.CompositeGraphicUnit.ID = ""
-		for i := range object.CompositeGraphicUnit.Objects {
-			clearGraphicObjectID(&object.CompositeGraphicUnit.Objects[i])
-		}
+	case "CompositeObject":
+		object.CompositeObject.ID = ""
 	}
 }
 
@@ -634,6 +662,14 @@ func colorSpaceResourceDigest(space ColorSpace, profileData []byte) [32]byte {
 	return sum
 }
 
+// isPDFHalftoneDedupWarning 判断诊断信息是否为需要文档级去重的半色调告警
+// 入参: message 诊断消息
+// 返回: bool 是否需要文档级去重
+func isPDFHalftoneDedupWarning(message string) bool {
+	return message == "PDF continuous-tone appearance retained; device halftone not transferred to OFD" ||
+		message == "PDF continuous-tone appearance retained; device halftone origin not transferred to OFD"
+}
+
 // isPDFFontDedupWarning 判断诊断信息是否为需要文档级去重的字体告警
 // 入参: message 诊断消息
 // 返回: bool 是否需要文档级去重
@@ -652,10 +688,77 @@ func formatPDFWarningMessage(base string, count int) string {
 	return base
 }
 
-// newBaseVisitor 创建统一携带告警、引用解析、网屏与PostScript策略的基础访问器
+// wrapPDFOpenError 将底层PDF密码错误包装为包级ErrPDFPassword
+// 入参: err 打开PDF返回的错误
+// 返回: error 包装后的错误
+func wrapPDFOpenError(err error) error {
+	if errors.Is(err, pdfgo.ErrPassword) {
+		return fmt.Errorf("%w: %v", ErrPDFPassword, err)
+	}
+	return err
+}
+
+// pdfFileSpecificationFrom 将底层PDF文件说明转换为公开结构
+// 入参: spec 底层文件说明
+// 返回: PDFFileSpecification 公开文件说明
+func pdfFileSpecificationFrom(spec pdfgo.FileSpecification) PDFFileSpecification {
+	return PDFFileSpecification{
+		Name:        spec.Name,
+		Description: spec.Description,
+		FileSystem:  string(spec.FileSystem),
+	}
+}
+
+// adaptPDFFileResolver 将公开外部文件回调适配为底层PDF文件解析器
+// 入参: resolver 公开外部文件回调
+// 返回: pdfgo.FileResolver 底层文件解析器
+func adaptPDFFileResolver(resolver PDFFileResolver) pdfgo.FileResolver {
+	if resolver == nil {
+		return nil
+	}
+	return func(ctx context.Context, spec pdfgo.FileSpecification) ([]byte, error) {
+		return resolver(ctx, pdfFileSpecificationFrom(spec))
+	}
+}
+
+// adaptPDFReferenceResolver 将公开引用解析回调适配为内部引用字节解析器
+// 入参: resolver 公开引用解析回调
+// 返回: codecpdf.ReferenceSourceResolver 内部引用字节解析器
+func adaptPDFReferenceResolver(resolver PDFReferenceResolver) codecpdf.ReferenceSourceResolver {
+	if resolver == nil {
+		return nil
+	}
+	return func(ctx context.Context, reference pdfgo.ReferenceXObject) (codecpdf.ReferenceSource, error) {
+		converted := PDFReference{
+			File:      pdfFileSpecificationFrom(reference.File),
+			PageIndex: reference.PageIndex,
+		}
+		if reference.PageLabel != nil {
+			converted.PageLabel = *reference.PageLabel
+			converted.HasPageLabel = true
+		}
+		if len(reference.ID) != 0 {
+			converted.ID = make([][]byte, len(reference.ID))
+			for i, id := range reference.ID {
+				converted.ID[i] = bytes.Clone([]byte(id))
+			}
+		}
+		source, err := resolver(ctx, converted)
+		if err != nil {
+			return codecpdf.ReferenceSource{}, err
+		}
+		return codecpdf.ReferenceSource{
+			Data:         source.Data,
+			Password:     source.Password,
+			PasswordUTF8: source.PasswordUTF8,
+		}, nil
+	}
+}
+
+// newBaseVisitor 创建统一携带告警、引用解析与PostScript策略的基础访问器
 // 返回: pdfgo.Visitor 基础访问器
 func (p *pdfImporter) newBaseVisitor() pdfgo.Visitor {
-	v := pdfgo.Visitor{Warning: p.warning, Reference: p.referencePage, Halftones: p.halftones}
+	v := pdfgo.Visitor{Warning: p.warning, Reference: p.referencePage}
 	if p.warning != nil {
 		v.PostScript = func(pdfgo.PostScriptMark) error {
 			p.addWarning(pdfgo.Diagnostic{Page: p.page + 1, Message: "PostScript XObject skipped in OFD conversion"})
@@ -668,12 +771,12 @@ func (p *pdfImporter) newBaseVisitor() pdfgo.Visitor {
 // addWarning 记录单次告警并自动聚合同类重复条目
 // 入参: warning 诊断条目
 func (p *pdfImporter) addWarning(warning pdfgo.Diagnostic) {
-	p.addWarningCount(warning, 1)
+	p.addWarningCount(PDFDiagnostic{Page: warning.Page, Offset: warning.Offset, Message: warning.Message}, 1)
 }
 
 // addWarningCount 按指定次数累计同类告警，超页阈值时折叠至文档级汇总条目
 // 入参: warning 原始诊断条目, count 出现次数
-func (p *pdfImporter) addWarningCount(warning pdfgo.Diagnostic, count int) {
+func (p *pdfImporter) addWarningCount(warning PDFDiagnostic, count int) {
 	if count <= 0 {
 		count = 1
 	}
@@ -844,10 +947,10 @@ func remapGraphicObjects(objects []GraphicObject, idMap map[string]string) {
 				remapOne(&obj)
 				cell.ImageObject[i] = obj.ImageObject
 			}
-			for i := range cell.CompositeGraphicUnit {
-				obj := GraphicObject{Type: "CompositeObject", CompositeGraphicUnit: cell.CompositeGraphicUnit[i]}
+			for i := range cell.CompositeObject {
+				obj := GraphicObject{Type: "CompositeObject", CompositeObject: cell.CompositeObject[i]}
 				remapOne(&obj)
-				cell.CompositeGraphicUnit[i] = obj.CompositeGraphicUnit
+				cell.CompositeObject[i] = obj.CompositeObject
 			}
 		}
 	}
@@ -897,13 +1000,10 @@ func remapGraphicObjects(objects []GraphicObject, idMap map[string]string) {
 			if obj.ImageObject.Border != nil {
 				remapColor((*FillColor)(obj.ImageObject.Border.BorderColor))
 			}
-		case "CompositeObject", "CompositeGraphicUnit":
-			remapID(&obj.CompositeGraphicUnit.ResourceID)
-			remapID(&obj.CompositeGraphicUnit.DrawParam)
-			remapClips(obj.CompositeGraphicUnit.Clips)
-			for i := range obj.CompositeGraphicUnit.Objects {
-				remapOne(&obj.CompositeGraphicUnit.Objects[i])
-			}
+		case "CompositeObject":
+			remapID(&obj.CompositeObject.ResourceID)
+			remapID(&obj.CompositeObject.DrawParam)
+			remapClips(obj.CompositeObject.Clips)
 		}
 	}
 	for i := range objects {
@@ -1031,6 +1131,7 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 	savedModelAttachments := maps.Clone(importer.modelAttachments)
 	savedFontWarnings := maps.Clone(importer.fontWarnings)
 	savedHalftoneWarnings := maps.Clone(importer.halftoneWarnings)
+	savedHalftoneMessages := maps.Clone(importer.halftoneWarningMessages)
 	savedIsolatedGroupImages := maps.Clone(importer.isolatedGroupImages)
 	savedUsedReferences := importer.usedReferences
 	savedRenditionsHad := importer.renditions != nil
@@ -1062,6 +1163,7 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 			importer.modelAttachments = savedModelAttachments
 			importer.fontWarnings = savedFontWarnings
 			importer.halftoneWarnings = savedHalftoneWarnings
+			importer.halftoneWarningMessages = savedHalftoneMessages
 			importer.isolatedGroupImages = savedIsolatedGroupImages
 			importer.usedReferences = savedUsedReferences
 			if !savedRenditionsHad {
@@ -1114,11 +1216,6 @@ func (p *PDFImport) ConvertPage(ctx context.Context, index int) (err error) {
 	importer.report.Pages++
 	if err := editorProgress(p.options.OnProgress).withContext(ctx).report("convert", importer.report.Pages, len(p.pages)); err != nil {
 		return err
-	}
-	if p.options.Progress != nil {
-		if err := p.options.Progress(importer.report.Pages); err != nil {
-			return err
-		}
 	}
 	importer.commitSeenForms(index)
 	if p.pageCompositeMeta == nil {
@@ -1389,7 +1486,7 @@ func (p *PDFImport) Reset(ctx context.Context) error {
 // Close 释放PDF索引、引用缓存和转换状态，不关闭调用方的输入源
 // 返回: error 关闭错误
 func (p *PDFImport) Close() error {
-	if p.importer == nil {
+	if p == nil || p.importer == nil {
 		return nil
 	}
 	if p.live != nil && p.live.reader != nil {
@@ -1867,7 +1964,7 @@ func (p *pdfImporter) beginPage(ctx context.Context, index int, page *pdfgo.Page
 	p.pageHeight = height
 	p.objects = nil
 	p.maskClips = make(map[*pdfgo.SoftMask]pdfgo.Path)
-	p.clipTexts = make(map[*pdfgo.TextClip][]TextObject)
+	p.clipTexts = make(map[*pdfgo.TextClip]pdfClipTextEntry)
 	p.compositeCache = nil
 	p.compositeNodes = nil
 	p.compositeSpace = nil
@@ -2797,9 +2894,6 @@ func (p *PDFImport) finishPagesParallel(ctx context.Context, pending, leaders []
 func (p *PDFImport) runPageWorker(ctx context.Context, slot int, jobs <-chan int, results chan<- pdfPageWorkResult, sharedImages *pdfSharedImageCache, pageMarked map[pdfgo.Reference][]pdfStructureContent) {
 	mainImporter := p.importer
 	workerRenderer := NewRenderer(&Reader{resources: mainImporter.resources}, p.options.RendererOptions...)
-	if p.options.Backends != nil {
-		WithRenderBackends(*p.options.Backends)(workerRenderer)
-	}
 	workerRenderer.dpi = mainImporter.renderer.dpi
 	workerRenderer.fontSourcesCache = mainImporter.renderer.fontSourcesCache.child()
 	workerEditor := NewEditor()
@@ -2822,7 +2916,6 @@ func (p *PDFImport) runPageWorker(ctx context.Context, slot int, jobs <-chan int
 		pageOrder:     mainImporter.pageOrder,
 		pageIDs:       mainImporter.pageIDs,
 		pageIndexes:   mainImporter.pageIndexes,
-		halftones:     mainImporter.halftones,
 		compression:   mainImporter.compression,
 		imageWorkers:  1,
 		sharedImages:  sharedImages,
@@ -2862,6 +2955,8 @@ func (p *PDFImport) runPageWorker(ctx context.Context, slot int, jobs <-chan int
 		workerImporter.beginPage(ctx, pageIndex, page)
 		workerImporter.report = PDFImportReport{}
 		workerImporter.resetWarnings()
+		workerImporter.halftoneWarnings = make(map[*pdfgo.Halftone]bool)
+		workerImporter.halftoneWarningMessages = make(map[string]bool)
 		if mainImporter.structureBindings != nil {
 			wb := &pdfStructureBindings{prepared: map[*pdfgo.Reader]bool{workerReader: true}}
 			if list := pageMarked[mainPage.Reference]; len(list) != 0 {
@@ -2991,6 +3086,7 @@ func (p *PDFImport) commitParallelPageResult(ctx context.Context, index int, res
 	savedModelAttachments := maps.Clone(importer.modelAttachments)
 	savedFontWarnings := maps.Clone(importer.fontWarnings)
 	savedHalftoneWarnings := maps.Clone(importer.halftoneWarnings)
+	savedHalftoneMessages := maps.Clone(importer.halftoneWarningMessages)
 	savedIsolatedGroupImages := maps.Clone(importer.isolatedGroupImages)
 	savedUsedReferences := importer.usedReferences
 	savedRenditionsHad := importer.renditions != nil
@@ -3022,6 +3118,7 @@ func (p *PDFImport) commitParallelPageResult(ctx context.Context, index int, res
 			importer.modelAttachments = savedModelAttachments
 			importer.fontWarnings = savedFontWarnings
 			importer.halftoneWarnings = savedHalftoneWarnings
+			importer.halftoneWarningMessages = savedHalftoneMessages
 			importer.isolatedGroupImages = savedIsolatedGroupImages
 			importer.usedReferences = savedUsedReferences
 			if !savedRenditionsHad {
@@ -3151,16 +3248,20 @@ func (p *PDFImport) commitParallelPageResult(ctx context.Context, index int, res
 			}
 			importer.fontWarnings[w.Message] = true
 		}
+		if isPDFHalftoneDedupWarning(w.Message) {
+			if importer.halftoneWarningMessages == nil {
+				importer.halftoneWarningMessages = make(map[string]bool)
+			}
+			if importer.halftoneWarningMessages[w.Message] {
+				continue
+			}
+			importer.halftoneWarningMessages[w.Message] = true
+		}
 		importer.addWarningCount(w, entry.count)
 	}
 	importer.report.Pages++
 	if err := editorProgress(p.options.OnProgress).withContext(ctx).report("convert", importer.report.Pages, len(p.pages)); err != nil {
 		return err
-	}
-	if p.options.Progress != nil {
-		if err := p.options.Progress(importer.report.Pages); err != nil {
-			return err
-		}
 	}
 	if p.pageCompositeMeta == nil {
 		p.pageCompositeMeta = make(map[int]pdfPageCompositeMeta)
@@ -3229,6 +3330,7 @@ func (p *PDFImport) convertDuplicatePage(ctx context.Context, index, leader int)
 	savedModelAttachments := maps.Clone(importer.modelAttachments)
 	savedFontWarnings := maps.Clone(importer.fontWarnings)
 	savedHalftoneWarnings := maps.Clone(importer.halftoneWarnings)
+	savedHalftoneMessages := maps.Clone(importer.halftoneWarningMessages)
 	savedIsolatedGroupImages := maps.Clone(importer.isolatedGroupImages)
 	savedUsedReferences := importer.usedReferences
 	savedRenditionsHad := importer.renditions != nil
@@ -3259,6 +3361,7 @@ func (p *PDFImport) convertDuplicatePage(ctx context.Context, index, leader int)
 			importer.modelAttachments = savedModelAttachments
 			importer.fontWarnings = savedFontWarnings
 			importer.halftoneWarnings = savedHalftoneWarnings
+			importer.halftoneWarningMessages = savedHalftoneMessages
 			importer.isolatedGroupImages = savedIsolatedGroupImages
 			importer.usedReferences = savedUsedReferences
 			if !savedRenditionsHad {
@@ -3305,11 +3408,6 @@ func (p *PDFImport) convertDuplicatePage(ctx context.Context, index, leader int)
 	importer.report.Pages++
 	if err := editorProgress(p.options.OnProgress).withContext(ctx).report("convert", importer.report.Pages, len(p.pages)); err != nil {
 		return err
-	}
-	if p.options.Progress != nil {
-		if err := p.options.Progress(importer.report.Pages); err != nil {
-			return err
-		}
 	}
 	p.ready[index] = true
 	p.invalidateLivePages(index)

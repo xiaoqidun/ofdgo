@@ -805,7 +805,7 @@ func (e *Editor) reflowTextSelection(page int, selection TextSelection, edit Tex
 	}
 	first := preview.analysis.Parts[0]
 	if selection.Root == nil {
-		object.CompositeGraphicUnit.ID = first.ID
+		object.CompositeObject.ID = first.ID
 		if err := e.updateObjects(page, []GraphicObject{object}, true); err != nil {
 			return err
 		}
@@ -831,7 +831,7 @@ func (e *Editor) reflowTextSelection(page int, selection TextSelection, edit Tex
 				return fmt.Errorf("invalid composite parent transform")
 			}
 			local := transformEditorMatrix(object, inverse)
-			local.CompositeGraphicUnit.ID = node.object.TextObject.ID
+			local.CompositeObject.ID = node.object.TextObject.ID
 			if !node.boundaryInCTM {
 				local = compositeBoundary(local, node.parent, false)
 			}

@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -163,7 +164,58 @@ func NormalizeCFFCharstringsAt(data []byte, unitsPerEm uint16) ([]byte, error) {
 	if !changed {
 		return data, nil
 	}
-	return replaceCFFCharstrings(data, dict, topStart, topSize, charStart, charSize, chars, explicitCharset), nil
+	if ros, cid := dict[1230]; cid {
+		fdArrOff, err := cffDictOffset(data, dict, 1236)
+		if err != nil {
+			return nil, err
+		}
+		fds, _, err := readType2Index(data, fdArrOff)
+		if err != nil || len(fds) != 1 {
+			return nil, fmt.Errorf("CID CFF requires FD normalization")
+		}
+		fdDict, err := readCFFDict(fds[0])
+		if err != nil {
+			return nil, err
+		}
+		var privData, localData []byte
+		if transform == nil && len(fdDict[18]) == 2 && fdDict[18][0] > 0 {
+			pDict, err := readType2Private(data, fdDict[18], &type2Font{})
+			if err != nil {
+				return nil, err
+			}
+			if values := pDict[19]; len(values) != 0 {
+				start := int(fdDict[18][1]) + int(values[0])
+				_, end, err := readType2Index(data, start)
+				if err != nil {
+					return nil, err
+				}
+				localData = data[start:end]
+				pDict[19] = []float64{0}
+				for {
+					length := len(encodeCFFDict(pDict))
+					if pDict[19][0] == float64(length) {
+						break
+					}
+					pDict[19][0] = float64(length)
+				}
+			}
+			privData = encodeCFFDict(pDict)
+		}
+		_, stringEnd, err := readType2Index(data, topStart+topSize)
+		if err != nil {
+			return nil, err
+		}
+		_, globalEnd, err := readType2Index(data, stringEnd)
+		if err != nil {
+			return nil, err
+		}
+		encodedChars, err := encodeCFFIndexChecked(chars)
+		if err != nil {
+			return nil, err
+		}
+		return encodeSanitizedCIDCFF(data[:headerEnd], data[headerEnd:topStart], dict, slices.Clone(ros), data[topStart+topSize:stringEnd], data[stringEnd:globalEnd], len(chars), encodedChars, privData, localData)
+	}
+	return replaceCFFCharstrings(data, dict, topStart, topSize, charStart, charSize, chars, explicitCharset)
 }
 
 // SanitizeCFF 尝试清洗CFF数据，转换CID字体并合并FontMatrix
@@ -294,6 +346,7 @@ func SanitizeCFF(data []byte) ([]byte, error) {
 		localSubrData = data[start:end]
 	}
 	charStringsData := data[charStringsOff:charEnd]
+	ros := slices.Clone(topDict[1230])
 	for op := 1230; op <= 1238; op++ {
 		delete(topDict, op)
 	}
@@ -316,8 +369,14 @@ func SanitizeCFF(data []byte) ([]byte, error) {
 		}
 		finalPrivData = encodeCFFDict(pDict)
 	}
-	stringIndexData, charsetData := sanitizedCFFCharset(stringIndexData, len(chars))
-	return encodeSanitizedCFF([]byte{1, 0, 4, 4}, nameIndexData, topDict, stringIndexData, globalSubrIndexData, charsetData, charStringsData, finalPrivData, localSubrData), nil
+	if len(chars)-1 > 64999 && len(ros) == 3 {
+		return encodeSanitizedCIDCFF([]byte{1, 0, 4, 4}, nameIndexData, topDict, ros, stringIndexData, globalSubrIndexData, len(chars), charStringsData, finalPrivData, localSubrData)
+	}
+	stringIndexData, charsetData, err := sanitizedCFFCharset(stringIndexData, len(chars))
+	if err != nil {
+		return nil, err
+	}
+	return encodeSanitizedCFF([]byte{1, 0, 4, 4}, nameIndexData, topDict, stringIndexData, globalSubrIndexData, charsetData, charStringsData, finalPrivData, localSubrData)
 }
 
 // GetCFFCIDRuneMap 获取CID到包装字体字符的映射
@@ -403,13 +462,19 @@ func normalizeCFFCharstrings(data []byte) ([]byte, error) {
 
 // replaceCFFCharstrings 替换字形索引并调整后续数据及顶层字典的偏移
 // 入参: data 原始字体, dict 输出字典, topStart 顶层索引起点, topSize 顶层索引大小, charStart 字形索引起点, charSize 字形索引大小, chars 字形程序, explicitCharset 追加字符集
-// 返回: []byte 重建后的字体数据
-func replaceCFFCharstrings(data []byte, dict cffDict, topStart, topSize, charStart, charSize int, chars [][]byte, explicitCharset []byte) []byte {
-	encodedChars := encodeCFFIndex(chars)
+// 返回: []byte 重建后的字体数据, error 索引编码错误
+func replaceCFFCharstrings(data []byte, dict cffDict, topStart, topSize, charStart, charSize int, chars [][]byte, explicitCharset []byte) ([]byte, error) {
+	encodedChars, err := encodeCFFIndexChecked(chars)
+	if err != nil {
+		return nil, err
+	}
 	topEnd := topStart + topSize
 	topData, _ := getCFFIndexData(data, topStart)
 	originalDict := parseCFFDict(topData)
-	newTop := encodeCFFIndex([][]byte{encodeCFFDict(dict)})
+	newTop, err := encodeCFFIndexChecked([][]byte{encodeCFFDict(dict)})
+	if err != nil {
+		return nil, err
+	}
 	for range 6 {
 		shift := len(newTop) - topSize
 		shiftTail := shift + len(encodedChars) - charSize
@@ -439,7 +504,10 @@ func replaceCFFCharstrings(data []byte, dict cffDict, topStart, topSize, charSta
 				dict[18] = []float64{values[0], float64(offset + shift)}
 			}
 		}
-		updated := encodeCFFIndex([][]byte{encodeCFFDict(dict)})
+		updated, err := encodeCFFIndexChecked([][]byte{encodeCFFDict(dict)})
+		if err != nil {
+			return nil, err
+		}
 		if len(updated) == len(newTop) {
 			newTop = updated
 			break
@@ -453,7 +521,7 @@ func replaceCFFCharstrings(data []byte, dict cffDict, topStart, topSize, charSta
 	result = append(result, encodedChars...)
 	result = append(result, data[charStart+charSize:]...)
 	result = append(result, explicitCharset...)
-	return result
+	return result, nil
 }
 
 // normalizeCFFPrivate 移除废弃的加粗阈值及未加密标记，拒绝加密字形程序
@@ -592,6 +660,7 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 		}
 		inlined[gid] = output.Bytes()
 	}
+	ros := slices.Clone(topDict[1230])
 	for op := 1230; op <= 1238; op++ {
 		delete(topDict, op)
 	}
@@ -619,9 +688,18 @@ func sanitizeMultiFDCFF(data []byte, hdrSize int, nameIndexData []byte, topDict 
 		return nil, err
 	}
 	finalPrivData := encodeCFFDict(privateDict)
-	charStringsData := encodeCFFIndex(inlined)
-	stringIndexData, charsetData := sanitizedCFFCharset(stringIndexData, len(inlined))
-	return encodeSanitizedCFF([]byte{1, 0, 4, 4}, nameIndexData, topDict, stringIndexData, encodeCFFIndex(nil), charsetData, charStringsData, finalPrivData, nil), nil
+	charStringsData, err := encodeCFFIndexChecked(inlined)
+	if err != nil {
+		return nil, err
+	}
+	if len(inlined)-1 > 64999 && len(ros) == 3 {
+		return encodeSanitizedCIDCFF([]byte{1, 0, 4, 4}, nameIndexData, topDict, ros, stringIndexData, []byte{0, 0}, len(inlined), charStringsData, finalPrivData, nil)
+	}
+	stringIndexData, charsetData, err := sanitizedCFFCharset(stringIndexData, len(inlined))
+	if err != nil {
+		return nil, err
+	}
+	return encodeSanitizedCFF([]byte{1, 0, 4, 4}, nameIndexData, topDict, stringIndexData, []byte{0, 0}, charsetData, charStringsData, finalPrivData, nil)
 }
 
 // normalizeCFFHeader 将带扩展字节的合法非CID CFF头部规范化为标准4字节头并重算顶层偏移
@@ -686,46 +764,63 @@ func normalizeCFFHeader(data []byte) ([]byte, error) {
 
 // sanitizedCFFCharset 为转换后的非CID字体生成显式字符集并按需补充字符串索引
 // 入参: stringIndexData 原始字符串索引, numGlyphs 字形总数
-// 返回: []byte 字符串索引数据, []byte 字符集数据
-func sanitizedCFFCharset(stringIndexData []byte, numGlyphs int) ([]byte, []byte) {
+// 返回: []byte 字符串索引数据, []byte 字符集数据, error 超限或索引错误
+func sanitizedCFFCharset(stringIndexData []byte, numGlyphs int) ([]byte, []byte, error) {
 	if numGlyphs <= 1 {
-		return stringIndexData, nil
+		return stringIndexData, nil, nil
+	}
+	const maxCFFSID = 64999
+	if numGlyphs-1 > maxCFFSID {
+		return nil, nil, fmt.Errorf("CFF glyph count %d exceeds maximum SID %d", numGlyphs, maxCFFSID)
 	}
 	nLeft := numGlyphs - 2
 	singleRange := []byte{2, 0, 1, byte(nLeft >> 8), byte(nLeft)}
 	maxStd := len(cffStandardStrings) - 1
 	if numGlyphs-1 <= maxStd {
-		return stringIndexData, singleRange
+		return stringIndexData, singleRange, nil
 	}
-	origStrings, _, _ := readType2Index(stringIndexData, 0)
-	extendStrings := func(startSID, count int) []byte {
+	origStrings, _, err := readType2Index(stringIndexData, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(origStrings) > maxCFFSID-maxStd {
+		return nil, nil, fmt.Errorf("CFF string index exceeds maximum SID %d", maxCFFSID)
+	}
+	extendStrings := func(startSID, count int) ([]byte, error) {
 		combined := make([][]byte, len(origStrings)+count)
 		copy(combined, origStrings)
 		for i := range count {
 			combined[len(origStrings)+i] = strconv.AppendInt([]byte{'g'}, int64(startSID+i), 10)
 		}
-		return encodeCFFIndex(combined)
+		return encodeCFFIndexChecked(combined)
 	}
-	if numGlyphs-1+len(origStrings) <= 64999 {
-		stringIndexData = extendStrings(maxStd+1, numGlyphs-1-maxStd)
+	if numGlyphs-1+len(origStrings) <= maxCFFSID {
+		extended, err := extendStrings(maxStd+1, numGlyphs-1-maxStd)
+		if err != nil {
+			return nil, nil, err
+		}
 		if len(origStrings) == 0 {
-			return stringIndexData, singleRange
+			return extended, singleRange, nil
 		}
 		stdLeft := maxStd - 1
 		first2 := maxStd + 1 + len(origStrings)
 		nLeft2 := numGlyphs - 2 - maxStd
-		return stringIndexData, []byte{2, 0, 1, byte(stdLeft >> 8), byte(stdLeft), byte(first2 >> 8), byte(first2), byte(nLeft2 >> 8), byte(nLeft2)}
+		return extended, []byte{2, 0, 1, byte(stdLeft >> 8), byte(stdLeft), byte(first2 >> 8), byte(first2), byte(nLeft2 >> 8), byte(nLeft2)}, nil
 	}
 	if need := numGlyphs - 1 - maxStd - len(origStrings); need > 0 {
-		stringIndexData = extendStrings(maxStd+1+len(origStrings), need)
+		extended, err := extendStrings(maxStd+1+len(origStrings), need)
+		if err != nil {
+			return nil, nil, err
+		}
+		stringIndexData = extended
 	}
-	return stringIndexData, singleRange
+	return stringIndexData, singleRange, nil
 }
 
 // encodeSanitizedCFF 按字典编码长度收敛偏移并组装规范化字体
 // 入参: header 头部, names 名称索引, dict 顶层字典, strings 字符串索引, globals 全局子程序索引, charset 字符集, chars 字形索引, private 私有字典, locals 局部子程序索引
-// 返回: []byte CFF字体数据
-func encodeSanitizedCFF(header, names []byte, dict cffDict, strings, globals, charset, chars, private, locals []byte) []byte {
+// 返回: []byte CFF字体数据, error 索引编码错误
+func encodeSanitizedCFF(header, names []byte, dict cffDict, strings, globals, charset, chars, private, locals []byte) ([]byte, error) {
 	if len(charset) > 0 {
 		dict[15] = []float64{0}
 	}
@@ -734,7 +829,11 @@ func encodeSanitizedCFF(header, names []byte, dict cffDict, strings, globals, ch
 	prefix := len(header) + len(names) + len(strings) + len(globals)
 	var top []byte
 	for {
-		top = encodeCFFIndex([][]byte{encodeCFFDict(dict)})
+		var err error
+		top, err = encodeCFFIndexChecked([][]byte{encodeCFFDict(dict)})
+		if err != nil {
+			return nil, err
+		}
 		charsetOffset := prefix + len(top)
 		charOffset := charsetOffset + len(charset)
 		privateOffset := charOffset + len(chars)
@@ -752,7 +851,60 @@ func encodeSanitizedCFF(header, names []byte, dict cffDict, strings, globals, ch
 	for _, part := range [][]byte{header, names, top, strings, globals, charset, chars, private, locals} {
 		out.Write(part)
 	}
-	return out.Bytes()
+	return out.Bytes(), nil
+}
+
+// encodeSanitizedCIDCFF 按单字体字典格式组装字形数超SID上限的标准CID CFF字体
+// 入参: header 头部, names 名称索引, dict 顶层字典, ros 注册排序补充信息, strings 字符串索引, globals 全局子程序索引, numGlyphs 字形总数, chars 字形索引, private 私有字典, locals 局部子程序索引
+// 返回: []byte CID CFF字体数据, error 字形数或偏移错误
+func encodeSanitizedCIDCFF(header, names []byte, dict cffDict, ros []float64, strings, globals []byte, numGlyphs int, chars, private, locals []byte) ([]byte, error) {
+	if numGlyphs < 2 || numGlyphs > 65535 {
+		return nil, fmt.Errorf("invalid CID CFF glyph count %d", numGlyphs)
+	}
+	delete(dict, 18)
+	dict[1230] = ros
+	nLeft := numGlyphs - 2
+	charset := []byte{2, 0, 1, byte(nLeft >> 8), byte(nLeft)}
+	fdSelect := []byte{3, 0, 1, 0, 0, 0, byte(numGlyphs >> 8), byte(numGlyphs)}
+	fdDict := cffDict{18: {float64(len(private)), 0}}
+	prefix := len(header) + len(names) + len(strings) + len(globals)
+	for range 16 {
+		top, err := encodeCFFIndexChecked([][]byte{encodeCFFDict(dict)})
+		if err != nil {
+			return nil, err
+		}
+		fdArray, err := encodeCFFIndexChecked([][]byte{encodeCFFDict(fdDict)})
+		if err != nil {
+			return nil, err
+		}
+		charsetOff := prefix + len(top)
+		selectOff := charsetOff + len(charset)
+		charOff := selectOff + len(fdSelect)
+		arrayOff := charOff + len(chars)
+		privOff := arrayOff + len(fdArray)
+		dict[15] = []float64{float64(charsetOff)}
+		dict[1237] = []float64{float64(selectOff)}
+		dict[17] = []float64{float64(charOff)}
+		dict[1236] = []float64{float64(arrayOff)}
+		fdDict[18] = []float64{float64(len(private)), float64(privOff)}
+		nextTop, err := encodeCFFIndexChecked([][]byte{encodeCFFDict(dict)})
+		if err != nil {
+			return nil, err
+		}
+		nextArray, err := encodeCFFIndexChecked([][]byte{encodeCFFDict(fdDict)})
+		if err != nil {
+			return nil, err
+		}
+		if len(nextTop) == len(top) && len(nextArray) == len(fdArray) {
+			var out bytes.Buffer
+			out.Grow(privOff + len(private) + len(locals))
+			for _, part := range [][]byte{header, names, nextTop, strings, globals, charset, fdSelect, chars, nextArray, private, locals} {
+				out.Write(part)
+			}
+			return out.Bytes(), nil
+		}
+	}
+	return nil, fmt.Errorf("CID CFF offsets did not converge")
 }
 
 // parseCFFAndCountGlyphs 解析CFF头部并统计字形数量
@@ -1042,17 +1194,23 @@ func encodeNumberCFF(buf *bytes.Buffer, val float64) {
 	}
 }
 
-// encodeCFFIndex 编码CFF索引结构
+// encodeCFFIndexChecked 校验项数和偏移范围后编码CFF索引结构
 // 入参: items 数据项列表
-// 返回: []byte 编码后的索引数据
-func encodeCFFIndex(items [][]byte) []byte {
+// 返回: []byte 编码后的索引数据, error 项数或大小超限错误
+func encodeCFFIndexChecked(items [][]byte) ([]byte, error) {
 	count := len(items)
 	if count == 0 {
-		return []byte{0, 0}
+		return []byte{0, 0}, nil
 	}
-	totalSize := 0
+	if count > math.MaxUint16 {
+		return nil, fmt.Errorf("CFF index count %d exceeds %d", count, math.MaxUint16)
+	}
+	var totalSize uint64
 	for _, item := range items {
-		totalSize += len(item)
+		totalSize += uint64(len(item))
+	}
+	if totalSize+1 > math.MaxUint32 {
+		return nil, fmt.Errorf("CFF index size %d exceeds uint32 limit", totalSize)
 	}
 	offSize := 1
 	if totalSize+1 > 255 {
@@ -1064,19 +1222,33 @@ func encodeCFFIndex(items [][]byte) []byte {
 	if totalSize+1 > 16777215 {
 		offSize = 4
 	}
-	base := 3 + (count+1)*offSize
-	data := make([]byte, base+totalSize)
+	base := uint64(3) + uint64(count+1)*uint64(offSize)
+	if base+totalSize > uint64(int(^uint(0)>>1)) {
+		return nil, fmt.Errorf("CFF index buffer exceeds capacity")
+	}
+	data := make([]byte, int(base+totalSize))
 	binary.BigEndian.PutUint16(data, uint16(count))
 	data[2] = byte(offSize)
-	offset := 1
+	offset := uint64(1)
 	for i := 0; i <= count; i++ {
 		for j := 0; j < offSize; j++ {
 			data[3+i*offSize+offSize-1-j] = byte(offset >> (8 * j))
 		}
 		if i < count {
 			copy(data[base+offset-1:], items[i])
-			offset += len(items[i])
+			offset += uint64(len(items[i]))
 		}
+	}
+	return data, nil
+}
+
+// encodeCFFIndex 编码CFF索引结构，越界时直接拒绝而非静默截断
+// 入参: items 数据项列表
+// 返回: []byte 编码后的索引数据
+func encodeCFFIndex(items [][]byte) []byte {
+	data, err := encodeCFFIndexChecked(items)
+	if err != nil {
+		panic(err)
 	}
 	return data
 }

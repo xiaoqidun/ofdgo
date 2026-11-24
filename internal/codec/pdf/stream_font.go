@@ -102,7 +102,9 @@ func compileFontEntry(entry *FontEntry, doSubset, compress bool, level int, zw *
 			"Type":     pdfgo.Name("Font"),
 			"Subtype":  pdfgo.Name("Type1"),
 			"BaseFont": pdfgo.Name(entry.StandardName),
-			"Encoding": pdfgo.Name("WinAnsiEncoding"),
+		}
+		if entry.StandardName != "Symbol" && entry.StandardName != "ZapfDingbats" {
+			dict["Encoding"] = pdfgo.Name("WinAnsiEncoding")
 		}
 		return compiledFont{entry: entry, dict: dict}, zw
 	}
@@ -394,7 +396,7 @@ func buildToUnicodeCMap(font *canvas.Font, parsed *basefont.SFNT, glyphIDs []uin
 				uni = (0xD800+(uni>>10)&0x3FF)<<16 + 0xDC00 + uni&0x3FF
 			}
 			cid := uint16(subsetIdx + 1)
-			if cid == startGID+length && uni == startUni+uint32(length) && (startUni>>8) == (uni>>8) {
+			if cid == startGID+length && (startGID>>8) == (cid>>8) && uni == startUni+uint32(length) && (startUni>>8) == (uni>>8) {
 				length++
 			} else {
 				flush()
@@ -714,11 +716,22 @@ func nextSubsetTag(tag string) string {
 	return string(out[:])
 }
 
-// standardPDFFontName 识别可映射为PDF 14种内置Type1标准字体的名称与样式
+// standardPDFFontName 仅在无嵌入字体数据时精确匹配PDF 14种内置Type1标准字体名称
 // 入参: font 画布字体
 // 返回: string 标准字体名，不匹配时为空
 func standardPDFFontName(font *canvas.Font) string {
-	switch strings.ToLower(font.Name()) {
+	if font == nil || (font.SFNT != nil && (font.SFNT.Head != nil || len(font.SFNT.Tables) > 0)) {
+		return ""
+	}
+	name := strings.TrimSpace(font.Name())
+	switch name {
+	case "Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique",
+		"Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique",
+		"Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic",
+		"Symbol", "ZapfDingbats":
+		return name
+	}
+	switch strings.ToLower(name) {
 	case "courier":
 		switch font.Style() {
 		case canvas.FontRegular:
@@ -730,7 +743,7 @@ func standardPDFFontName(font *canvas.Font) string {
 		case canvas.FontBold | canvas.FontItalic:
 			return "Courier-BoldOblique"
 		}
-	case "dingbats":
+	case "zapfdingbats":
 		if font.Style() == canvas.FontRegular {
 			return "ZapfDingbats"
 		}
@@ -749,7 +762,7 @@ func standardPDFFontName(font *canvas.Font) string {
 		if font.Style() == canvas.FontRegular {
 			return "Symbol"
 		}
-	case "times":
+	case "times", "times-roman":
 		switch font.Style() {
 		case canvas.FontRegular:
 			return "Times-Roman"

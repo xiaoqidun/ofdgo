@@ -751,14 +751,21 @@ export function createPageView(context) {
 						const args = [task.index, state.renderBackend, state.renderDPI, pageView.displayMode() === "raster",
 							[...state.svgFonts.keys()], [...state.svgImages.keys()], task.preview, priority];
 						const page = await context.callRenderPage(args, task);
+						const releaseSvgUrl = url => {
+							if (!url) return;
+							if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+							else nativeHost?.call("release", { svgUrl: url }).catch(() => {});
+						};
 						if (task.canceled || context.activeTab !== tab || state.pageInFlight.get(task.key) !== task || task.openSeq !== state.openSeq) {
-							if (page?.svgUrl) nativeHost?.call("release", { svgUrl: page.svgUrl }).catch(() => {});
+							releaseSvgUrl(page?.svgUrl);
 							task.resolve(null);
 							continue;
 						}
 						if (page.svgUrl) {
+							const svgUrl = page.svgUrl;
+							let consumed = false;
 							try {
-								const response = await fetch(page.svgUrl, { signal: task.controller.signal });
+								const response = await fetch(svgUrl, { signal: task.controller.signal });
 								if (task.canceled || context.activeTab !== tab || state.pageInFlight.get(task.key) !== task || task.openSeq !== state.openSeq) {
 									response.body?.cancel?.().catch(() => {});
 									task.resolve(null);
@@ -766,9 +773,10 @@ export function createPageView(context) {
 								}
 								if (!response.ok) throw new Error("读取页面矢量失败");
 								page.svg = await response.text();
-							} catch (err) {
-								if (task.canceled || err?.name === "AbortError") nativeHost?.call("release", { svgUrl: page.svgUrl }).catch(() => {});
-								throw err;
+								consumed = true;
+							} finally {
+								if (!consumed || svgUrl.startsWith("blob:")) releaseSvgUrl(svgUrl);
+								delete page.svgUrl;
 							}
 						} else if (typeof page.svg !== "string") {
 							page.svg = "";
@@ -2578,6 +2586,52 @@ export function createPageView(context) {
 			}
 		},
 
+		sanitizeSVG(root) {
+			if (!root || root.localName?.toLowerCase() !== "svg") {
+				return document.createElementNS("http://www.w3.org/2000/svg", "svg");
+			}
+			const blockedTags = new Set([
+				"script", "foreignobject", "iframe", "object", "embed", "applet",
+				"frame", "frameset", "meta", "link", "base", "animate", "set",
+				"animatemotion", "animatetransform", "handler", "listener",
+			]);
+			const urlAttrs = new Set(["href", "xlink:href", "src", "action", "formaction", "poster", "data", "codebase"]);
+			const safeURL = value => {
+				const cleaned = String(value || "").replace(/[\u0000-\u0020\u007f]+/g, "");
+				if (!cleaned) return false;
+				if (cleaned.startsWith("#") || cleaned.startsWith("/__native/resource/")) return true;
+				const lower = cleaned.toLowerCase();
+				if (lower.startsWith("blob:")) return true;
+				return /^data:image\/(?:png|jpeg|jpg|gif|webp|bmp);/i.test(cleaned);
+			};
+			const dangerousStyle = /javascript\s*:|vbscript\s*:|expression\s*\(|behavior\s*:|-moz-binding|@import|url\s*\(\s*['"]?\s*(?!#)/i;
+			const nodes = [root, ...root.querySelectorAll("*")];
+			for (const node of nodes) {
+				if (!node.isConnected && node !== root) continue;
+				const tag = (node.localName || node.tagName || "").toLowerCase();
+				if (node !== root && blockedTags.has(tag)) {
+					node.remove();
+					continue;
+				}
+				for (const attr of [...node.attributes]) {
+					const name = attr.name.toLowerCase();
+					const local = (attr.localName || "").toLowerCase();
+					if (name.startsWith("on") || local.startsWith("on")) {
+						node.removeAttributeNode(attr);
+						continue;
+					}
+					if (urlAttrs.has(name) || local === "href") {
+						if (!safeURL(attr.value)) node.removeAttributeNode(attr);
+						continue;
+					}
+					if (name === "style" && dangerousStyle.test(attr.value)) {
+						node.removeAttributeNode(attr);
+					}
+				}
+			}
+			return root;
+		},
+
 		parseSVG(svgText, prefix = "", images = context.state.svgImages) {
 			let markup = svgText.includes("ofdgo-image-")
 				? svgText.replace(/(\b(?:xlink:)?href)="(ofdgo-image-[a-f0-9]{64})"/g, (match, attr, name) => {
@@ -2599,7 +2653,7 @@ export function createPageView(context) {
 						if (!(new RegExp(`\\sid=["'](?!${pagePrefix})`)).test(markup)) {
 							const thumbPrefix = `${prefix}-`;
 							const attrPattern = new RegExp(`(\\sid=["']|\\s(?:xlink:)?href=["']#|url\\(["']?#)${pagePrefix}`, "g");
-							markup = markup.replace(/<[^>]+>/g, tag => tag.replace(attrPattern, `$1${thumbPrefix}`));
+							markup = markup.replace(/<(?:[^>"']|"[^"]*"|'[^']*')*>/g, tag => tag.replace(attrPattern, `$1${thumbPrefix}`));
 							needsPrefixWalk = false;
 						}
 					}
@@ -2607,7 +2661,8 @@ export function createPageView(context) {
 			}
 			const template = document.createElement("template");
 			template.innerHTML = markup;
-			const svg = document.adoptNode(template.content.firstElementChild);
+			const cleaned = pageView.sanitizeSVG(template.content.firstElementChild);
+			const svg = document.adoptNode(cleaned);
 			if (needsPrefixWalk) pageView.prefixSVGIds(svg, prefix);
 			return svg;
 		},

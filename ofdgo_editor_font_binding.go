@@ -915,7 +915,7 @@ func (e *Editor) resolveBindingFont(ctx context.Context, scan *editorFontDocumen
 		if err := reader.initRootContext(ctx); err != nil {
 			return FontFile{}, err
 		}
-		if _, err := reader.DocContext(ctx); err != nil {
+		if _, err := reader.docContext(ctx); err != nil {
 			return FontFile{}, err
 		}
 		scan.fontReader = reader
@@ -1131,7 +1131,7 @@ func (e *Editor) retainLoadedStates(ctx context.Context, source *Editor) error {
 		saved := make(map[string]GraphicObject)
 		for _, layer := range oldPage.Content.Layer {
 			for _, obj := range layer.Objects {
-				if obj.state != (editorCompositeState{}) || obj.TextObject.layout != nil || len(obj.CompositeGraphicUnit.states) != 0 {
+				if obj.state != (editorCompositeState{}) || obj.TextObject.layout != nil || len(obj.CompositeObject.states) != 0 {
 					saved[editorObjectID(obj)] = obj
 				}
 			}
@@ -1154,8 +1154,8 @@ func (e *Editor) retainLoadedStates(ctx context.Context, source *Editor) error {
 				if target.Type == "TextObject" && prev.TextObject.layout != nil && target.TextObject.textDigest() == prev.TextObject.textDigest() {
 					target.TextObject.layout = prev.TextObject.layout
 				}
-				if len(prev.CompositeGraphicUnit.states) != 0 {
-					target.CompositeGraphicUnit.states = maps.Clone(prev.CompositeGraphicUnit.states)
+				if len(prev.CompositeObject.states) != 0 {
+					target.CompositeObject.states = maps.Clone(prev.CompositeObject.states)
 				}
 			}
 		}

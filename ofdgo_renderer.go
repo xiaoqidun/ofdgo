@@ -32,6 +32,7 @@ import (
 // OnExportProgress可选，同步回报文档导出的已处理页数及总页数，返回错误则停止，页数完成不代表写入成功
 type Renderer struct {
 	reader                *Reader
+	ownsReader            bool
 	dpi                   float64
 	compression           CompressionOptions
 	renderAnnotations     bool
@@ -291,6 +292,7 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	maps.Copy(reader.drawParamCache, drawParams)
 	maps.Copy(reader.compositeGraphicUnitCache, composites)
 	next := NewRenderer(reader, WithDPI(r.dpi), WithAnnotations(r.renderAnnotations), WithCompression(r.compression), WithTransparentBackground(r.transparentBackground), WithSVGPathMerge(r.svgPathMerge), WithRenderBackends(r.backends), WithFontDirs(r.fontDirs...), WithFontFS(r.fontFS...))
+	next.ownsReader = true
 	next.rasterDisabled = r.rasterDisabled
 	next.decodeImages = r.decodeImages
 	next.printing = r.printing
@@ -331,14 +333,42 @@ func (r *Renderer) Fork(ctx context.Context) (*Renderer, error) {
 	return next, nil
 }
 
-// ClearCache 释放派生字体、图片、模板与后端缓存，不改变文档和渲染配置
+// Close 仅关闭Fork派生渲染器自有的Reader以释放加密凭据租约，不清理共享缓存，幂等且nil安全
+// 返回: error 关闭错误
+func (r *Renderer) Close() error {
+	if r == nil || !r.ownsReader {
+		return nil
+	}
+	r.ownsReader = false
+	if r.reader == nil {
+		return nil
+	}
+	return r.reader.Close()
+}
+
+// ClearCache 释放派生字体、图片、模板与全部后端及共享后端缓存，不改变文档和渲染配置
 func (r *Renderer) ClearCache() {
 	if r == nil {
 		return
 	}
 	r.imageCache.clear()
 	r.templatePages.clear()
+	for _, state := range r.backendStates {
+		if cache, ok := state.(interface{ clear() }); ok {
+			cache.clear()
+		} else if cache, ok := state.(interface{ Clear() }); ok {
+			cache.Clear()
+		}
+	}
 	r.backendStates = make(map[any]any)
+	for _, state := range r.sharedBackendStates {
+		if cache, ok := state.(interface{ clear() }); ok {
+			cache.clear()
+		} else if cache, ok := state.(interface{ Clear() }); ok {
+			cache.Clear()
+		}
+	}
+	r.sharedBackendStates = make(map[any]any)
 	var resources *Resources
 	if r.reader != nil {
 		resources = r.reader.resources
@@ -346,6 +376,7 @@ func (r *Renderer) ClearCache() {
 	r.imageCache = resourceCache[string, image.Image](resources, imageCacheLimit)
 	r.templatePageCache = make(map[string]*PageContent)
 	r.templatePages = nil
+	r.transparentEdges = nil
 	r.resetFontCache()
 }
 
@@ -363,11 +394,15 @@ func (r *Renderer) FontSources() ([]string, []fs.FS) {
 	return append([]string(nil), r.fontDirs...), append([]fs.FS(nil), r.fontFS...)
 }
 
-// RebindReader 同步重绑阅读器快照并重置依赖旧快照的局部映射，保留跨Fork共享缓存
-// 入参: reader 目标阅读器
+// RebindReader 同步重绑阅读器快照并重置依赖旧快照的图片、模板与局部映射，避免命中脏缓存
+// 入参: reader 新的阅读器快照
 func (r *Renderer) RebindReader(reader *Reader) {
 	if r == nil || reader == nil {
 		return
+	}
+	if r.ownsReader && r.reader != nil && r.reader != reader {
+		_ = r.reader.Close()
+		r.ownsReader = false
 	}
 	if reader.resources == nil {
 		reader.resources, _ = NewResources(ResourceOptions{})
@@ -379,7 +414,10 @@ func (r *Renderer) RebindReader(reader *Reader) {
 	r.scopedDrawParams = nil
 	r.scopedComposites = nil
 	r.pageResources = nil
+	r.imageCache = resourceCache[string, image.Image](reader.resources, imageCacheLimit)
 	r.templatePageCache = make(map[string]*PageContent)
+	r.templatePages = nil
+	r.backendStates = make(map[any]any)
 	r.transparentEdges = nil
 	r.resetFontCache()
 }
@@ -685,7 +723,7 @@ func (r *Renderer) internalRasterBackend() RasterBackend {
 		return r.backends.Raster
 	}
 	if r.rasterDisabled {
-		return CanvasBackend{}
+		return DefaultBackend{}
 	}
 	return nil
 }

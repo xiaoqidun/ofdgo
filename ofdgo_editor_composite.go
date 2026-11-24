@@ -58,6 +58,7 @@ type editorCompositeNode struct {
 	data            []byte
 	node            *editorXML
 	object          GraphicObject
+	unit            *CompositeGraphicUnit
 	pageID          string
 	parent          Matrix
 	boundaryInCTM   bool
@@ -101,23 +102,29 @@ func newEditorCompositeNode(data []byte) (*editorCompositeNode, error) {
 		return nil, err
 	}
 	var object GraphicObject
+	var unit *CompositeGraphicUnit
 	object.Type = node.name.Local
 	switch object.Type {
 	case "Appearance":
-		object.Type = "CompositeObject"
-		err = xml.Unmarshal(data, &object.CompositeGraphicUnit)
+		var appearance Appearance
+		err = xml.Unmarshal(data, &appearance)
+		object = GraphicObject{Type: "CompositeObject", CompositeObject: CompositeObject{Boundary: appearance.Boundary}}
+		unit = &CompositeGraphicUnit{Objects: appearance.Objects, TextObject: appearance.TextObject, PathObject: appearance.PathObject, ImageObject: appearance.ImageObject, CompositeObject: appearance.CompositeObject}
 	case "TextObject":
 		err = xml.Unmarshal(data, &object.TextObject)
 	case "PathObject":
 		err = xml.Unmarshal(data, &object.PathObject)
 	case "ImageObject":
 		err = xml.Unmarshal(data, &object.ImageObject)
-	case "CompositeObject", "CompositeGraphicUnit":
-		err = xml.Unmarshal(data, &object.CompositeGraphicUnit)
+	case "CompositeObject":
+		err = xml.Unmarshal(data, &object.CompositeObject)
+	case "CompositeGraphicUnit":
+		unit = new(CompositeGraphicUnit)
+		err = xml.Unmarshal(data, unit)
 	default:
 		err = fmt.Errorf("unsupported composite member %q", object.Type)
 	}
-	return &editorCompositeNode{data: data, node: node, object: object}, err
+	return &editorCompositeNode{data: data, node: node, object: object, unit: unit}, err
 }
 
 // remapCompositeStates 随XML标识重映射会话记录，仅保留当前子树的对象
@@ -282,16 +289,11 @@ func editorResourceReferencesContext(ctx context.Context, data []byte) ([]string
 	return result, nil
 }
 
-// collectCompositeReferences 收集内联复合对象引用的新资源
+// collectCompositeReferences 收集复合对象引用的新资源
 // 入参: composite 复合对象, used 引用集合
-func collectCompositeReferences(composite CompositeGraphicUnit, used map[string]bool) {
+func collectCompositeReferences(composite CompositeObject, used map[string]bool) {
 	used[composite.ResourceID] = true
 	used[composite.DrawParam] = true
-	used[composite.Thumbnail] = true
-	used[composite.Substitution] = true
-	for object := range composite.objects() {
-		collectObjectReferences(object, used)
-	}
 }
 
 // CompositeObjects 枚举复合对象的直接可绘制成员，资源引用层不占用路径层级
@@ -619,7 +621,7 @@ func (e *Editor) compositeScope(page int, path ObjectPath) (*Reader, *Renderer, 
 	}
 	root.node.parent = &editorXML{name: xml.Name{Local: "Layer"}, attrs: []xml.Attr{{Name: xml.Name{Local: "ID"}, Value: layer.ID}, {Name: xml.Name{Local: "DrawParam"}, Value: layer.DrawParam}}, parent: &editorXML{name: xml.Name{Local: "Content"}}}
 	root.pageID = e.pages[page].ID
-	root.setStates(object.CompositeGraphicUnit.states)
+	root.setStates(object.CompositeObject.states)
 	reader, err := e.reader(nil)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -665,95 +667,103 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 		return nil, fmt.Errorf("object is not composite")
 	}
 	if !n.expanded {
-		c := n.object.CompositeGraphicUnit
-		box, _ := ParseBox(c.Boundary)
-		boundary := n.parent.Multiply(TranslationMatrix(box.X, box.Y))
-		matrix := boundary.Multiply(NewMatrix(c.CTM))
-		clips, clipMatrix := c.Clips, matrix
-		if !clips.usesObjectMatrix() {
-			clipMatrix = boundary
-		}
+		matrix := n.parent
 		clip := n.clip
+		defaults := n.defaults
+		drawParams := slices.Clone(n.drawParams)
+		visible := n.visible
+		alpha := n.alpha
 		var err error
-		if c.Boundary != "" {
-			clip, err = renderer.geometryExtentClip(box.W, box.H, boundary, clip)
-			if err != nil {
-				return nil, err
+		if n.object.Type == "CompositeObject" {
+			c := n.object.CompositeObject
+			box, _ := ParseBox(c.Boundary)
+			boundary := n.parent.Multiply(TranslationMatrix(box.X, box.Y))
+			matrix = boundary.Multiply(NewMatrix(c.CTM))
+			clips, clipMatrix := c.Clips, matrix
+			if !clips.usesObjectMatrix() {
+				clipMatrix = boundary
 			}
-		}
-		clip, err = renderer.compositeExtentClip(c, matrix, clip)
-		if err != nil {
-			return nil, err
-		}
-		if clips != nil {
-			geometry, err := renderer.Geometry()
-			if err != nil {
-				return nil, err
+			if c.Boundary != "" {
+				clip, err = renderer.geometryExtentClip(box.W, box.H, boundary, clip)
+				if err != nil {
+					return nil, err
+				}
 			}
-			clip, err = geometry.Clip(renderer, clips, clipMatrix, clip)
-			if err != nil {
-				return nil, err
+			if clips != nil {
+				geometry, err := renderer.Geometry()
+				if err != nil {
+					return nil, err
+				}
+				clip, err = geometry.Clip(renderer, clips, clipMatrix, clip)
+				if err != nil {
+					return nil, err
+				}
 			}
-		}
-		defaults := renderer.compositeGraphicUnitDefaults(c, n.defaults)
-		drawParams := append(slices.Clone(n.drawParams), c.DrawParam)
-		visible := n.visible && (c.Visible == nil || *c.Visible)
-		alpha := mergeAlpha(n.alpha, c.Alpha)
-		if c.ResourceID != "" {
-			var name string
-			if renderer != nil {
-				for i := len(renderer.pageResources) - 1; i >= 0; i-- {
-					if parsed := renderer.pageResources[i]; parsed != nil && parsed.path != "" && parsedHasResource(parsed, c.ResourceID, "CompositeGraphicUnit") {
-						name = parsed.path
+			defaults = renderer.compositeObjectDefaults(c, n.defaults)
+			drawParams = append(drawParams, c.DrawParam)
+			visible = n.visible && (c.Visible == nil || *c.Visible)
+			alpha = mergeAlpha(n.alpha, c.Alpha)
+			if c.ResourceID != "" {
+				var name string
+				if renderer != nil {
+					for i := len(renderer.pageResources) - 1; i >= 0; i-- {
+						if parsed := renderer.pageResources[i]; parsed != nil && parsed.path != "" && parsedHasResource(parsed, c.ResourceID, "CompositeGraphicUnit") {
+							name = parsed.path
+							break
+						}
+					}
+				}
+				if name == "" {
+					name, _ = reader.resourceFileByKind("CompositeGraphicUnit", c.ResourceID)
+				}
+				if name == "" {
+					name, _ = e.sourceResourceFile(c.ResourceID, "CompositeGraphicUnit")
+				}
+				if name == "" {
+					return nil, fmt.Errorf("composite resource %q not found", c.ResourceID)
+				}
+				data, err := reader.readFile(name)
+				if err != nil {
+					return nil, err
+				}
+				root, err := parseEditorXML(data)
+				if err != nil {
+					return nil, err
+				}
+				resource := editorResourceNode(root, "CompositeGraphicUnits", "CompositeGraphicUnit", c.ResourceID)
+				if resource == nil {
+					return nil, fmt.Errorf("composite resource %q not found", c.ResourceID)
+				}
+				fragment, err := editorXMLFragment(data, resource)
+				if err != nil {
+					return nil, err
+				}
+				n.ref, err = newEditorCompositeNode(fragment)
+				if err != nil {
+					return nil, err
+				}
+				states := maps.Clone(n.inheritedStates)
+				for _, resource := range e.resources {
+					if sameResourceID(resource.composite, c.ResourceID) {
+						if states == nil {
+							states = maps.Clone(resource.states)
+						} else {
+							maps.Copy(states, resource.states)
+						}
 						break
 					}
 				}
+				n.ref.pageID = n.pageID
+				n.ref.setStates(states)
+				n.ref.parent, n.ref.boundaryInCTM, n.ref.defaults, n.ref.clip, n.ref.visible = matrix, true, defaults, clip, visible
+				n.ref.drawParams = drawParams
+				n.ref.alpha = alpha
 			}
-			if name == "" {
-				name, _ = reader.resourceFileByKind("CompositeGraphicUnit", c.ResourceID)
-			}
-			if name == "" {
-				name, _ = e.sourceResourceFile(c.ResourceID, "CompositeGraphicUnit")
-			}
-			if name == "" {
-				return nil, fmt.Errorf("composite resource %q not found", c.ResourceID)
-			}
-			data, err := reader.readFile(name)
+		} else if n.unit != nil {
+			clip, err = renderer.compositeExtentClip(*n.unit, matrix, clip)
 			if err != nil {
 				return nil, err
 			}
-			root, err := parseEditorXML(data)
-			if err != nil {
-				return nil, err
-			}
-			resource := editorResourceNode(root, "CompositeGraphicUnits", "CompositeGraphicUnit", c.ResourceID)
-			if resource == nil {
-				return nil, fmt.Errorf("composite resource %q not found", c.ResourceID)
-			}
-			fragment, err := editorXMLFragment(data, resource)
-			if err != nil {
-				return nil, err
-			}
-			n.ref, err = newEditorCompositeNode(fragment)
-			if err != nil {
-				return nil, err
-			}
-			states := maps.Clone(n.inheritedStates)
-			for _, resource := range e.resources {
-				if sameResourceID(resource.composite, c.ResourceID) {
-					if states == nil {
-						states = maps.Clone(resource.states)
-					} else {
-						maps.Copy(states, resource.states)
-					}
-					break
-				}
-			}
-			n.ref.pageID = n.pageID
-			n.ref.setStates(states)
-			n.ref.parent, n.ref.boundaryInCTM, n.ref.defaults, n.ref.clip, n.ref.visible = matrix, true, defaults, clip, visible
-			n.ref.drawParams = drawParams
-			n.ref.alpha = alpha
 		}
 		var collect func(*editorXML) error
 		collect = func(container *editorXML) error {
@@ -799,7 +809,7 @@ func (e *Editor) compositeMembers(n *editorCompositeNode, reader *Reader, render
 	}
 	var result []*editorCompositeNode
 	if n.ref != nil {
-		id := n.object.CompositeGraphicUnit.ResourceID
+		id := n.object.CompositeObject.ResourceID
 		if key := editorResourceID(id); key != "" {
 			id = key
 		}
@@ -841,7 +851,7 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 		var bounds ObjectMeasurement
 		object := node.object
 		object.TextObject.Alpha, object.PathObject.Alpha = nil, nil
-		object.ImageObject.Alpha, object.CompositeGraphicUnit.Alpha = nil, nil
+		object.ImageObject.Alpha, object.CompositeObject.Alpha = nil, nil
 		if object.Type == "PathObject" && object.PathObject.Stroke != nil && !*object.PathObject.Stroke && (object.PathObject.Fill == nil || !*object.PathObject.Fill) {
 			object.PathObject.Stroke = nil
 		}
@@ -855,7 +865,7 @@ func (e *Editor) measureCompositeMembers(renderer *Renderer, nodes []*editorComp
 		transform := node.transformable()
 		capability := ObjectCapabilities{Transform: transform, Arrange: transform && bounds.Bounds.W > 0 && bounds.Bounds.H > 0,
 			Delete: true, Copy: transform && editorXMLCopyable(node.node), Order: orderable[node.span.parent], ReplaceImage: node.object.Type == "ImageObject"}
-		capability.Ungroup = transform && capability.Order && e.compositeUngroupable(node.node) && (node.object.CompositeGraphicUnit.ResourceID != "" || len(node.object.CompositeGraphicUnit.Objects) != 0)
+		capability.Ungroup = transform && capability.Order && e.compositeUngroupable(node.node) && node.object.CompositeObject.ResourceID != ""
 		capability.Stretch = transform && e.objectStretchable(node.object, make(map[string]bool))
 		style, err := e.compositeMemberStyle(node)
 		if !transform {
@@ -1047,7 +1057,7 @@ func (e *Editor) editCompositeScope(page int, path ObjectPath, edit func(*Render
 		return err
 	}
 	next.setStates(root.states)
-	next.object.CompositeGraphicUnit.states = next.states
+	next.object.CompositeObject.states = next.states
 	origin := e.objectOrigin(path.ID)
 	next.node.parent = root.node.parent
 	updated := &editorObjectOrigin{data: data, node: next.node, object: next.object}
@@ -1104,7 +1114,7 @@ func (e *Editor) transformCompositeMember(renderer *Renderer, n *editorComposite
 	if err != nil {
 		return err
 	}
-	n.node, n.object, n.changed = updated.node, updated.object, true
+	n.node, n.object, n.unit, n.changed = updated.node, updated.object, updated.unit, true
 	if state, ok := n.states[editorObjectID(n.object)]; ok && state.layout != nil {
 		n.object.TextObject.layout = state.layout
 	}
@@ -1160,7 +1170,7 @@ func (e *Editor) writeCompositeNode(node *editorCompositeNode) ([]byte, bool, er
 				return nil, false, err
 			}
 			after := node.object
-			after.CompositeGraphicUnit.ResourceID = id
+			after.CompositeObject.ResourceID = id
 			data, err = editorXMLObject(data, root, node.object, after)
 			if err != nil {
 				return nil, false, err
@@ -1392,7 +1402,10 @@ func (v *editorValidation) validateVector(id string) error {
 	if err != nil {
 		return err
 	}
-	unit := node.object.CompositeGraphicUnit
+	if node.unit == nil {
+		return fmt.Errorf("invalid vector resource")
+	}
+	unit := *node.unit
 	if node.node.attr("Width") == "" || node.node.attr("Height") == "" || !finite(unit.Width) || !finite(unit.Height) || unit.Width < 0 || unit.Height < 0 {
 		return fmt.Errorf("invalid vector dimensions")
 	}

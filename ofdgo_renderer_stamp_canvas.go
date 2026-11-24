@@ -40,6 +40,50 @@ type cachedStampSession struct {
 	boxes    []Box
 }
 
+// syncStampRendererState 同步宿主渲染器的会话配置至印章子渲染器并返回恢复闭包
+// 入参: dst 印章子渲染器, src 宿主渲染器, ctx 取消上下文
+// 返回: func() 状态恢复闭包
+func syncStampRendererState(dst, src *Renderer, ctx context.Context) func() {
+	prevDPI := dst.dpi
+	prevPrinting := dst.printing
+	prevPrintContents := dst.printContents
+	prevAnnotations := dst.renderAnnotations
+	prevDecodeImages := dst.decodeImages
+	prevCompression := dst.compression
+	prevCompactStrokes := dst.compactStrokes
+	prevSVGMerge := dst.svgPathMerge
+	prevSVGPrecision := dst.svgPrecision
+	prevSVGPrefix := dst.svgIDPrefix
+	prevPageCtx := dst.pageContext
+	prevRenderErr := dst.renderError
+	dst.dpi = src.dpi
+	dst.printing = src.printing
+	dst.printContents = src.printContents
+	dst.renderAnnotations = src.renderAnnotations
+	dst.decodeImages = src.decodeImages
+	dst.compression = src.compression
+	dst.compactStrokes = src.compactStrokes
+	dst.svgPathMerge = src.svgPathMerge
+	dst.svgPrecision = src.svgPrecision
+	dst.svgIDPrefix = src.svgIDPrefix
+	dst.pageContext = ctx
+	dst.renderError = nil
+	return func() {
+		dst.dpi = prevDPI
+		dst.printing = prevPrinting
+		dst.printContents = prevPrintContents
+		dst.renderAnnotations = prevAnnotations
+		dst.decodeImages = prevDecodeImages
+		dst.compression = prevCompression
+		dst.compactStrokes = prevCompactStrokes
+		dst.svgPathMerge = prevSVGMerge
+		dst.svgPrecision = prevSVGPrecision
+		dst.svgIDPrefix = prevSVGPrefix
+		dst.pageContext = prevPageCtx
+		dst.renderError = prevRenderErr
+	}
+}
+
 // renderStamp 渲染印章并按内容摘要跨页复用OFD及图像印章资源
 // 入参: ctx 画布上下文, s 印章对象, pageH 页面高度, parentClip 父级裁剪路径
 func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64, parentClip *canvas.Path) {
@@ -90,12 +134,7 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64, pare
 				continue
 			}
 			pageRenderer := session.renderer
-			prevDPI, prevPrinting, prevDecodeImages, prevPageCtx, prevRenderErr := pageRenderer.dpi, pageRenderer.printing, pageRenderer.decodeImages, pageRenderer.pageContext, pageRenderer.renderError
-			pageRenderer.dpi = r.dpi
-			pageRenderer.printing = r.printing
-			pageRenderer.decodeImages = r.decodeImages
-			pageRenderer.pageContext = pageContext
-			pageRenderer.renderError = nil
+			restoreState := syncStampRendererState(pageRenderer, r, pageContext)
 			if scale := max(s.Box.W/sealBox.W, s.Box.H/sealBox.H); scale > 1 {
 				limit := 4096 * 25.4 / max(sealBox.W, sealBox.H)
 				if pageRenderer.dpi < limit {
@@ -107,7 +146,7 @@ func (r *Renderer) renderStamp(ctx *canvas.Context, s Stamp, pageH float64, pare
 			ctx.Scale(s.Box.W/sealBox.W, s.Box.H/sealBox.H)
 			err = pageRenderer.renderCanvasPageClipped(ctx, content, false, childClip)
 			ctx.Pop()
-			pageRenderer.dpi, pageRenderer.printing, pageRenderer.decodeImages, pageRenderer.pageContext, pageRenderer.renderError = prevDPI, prevPrinting, prevDecodeImages, prevPageCtx, prevRenderErr
+			restoreState()
 			if err != nil {
 				r.renderError = err
 				return
@@ -156,7 +195,7 @@ func (r *Renderer) loadStampOFD(ctx context.Context, data []byte) (*cachedStampS
 		if openErr != nil {
 			return nil, 0, openErr
 		}
-		doc, docErr := reader.DocContext(ctx)
+		doc, docErr := reader.docContext(ctx)
 		if docErr != nil {
 			_ = reader.Close()
 			return nil, 0, docErr

@@ -38,6 +38,19 @@ type Outliner struct {
 	warnings map[uint16]error
 }
 
+const (
+	// maxTTCompositeDepth 限制TrueType复合字形的最大嵌套深度
+	maxTTCompositeDepth = 32
+	// maxTTCompositeSteps 限制单个TrueType复合字形展开的最大分量访问次数
+	maxTTCompositeSteps = 4096
+)
+
+// ttCompositeWalk 记录TrueType复合字形递归展开时的环检测与预算状态
+type ttCompositeWalk struct {
+	active map[uint16]bool
+	steps  int
+}
+
 // ttGlyph 保存字形轮廓及四个度量虚拟点
 type ttGlyph struct {
 	points  []ttPoint
@@ -239,7 +252,7 @@ func (f *Outliner) Path(path glyphPather, glyph uint16, scale float64) error {
 		}
 		return nil
 	}
-	contour, err := f.glyph(glyph, make(map[uint16]bool))
+	contour, err := f.glyph(glyph, &ttCompositeWalk{active: make(map[uint16]bool)}, 0)
 	if err != nil {
 		return err
 	}
@@ -304,15 +317,22 @@ func (f *Outliner) GlyphWarning(id uint16) error {
 }
 
 // glyph 解码简单或复合字形并执行对应字节码，不改写字体资源
-// 入参: id 字形编号, active 递归访问集合
+// 入参: id 字形编号, walk 复合字形展开状态, depth 当前嵌套深度
 // 返回: ttGlyph 字形轮廓, error 字形错误
-func (f *Outliner) glyph(id uint16, active map[uint16]bool) (ttGlyph, error) {
+func (f *Outliner) glyph(id uint16, walk *ttCompositeWalk, depth int) (ttGlyph, error) {
 	var result ttGlyph
-	if id >= f.Font.NumGlyphs() || active[id] {
+	if depth > maxTTCompositeDepth {
+		return result, fmt.Errorf("TrueType composite depth limit exceeded")
+	}
+	walk.steps++
+	if walk.steps > maxTTCompositeSteps {
+		return result, fmt.Errorf("TrueType composite expansion limit exceeded")
+	}
+	if id >= f.Font.NumGlyphs() || walk.active[id] {
 		return result, fmt.Errorf("invalid TrueType component reference %d", id)
 	}
-	active[id] = true
-	defer delete(active, id)
+	walk.active[id] = true
+	defer delete(walk.active, id)
 	data, err := trueTypeGlyphData(f.Font.Tables, id)
 	if err != nil {
 		return result, err
@@ -329,7 +349,7 @@ func (f *Outliner) glyph(id uint16, active map[uint16]bool) (ttGlyph, error) {
 	if n >= 0 {
 		result, program, err = readTTSimple(data, n)
 	} else {
-		result, program, err = f.composite(id, data, phantoms, active)
+		result, program, err = f.composite(id, data, phantoms, walk, depth)
 	}
 	if err != nil {
 		return result, err
@@ -402,9 +422,9 @@ func (f *Outliner) recordGlyphWarning(id uint16, warning error) {
 }
 
 // composite 合成分量变换和点匹配，保留分量顺序及父级字节码
-// 入参: glyph 父字形编号, data 复合字形数据, phantoms 父字形虚拟点, active 递归访问集合
+// 入参: glyph 父字形编号, data 复合字形数据, phantoms 父字形虚拟点, walk 复合字形展开状态, depth 当前嵌套深度
 // 返回: ttGlyph 字形轮廓, []byte 字节码, error 数据错误
-func (f *Outliner) composite(glyph uint16, data []byte, phantoms [4]ttPoint, active map[uint16]bool) (ttGlyph, []byte, error) {
+func (f *Outliner) composite(glyph uint16, data []byte, phantoms [4]ttPoint, walk *ttCompositeWalk, depth int) (ttGlyph, []byte, error) {
 	var result ttGlyph
 	pos := 10
 	total := -1
@@ -460,7 +480,7 @@ func (f *Outliner) composite(glyph uint16, data []byte, phantoms [4]ttPoint, act
 		if flags&8 != 0 {
 			matrix[3] = matrix[0]
 		}
-		part, err := f.glyph(id, active)
+		part, err := f.glyph(id, walk, depth+1)
 		if err != nil {
 			return result, nil, err
 		}
@@ -497,7 +517,7 @@ func (f *Outliner) composite(glyph uint16, data []byte, phantoms [4]ttPoint, act
 			} else {
 				if total < 0 {
 					var err error
-					total, err = trueTypePointCount(f.Font.Tables, glyph, map[uint16]int{}, map[uint16]bool{})
+					total, err = trueTypePointCount(f.Font.Tables, glyph, map[uint16]int{}, map[uint16]bool{}, 0)
 					if err != nil {
 						return result, nil, err
 					}

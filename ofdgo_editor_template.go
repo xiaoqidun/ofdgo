@@ -51,7 +51,7 @@ func validEditorTemplateOrder(value string) bool {
 // 入参: reader 当前阅读器, id 模板标识
 // 返回: TemplatePage 定义副本, error 文档或标识错误
 func editorTemplateDefinition(reader *Reader, id string) (TemplatePage, error) {
-	doc, err := reader.Doc()
+	doc, err := reader.docInternal()
 	if err != nil {
 		return TemplatePage{}, err
 	}
@@ -244,7 +244,7 @@ func (e *Editor) CreateTemplateFromPage(page int, name, zOrder string) (string, 
 			return err
 		}
 		defer r.Close()
-		doc, err := r.Doc()
+		doc, err := r.docInternal()
 		if err != nil {
 			return err
 		}
@@ -429,7 +429,7 @@ func (e *Editor) ReplaceTemplateFromPage(id string, page int) error {
 func (e *Editor) DeleteTemplate(id string) error {
 	return e.editTemplateDefinition(id, func(r *Reader, data []byte, node *editorXML) ([]byte, error) {
 		ctx := context.Background()
-		doc, err := r.Doc()
+		doc, err := r.docInternal()
 		if err != nil {
 			return nil, err
 		}
@@ -454,7 +454,7 @@ func (e *Editor) DeleteTemplate(id string) error {
 // Templates 直接返回当前文档及版本的模板清单，不创建编辑器，省略的ZOrder返回Background
 // 返回: []TemplatePage 独立模板定义副本, error 文档读取错误
 func (r *Reader) Templates() ([]TemplatePage, error) {
-	doc, err := r.Doc()
+	doc, err := r.docInternal()
 	if err != nil {
 		return nil, err
 	}
@@ -470,7 +470,7 @@ func (r *Reader) Templates() ([]TemplatePage, error) {
 // 返回: []TemplateReference 引用定位及绑定层次清单, error 文档或页面读取错误
 func (r *Reader) TemplateReferences() ([]TemplateReference, error) {
 	ctx := context.Background()
-	doc, err := r.Doc()
+	doc, err := r.docInternal()
 	if err != nil {
 		return nil, err
 	}

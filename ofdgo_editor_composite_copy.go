@@ -180,8 +180,8 @@ func (e *Editor) PasteCompositeObjects(page int, path ObjectPath, selection *Com
 				}
 				container = containers[index]
 			}
-			box, _ := ParseBox(owner.object.CompositeGraphicUnit.Boundary)
-			parent := owner.parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(NewMatrix(owner.object.CompositeGraphicUnit.CTM))
+			box, _ := ParseBox(owner.object.CompositeObject.Boundary)
+			parent := owner.parent.Multiply(TranslationMatrix(box.X, box.Y)).Multiply(NewMatrix(owner.object.CompositeObject.CTM))
 			nodes := make([]*editorCompositeNode, len(selection.nodes))
 			for i, node := range selection.nodes {
 				copy := *node
@@ -319,8 +319,8 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 				object.PathObject.Visible = &visible
 			case "ImageObject":
 				object.ImageObject.Visible = &visible
-			case "CompositeObject", "CompositeGraphicUnit":
-				object.CompositeGraphicUnit.Visible = &visible
+			case "CompositeObject":
+				object.CompositeObject.Visible = &visible
 			}
 		}
 		if err := copy.update(object); err != nil {
@@ -380,9 +380,9 @@ func (e *Editor) pasteCompositeSelection(selection *CompositeSelection, paste fu
 			object.TextObject.layout = object.state.layout
 		}
 		copy.object.TextObject.layout = object.TextObject.layout
-		if object.Type == "CompositeObject" || object.Type == "CompositeGraphicUnit" {
-			object.CompositeGraphicUnit.states = maps.Clone(copy.states)
-			copy.object.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
+		if object.Type == "CompositeObject" {
+			object.CompositeObject.states = maps.Clone(copy.states)
+			copy.object.CompositeObject.states = object.CompositeObject.states
 		}
 		object.origin = &editorObjectOrigin{editor: e, document: e.documentIdentity(), page: selection.source, data: copy.data, node: copy.node, object: copy.object}
 		object.richText = selection.richText[i]

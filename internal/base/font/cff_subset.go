@@ -93,6 +93,16 @@ func subsetCFFCharstrings(data []byte, keep map[uint16]bool) ([]byte, error) {
 	return rebuildNamedCFF(data, font, chars, nil, false)
 }
 
+// normalizeCFFCharstring 将空Type2字形程序规范化为合法的endchar指令
+// 入参: program 原始字形程序
+// 返回: []byte 规范化后的字形程序
+func normalizeCFFCharstring(program []byte) []byte {
+	if len(program) == 0 {
+		return []byte{14}
+	}
+	return program
+}
+
 // collectType2Dependencies 仅对保留字形及组合组件运行Type2虚拟机并收集子程序引用
 // 入参: fonts 执行资源, selects 字形所属字典，单字典时可为空, keep 保留字形集合，调用后包含组合组件
 // 返回: [][]bool 各字典局部子程序使用标记, []bool 全局子程序使用标记, error 执行或越界错误
@@ -131,7 +141,7 @@ func collectType2Dependencies(fonts []*type2Font, selects []int, keep map[uint16
 		steps := 0
 		prevLen := len(keep)
 		state := type2State{font: font, args: stack[:0], width: font.def, seed: font.seed + uint64(gid), steps: &steps, dependencies: keep, localUsage: locals[fd], globalUsage: globals}
-		if _, err := state.run(font.chars[gid], 0); err != nil {
+		if _, err := state.run(normalizeCFFCharstring(font.chars[gid]), 0); err != nil {
 			return nil, nil, err
 		}
 		if len(keep) > prevLen {
@@ -164,8 +174,9 @@ func subsetType2Programs(fonts []*type2Font, selects []int, keep map[uint16]bool
 	var stack [48]float64
 	chars := make([][]byte, len(programs))
 	for gid, program := range programs {
+		normalized := normalizeCFFCharstring(program)
 		if keep[uint16(gid)] {
-			chars[gid] = program
+			chars[gid] = normalized
 			continue
 		}
 		fd := 0
@@ -175,7 +186,7 @@ func subsetType2Programs(fonts []*type2Font, selects []int, keep map[uint16]bool
 		font := fonts[fd]
 		steps := 0
 		state := type2State{font: font, args: stack[:0], width: font.def, widthOnly: true, seed: font.seed + uint64(gid), steps: &steps, dependencies: keep}
-		if _, err := state.run(program, 0); err != nil {
+		if _, err := state.run(normalized, 0); err != nil {
 			return nil, err
 		}
 		if encoded, ok := empty[fd][state.width]; ok {
@@ -298,14 +309,35 @@ func rebuildNamedCFF(data []byte, font *type2Font, chars [][]byte, ids []uint16,
 	if err != nil {
 		return nil, err
 	}
+	nameIndex, err := encodeCFFIndexChecked(names)
+	if err != nil {
+		return nil, err
+	}
+	stringIndex, err := encodeCFFIndexChecked(strings)
+	if err != nil {
+		return nil, err
+	}
+	globalIndex, err := encodeCFFIndexChecked(font.globals)
+	if err != nil {
+		return nil, err
+	}
+	encodedChars, err := encodeCFFIndexChecked(chars)
+	if err != nil {
+		return nil, err
+	}
+	localIndex, err := encodeCFFIndexChecked(font.locals)
+	if err != nil {
+		return nil, err
+	}
 	prefix := bytes.Clone(data[:int(data[2])])
-	prefix = append(prefix, encodeCFFIndex(names)...)
-	suffix := encodeCFFIndex(strings)
-	suffix = append(suffix, encodeCFFIndex(font.globals)...)
-	encodedChars := encodeCFFIndex(chars)
+	prefix = append(prefix, nameIndex...)
+	suffix := append(stringIndex, globalIndex...)
 	var top []byte
 	for attempt := 0; attempt < 16; attempt++ {
-		top = encodeCFFIndex([][]byte{encodeCFFDict(dict)})
+		top, err = encodeCFFIndexChecked([][]byte{encodeCFFDict(dict)})
+		if err != nil {
+			return nil, err
+		}
 		offset := len(prefix) + len(top) + len(suffix)
 		updated := maps.Clone(dict)
 		updated[15] = []float64{float64(offset)}
@@ -316,10 +348,13 @@ func rebuildNamedCFF(data []byte, font *type2Font, chars [][]byte, ids []uint16,
 		offset += len(encoding)
 		updated[17] = []float64{float64(offset)}
 		updated[18] = []float64{float64(len(privateData)), float64(offset + len(encodedChars))}
-		encoded := encodeCFFIndex([][]byte{encodeCFFDict(updated)})
+		encoded, err := encodeCFFIndexChecked([][]byte{encodeCFFDict(updated)})
+		if err != nil {
+			return nil, err
+		}
 		if len(encoded) == len(top) {
 			result := prefix
-			for _, part := range [][]byte{encoded, suffix, charset, encoding, encodedChars, privateData, encodeCFFIndex(font.locals)} {
+			for _, part := range [][]byte{encoded, suffix, charset, encoding, encodedChars, privateData, localIndex} {
 				result = append(result, part...)
 			}
 			return result, nil

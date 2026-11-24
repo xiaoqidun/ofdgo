@@ -485,7 +485,7 @@ func (e *Editor) TransformTargets(page int, paths []ObjectPath, matrix Matrix) e
 			if err := edit.TransformTargets(page, regular, matrix); err != nil {
 				return err
 			}
-			return edit.changeSignatureStamps(page, signatures, &matrix)
+			return edit.changeSignatureStamps(context.Background(), page, signatures, &matrix)
 		})
 	}
 	return e.editTargets(paths, func(objects, annotations []string) error {
@@ -509,7 +509,7 @@ func (e *Editor) DeleteTargets(page int, paths []ObjectPath) error {
 			if err := edit.DeleteTargets(page, regular); err != nil {
 				return err
 			}
-			return edit.changeSignatureStamps(page, signatures, nil)
+			return edit.changeSignatureStamps(context.Background(), page, signatures, nil)
 		})
 	}
 	return e.editTargets(paths, func(objects, annotations []string) error {
@@ -1070,6 +1070,9 @@ func (e *Editor) selectionGeometry(page int, objects, annotations []string) ([]B
 			return nil, nil, Box{}, err
 		}
 		if box.W <= 0 || box.H <= 0 {
+			if list[index].Appearance == nil {
+				return nil, nil, Box{}, fmt.Errorf("annotation has no appearance")
+			}
 			box, err = ParseBox(list[index].Appearance.Boundary)
 			if err != nil {
 				return nil, nil, Box{}, err

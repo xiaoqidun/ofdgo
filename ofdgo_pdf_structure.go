@@ -143,6 +143,9 @@ type pdfStructureBinding struct {
 	end      int
 }
 
+// pdfStructureDataBudget 限制结构树序列化中字符串与流数据的累计原始字节预算
+const pdfStructureDataBudget = 64 << 20
+
 // pdfStructureValues 保存属性值类型及间接对象共享关系
 type pdfStructureValues struct {
 	ctx       context.Context
@@ -151,6 +154,7 @@ type pdfStructureValues struct {
 	elements  map[pdfgo.Reference]bool
 	objects   []StructureNode
 	auxiliary bool
+	dataBytes int64
 }
 
 // pdfMetadataValue 保留字段是否声明及其来源，空文本不作为缺省值
@@ -976,7 +980,7 @@ func (v *pdfStructureValues) encode(object pdfgo.Object, depth int) (StructureNo
 	if err := v.ctx.Err(); err != nil {
 		return node, err
 	}
-	if depth > 128 && !v.auxiliary {
+	if depth > 128 {
 		return node, fmt.Errorf("PDF structure attribute limit exceeded")
 	}
 	switch value := object.(type) {
@@ -995,6 +999,10 @@ func (v *pdfStructureValues) encode(object pdfgo.Object, depth int) (StructureNo
 		node.Name = "Name"
 		node.Attributes = pdfStructureAttribute("Value", string(value))
 	case pdfgo.String:
+		if int64(len(value)) > pdfStructureDataBudget-v.dataBytes {
+			return node, fmt.Errorf("PDF structure data budget exceeded")
+		}
+		v.dataBytes += int64(len(value))
 		node.Name, node.Text = "String", base64.StdEncoding.EncodeToString(value)
 		node.Attributes = []StructureAttribute{{Name: "Encoding", Value: "base64"}}
 	case pdfgo.Reference:
@@ -1062,6 +1070,10 @@ func (v *pdfStructureValues) encode(object pdfgo.Object, depth int) (StructureNo
 		if err != nil {
 			return node, err
 		}
+		if int64(len(data)) > pdfStructureDataBudget-v.dataBytes {
+			return node, fmt.Errorf("PDF structure data budget exceeded")
+		}
+		v.dataBytes += int64(len(data))
 		node.Children = []StructureNode{dictionary, {Name: dataName, Namespace: pdfStructureNamespace, Attributes: []StructureAttribute{{Name: "Encoding", Value: "base64"}}, Text: base64.StdEncoding.EncodeToString(data)}}
 	default:
 		return node, fmt.Errorf("invalid PDF structure attribute value")

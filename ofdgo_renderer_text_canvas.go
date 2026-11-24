@@ -87,9 +87,6 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	clipPath := r.intersectCachedClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
 	dp := r.drawParamDefaults(obj.DrawParam, defaults)
 	sizeMM := obj.Size
-	if sizeMM == 0 && dp != nil && dp.Size > 0 {
-		sizeMM = dp.Size
-	}
 	if sizeMM == 0 {
 		sizeMM = 3.5
 	}
@@ -111,74 +108,78 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 	if useGroup {
 		styleAlpha = nil
 	}
-	fillColor := colorWithAlpha(canvas.Black, styleAlpha)
-	var fillPaint any = fillColor
+	var fillColor color.Color
+	var fillPaint any
 	var fillPattern *PatternPaint
-	var fillColorNode *FillColor
-	if defaults != nil {
-		fillColorNode = defaults.FillColor
-	}
-	if dp != nil && dp.FillColor != nil {
-		fillColorNode = dp.FillColor
-	}
-	if obj.FillColor != nil {
-		fillColorNode = obj.FillColor
-	}
-	if fillColorNode != nil {
-		fillColorNode = withFillAlpha(fillColorNode, styleAlpha)
-		fillColor = r.parseFillColor(fillColorNode)
-		fillPaint = r.parseFillPaint(fillColorNode, bx, by, pageH)
-		fillPattern = parsePatternPaint(fillColorNode)
-	}
-	if fillPaint == nil {
-		fillPaint = fillColor
-	}
-	transformShdPaint(fillPaint, parentCTM, bx, by, pageH, boundaryInCTM)
-	fillPaint, shadingClip, fillView := resolveShdPaint(ctx, fillPaint)
-	fillClip := r.intersectCachedClipPath(clipPath, shadingClip)
+	var fillClip *canvas.Path
+	var fillView canvas.Matrix
 	var strokeStyle pathStyle
 	var localStrokeWidth, localDashOffset float64
 	var localDashPattern []float64
-	strokeClip := clipPath
-	strokeView := canvas.Identity
-	if shouldStroke {
-		strokeStyle = r.newPathStyle(defaults, bx, by, pageH, styleAlpha)
-		if dp != nil {
-			strokeStyle.applyDrawParam(r, dp, bx, by, pageH, styleAlpha)
+	var strokeClip *canvas.Path
+	var strokeView canvas.Matrix
+	resolveTextPaints := func(alpha *int) {
+		fillColor = colorWithAlpha(canvas.Black, alpha)
+		fillPaint = fillColor
+		fillPattern = nil
+		var fillColorNode *FillColor
+		if defaults != nil {
+			fillColorNode = defaults.FillColor
 		}
-		strokeObject := obj.pathStyle()
-		strokeObject.FillColor = nil
-		strokeObject.Alpha = styleAlpha
-		strokeStyle.applyPathObject(r, strokeObject, bx, by, pageH)
-		if strokeStyle.strokePaint == nil {
-			strokeStyle.strokePaint = canvas.Transparent
+		if dp != nil && dp.FillColor != nil {
+			fillColorNode = dp.FillColor
 		}
-		localStrokeWidth = strokeStyle.lineWidth
-		localDashOffset = strokeStyle.dashOffset
-		localDashPattern = slices.Clone(strokeStyle.dashPattern)
-		strokeStyle.scale(ctm)
-		strokeStyle.lineWidth = r.deviceLineWidth(strokeStyle.lineWidth)
-		transformShdPaint(strokeStyle.strokePaint, parentCTM, bx, by, pageH, boundaryInCTM)
-		strokeStyle.strokePaint, shadingClip, strokeView = resolveShdPaint(ctx, strokeStyle.strokePaint)
-		strokeClip = r.intersectCachedClipPath(strokeClip, shadingClip)
+		if obj.FillColor != nil {
+			fillColorNode = obj.FillColor
+		}
+		if fillColorNode != nil {
+			fillColorNode = withFillAlpha(fillColorNode, alpha)
+			fillColor = r.parseFillColor(fillColorNode)
+			fillPaint = r.parseFillPaint(fillColorNode, bx, by, pageH)
+			fillPattern = parsePatternPaint(fillColorNode)
+		}
+		if fillPaint == nil {
+			fillPaint = fillColor
+		}
+		transformShdPaint(fillPaint, parentCTM, bx, by, pageH, boundaryInCTM)
+		var shadingClip *canvas.Path
+		fillPaint, shadingClip, fillView = resolveShdPaint(ctx, fillPaint)
+		fillClip = r.intersectCachedClipPath(clipPath, shadingClip)
+		strokeStyle = pathStyle{}
+		localStrokeWidth, localDashOffset = 0, 0
+		localDashPattern = nil
+		strokeClip = clipPath
+		strokeView = canvas.Identity
+		if shouldStroke {
+			strokeStyle = r.newPathStyle(defaults, bx, by, pageH, alpha)
+			if dp != nil {
+				strokeStyle.applyDrawParam(r, dp, bx, by, pageH, alpha)
+			}
+			strokeObject := obj.pathStyle()
+			strokeObject.FillColor = nil
+			strokeObject.Alpha = alpha
+			strokeStyle.applyPathObject(r, strokeObject, bx, by, pageH)
+			if strokeStyle.strokePaint == nil {
+				strokeStyle.strokePaint = canvas.Transparent
+			}
+			localStrokeWidth = strokeStyle.lineWidth
+			localDashOffset = strokeStyle.dashOffset
+			localDashPattern = slices.Clone(strokeStyle.dashPattern)
+			strokeStyle.scale(ctm)
+			strokeStyle.lineWidth = r.deviceLineWidth(strokeStyle.lineWidth)
+			transformShdPaint(strokeStyle.strokePaint, parentCTM, bx, by, pageH, boundaryInCTM)
+			strokeStyle.strokePaint, shadingClip, strokeView = resolveShdPaint(ctx, strokeStyle.strokePaint)
+			strokeClip = r.intersectCachedClipPath(strokeClip, shadingClip)
+		}
 	}
+	resolveTextPaints(styleAlpha)
 	fontStyle := canvas.FontRegular
-	weight := obj.Weight
-	if weight == 0 && !obj.WeightSet && dp != nil && (dp.Weight > 0 || dp.WeightSet) {
-		weight = dp.Weight
-	}
-	syntheticBold := weight >= 700
+	syntheticBold := obj.Weight >= 700
 	italic := obj.Italic
-	if !obj.ItalicSet && !italic && dp != nil && dp.Italic {
-		italic = true
-	}
 	if italic {
 		fontStyle |= canvas.FontItalic
 	}
 	fontID := r.textObjectFontID(obj)
-	if fontID == "" && dp != nil && dp.Font != "" {
-		fontID = dp.Font
-	}
 	embeddedFont := false
 	if of := r.fontDefinition(fontID); of != nil {
 		embeddedFont = of.FontFile != ""
@@ -402,6 +403,73 @@ func (r *Renderer) renderText(ctx *canvas.Context, obj TextObject, pageH float64
 			defer endGroup()
 			if pdfOutput != nil {
 				defer pdfOutput.finishTextObject()
+			}
+		} else {
+			styleAlpha = obj.Alpha
+			resolveTextPaints(styleAlpha)
+			face = ff.Face(sizePt, fillPaint, fontStyle, canvas.FontNormal)
+			face.Hinting = 0
+			if face.FauxBold != 0 && sfntTablesBold(face.Font.Tables) {
+				face.FauxBold = 0
+			}
+			if face.FauxItalic != 0 && sfntTablesItalic(face.Font.Tables) {
+				face.FauxItalic = 0
+			}
+			_, shadedFill = fillPaint.(canvas.Gradient)
+			_, shadedStroke = strokeStyle.strokePaint.(canvas.Gradient)
+			fillRGBA, solidFill = pdfSolidColor(fillPaint)
+			strokeRGBA, solidStroke = pdfSolidColor(strokeStyle.strokePaint)
+			hasVisibleStroke = shouldStroke && strokeStyle.lineWidth > 0 && strokeRGBA.A > 0
+			pdfBoldColor = color.RGBA{}
+			pdfFauxBold = false
+			fauxBoldOK = face.FauxBold == 0
+			if !fauxBoldOK && face.FauxBold > 0 && !shouldStroke && (!useTextMatrix || glyphMatrix.IsSimilarity()) && hScale == 1 {
+				if c, ok := pdfOpaqueSolidColor(fillPaint); ok {
+					pdfBoldColor = c
+					pdfFauxBold = true
+					fauxBoldOK = true
+				}
+			}
+			pdfTextStyle = nil
+			pdfTextEligible = false
+			if pdfOutput != nil && !r.textOnly && (shouldFill || shouldStroke) {
+				if shouldFill && !shouldStroke {
+					pdfTextEligible = fillPattern == nil && !shadedFill && fauxBoldOK
+				} else if shouldStroke && !nonUniformStroke && !shadedStroke && strokeStyle.strokePattern == nil && solidStroke && face.FauxBold == 0 {
+					if shouldFill {
+						if fillPattern == nil && !shadedFill && solidFill {
+							pdfTextEligible = true
+							if hasVisibleStroke {
+								pdfTextStyle = &codecpdf.TextStrokeStyle{
+									RenderMode:  2,
+									FillAlpha:   fillRGBA.A,
+									HasFill:     true,
+									StrokeColor: strokeRGBA,
+									LineWidth:   strokeStyle.lineWidth,
+									LineCap:     strokeStyle.lineCap,
+									LineJoin:    strokeStyle.lineJoin,
+									DashOffset:  strokeStyle.dashOffset,
+									Dashes:      strokeStyle.dashPattern,
+								}
+							}
+						}
+					} else {
+						pdfTextEligible = true
+						if hasVisibleStroke {
+							pdfTextStyle = &codecpdf.TextStrokeStyle{
+								RenderMode:  1,
+								StrokeColor: strokeRGBA,
+								LineWidth:   strokeStyle.lineWidth,
+								LineCap:     strokeStyle.lineCap,
+								LineJoin:    strokeStyle.lineJoin,
+								DashOffset:  strokeStyle.dashOffset,
+								Dashes:      strokeStyle.dashPattern,
+							}
+						} else {
+							pdfTextStyle = &codecpdf.TextStrokeStyle{RenderMode: 3}
+						}
+					}
+				}
 			}
 		}
 	}

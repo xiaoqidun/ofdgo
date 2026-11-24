@@ -94,7 +94,7 @@ func (e *Editor) UngroupCompositeObject(page int, path ObjectPath, index int) ([
 				var content []byte
 				for i, object := range objects {
 					content = append(content, object.origin.data...)
-					maps.Copy(node.owner.states, object.CompositeGraphicUnit.states)
+					maps.Copy(node.owner.states, object.CompositeObject.states)
 					node.owner.states[editorObjectID(object)] = object.state
 					result = append(result, index+i)
 				}
@@ -261,7 +261,7 @@ func (e *Editor) ungroupCompositeNode(renderer *Renderer, node *editorCompositeN
 			if err != nil {
 				return err
 			}
-			states := maps.Clone(object.CompositeGraphicUnit.states)
+			states := maps.Clone(object.CompositeObject.states)
 			if states == nil {
 				states = make(map[string]editorCompositeState)
 			}
@@ -284,7 +284,7 @@ func (e *Editor) ungroupCompositeNode(renderer *Renderer, node *editorCompositeN
 			if member.object.state.layout != nil {
 				member.object.TextObject.layout = member.object.state.layout
 			}
-			member.object.CompositeGraphicUnit.states = states
+			member.object.CompositeObject.states = states
 			member.object.origin = &editorObjectOrigin{editor: e, document: e.documentIdentity(), data: member.data, node: member.node, object: member.object}
 			objects[i] = member.object
 		}

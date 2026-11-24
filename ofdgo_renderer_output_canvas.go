@@ -26,6 +26,7 @@ import (
 	"image/jpeg"
 	"io"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -77,6 +78,60 @@ type epsImageRenderer struct {
 	err     error
 }
 
+// formatPDFTimeWithZone 按ISO 32000-1日期语法将含时区的时间格式化为PDF日期字符串
+// 入参: t 含时区的时间
+// 返回: string PDF日期字符串
+func formatPDFTimeWithZone(t time.Time) string {
+	_, offset := t.Zone()
+	base := "D:" + t.Format("20060102150405")
+	if offset == 0 {
+		return base + "Z"
+	}
+	sign := '+'
+	if offset < 0 {
+		sign = '-'
+		offset = -offset
+	}
+	hours := offset / 3600
+	mins := (offset % 3600) / 60
+	return fmt.Sprintf("%s%c%02d'%02d'", base, sign, hours, mins)
+}
+
+// formatPDFDate 将OFD或ISO日期文本规范化为PDF标准日期字符串
+// 入参: raw 原始日期文本
+// 返回: string PDF日期字符串, bool 是否解析成功
+func formatPDFDate(raw string) (string, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", false
+	}
+	if strings.HasPrefix(s, "D:") {
+		if _, err := pdfgo.ParseDate(s); err == nil {
+			return s, true
+		}
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return "D:" + t.Format("20060102"), true
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05Z07:00", "2006-01-02 15:04:05Z07:00"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return formatPDFTimeWithZone(t), true
+		}
+	}
+	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02 15:04:05", "20060102150405"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return "D:" + t.Format("20060102150405"), true
+		}
+	}
+	if t, err := time.Parse("20060102", s); err == nil {
+		return "D:" + t.Format("20060102"), true
+	}
+	if t, err := pdfgo.ParseDate(s); err == nil && t.Year() > 0 && t.Year() <= 9999 {
+		return formatPDFTimeWithZone(t), true
+	}
+	return "", false
+}
+
 // buildPDFInfoDict 构造符合PDF标准的文档信息字典
 // 入参: r 渲染器
 // 返回: pdfgo.Dictionary 文档信息字典, error 文本编码错误
@@ -87,11 +142,22 @@ func buildPDFInfoDict(r *Renderer) (pdfgo.Dictionary, error) {
 			info = *docInfo
 		}
 	}
+	creator := info.Creator
+	if creator == "" {
+		creator = ofdCreator
+	}
+	var kwParts []string
+	for _, kw := range info.Keywords {
+		if trimmed := strings.TrimSpace(kw); trimmed != "" {
+			kwParts = append(kwParts, trimmed)
+		}
+	}
+	keywords := strings.Join(kwParts, ", ")
 	dict := make(pdfgo.Dictionary)
 	for _, field := range []struct {
 		key   pdfgo.Name
 		value string
-	}{{"Title", info.Title}, {"Subject", info.Subject}, {"Author", info.Author}, {"Creator", ofdCreator}} {
+	}{{"Title", info.Title}, {"Subject", info.Subject}, {"Author", info.Author}, {"Keywords", keywords}, {"Creator", creator}} {
 		if field.value == "" {
 			continue
 		}
@@ -102,7 +168,14 @@ func buildPDFInfoDict(r *Renderer) (pdfgo.Dictionary, error) {
 		dict[field.key] = encoded
 	}
 	dict["Producer"] = pdfgo.String(ofdCreator)
-	dict["CreationDate"] = pdfgo.String(time.Now().UTC().Format("D:20060102150405Z"))
+	if created, ok := formatPDFDate(info.CreationDate); ok {
+		dict["CreationDate"] = pdfgo.String(created)
+	} else {
+		dict["CreationDate"] = pdfgo.String(time.Now().UTC().Format("D:20060102150405Z"))
+	}
+	if modified, ok := formatPDFDate(info.ModDate); ok {
+		dict["ModDate"] = pdfgo.String(modified)
+	}
 	return dict, nil
 }
 
@@ -242,7 +315,7 @@ func canReusePDFBaseLoc(r *Renderer, page RenderDocumentPage) bool {
 // RenderSVG 使用canvas输出SVG，按模式保留资源和对象分组
 // 入参: ctx 取消上下文, r 渲染器, page 页面内容, writer 输出流, mode 资源模式
 // 返回: SVGResources 外部资源, error 错误信息
-func (CanvasBackend) RenderSVG(ctx context.Context, r *Renderer, page *PageContent, writer io.Writer, mode SVGMode) (SVGResources, error) {
+func (DefaultBackend) RenderSVG(ctx context.Context, r *Renderer, page *PageContent, writer io.Writer, mode SVGMode) (SVGResources, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -266,8 +339,12 @@ func (CanvasBackend) RenderSVG(ctx context.Context, r *Renderer, page *PageConte
 		}
 		buffer := bufio.NewWriter(writer)
 		renderer := &svgResourceRenderer{SVG: svg.New(buffer, box.W, box.H, nil), renderer: r, writer: buffer, seen: make(map[string]bool), embeddedFonts: true, pathMerge: r.SVGPathMerge(), precision: r.svgPrecision}
-		io.WriteString(buffer, svgCreatorMetadata)
-		io.WriteString(buffer, `<g style="image-orientation:none">`)
+		if _, err := io.WriteString(buffer, svgCreatorMetadata); err != nil {
+			return SVGResources{}, err
+		}
+		if _, err := io.WriteString(buffer, `<g style="image-orientation:none">`); err != nil {
+			return SVGResources{}, err
+		}
 		if err := r.renderCanvasPageToContext(canvas.NewContext(renderer), page, !r.transparentBackground); err != nil {
 			return SVGResources{}, err
 		}
@@ -275,7 +352,9 @@ func (CanvasBackend) RenderSVG(ctx context.Context, r *Renderer, page *PageConte
 		if renderer.err != nil {
 			return SVGResources{}, renderer.err
 		}
-		io.WriteString(buffer, `</g>`)
+		if _, err := io.WriteString(buffer, `</g>`); err != nil {
+			return SVGResources{}, err
+		}
 		if err := renderer.Close(); err != nil {
 			return SVGResources{}, err
 		}
@@ -288,7 +367,7 @@ func (CanvasBackend) RenderSVG(ctx context.Context, r *Renderer, page *PageConte
 // RenderEPS 使用canvas输出单页EPS
 // 入参: ctx 取消上下文, r 渲染器, page 页面内容, writer 输出流
 // 返回: error 错误信息
-func (CanvasBackend) RenderEPS(ctx context.Context, r *Renderer, page *PageContent, writer io.Writer) error {
+func (DefaultBackend) RenderEPS(ctx context.Context, r *Renderer, page *PageContent, writer io.Writer) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -330,7 +409,7 @@ func (CanvasBackend) RenderEPS(ctx context.Context, r *Renderer, page *PageConte
 // RenderPDF 使用原生流式PDF写出器单遍多核并发导出PDF，支持Form复用、内容流去重与恒定内存写出
 // 入参: ctx 取消上下文, r 渲染器, pages 页面列表, writer 输出流, progress 页面处理进度
 // 返回: error 错误信息
-func (CanvasBackend) RenderPDF(ctx context.Context, r *Renderer, pages []RenderDocumentPage, writer io.Writer, progress func(int, int) error) error {
+func (DefaultBackend) RenderPDF(ctx context.Context, r *Renderer, pages []RenderDocumentPage, writer io.Writer, progress func(int, int) error) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}

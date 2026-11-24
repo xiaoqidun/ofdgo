@@ -303,7 +303,7 @@ func (e *Editor) SetObjectDrawParam(page int, ids []string, id string) error {
 		case "ImageObject":
 			target = &next.ImageObject
 		default:
-			target = &next.CompositeGraphicUnit
+			target = &next.CompositeObject
 		}
 		if err := xml.Unmarshal(data, target); err != nil {
 			return err
@@ -323,7 +323,7 @@ func (e *Editor) SetObjectDrawParam(page int, ids []string, id string) error {
 		case "ImageObject":
 			next.ImageObject.DrawParam = id
 		}
-		next.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
+		next.CompositeObject.states = object.CompositeObject.states
 		root, err = parseEditorXML(data)
 		if err != nil {
 			return err
@@ -523,24 +523,11 @@ func (e *Editor) addDrawParam(ctx context.Context, draw DrawParam) (string, erro
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if draw.ResourceID != "" || draw.BaseLoc != "" || draw.Link != "" {
-		return "", fmt.Errorf("external draw parameter references cannot be registered directly")
-	}
-	base, err := e.editorDrawParam(draw.Relative, make(map[string]bool))
-	if err != nil {
+	if _, err := e.editorDrawParam(draw.Relative, make(map[string]bool)); err != nil {
 		return "", err
 	}
-	effective := mergeDrawParam(*base, &draw)
 	if err := validateEditorStroke(PathObject{LineWidth: draw.LineWidth, Cap: draw.Cap, Join: draw.Join, MiterLimit: draw.MiterLimit, DashPattern: draw.DashPattern, DashOffset: draw.DashOffset}); err != nil {
 		return "", err
-	}
-	if !finite(draw.Size) || draw.Size < 0 || draw.Weight < 0 || draw.Weight > 1000 || draw.Weight%100 != 0 {
-		return "", fmt.Errorf("invalid draw parameter font size or weight")
-	}
-	if effective.Font != "" {
-		if _, err := e.editorFont(effective.Font); err != nil {
-			return "", err
-		}
 	}
 	for _, paint := range []*FillColor{draw.FillColor, (*FillColor)(draw.StrokeColor)} {
 		if err := ctx.Err(); err != nil {
@@ -723,8 +710,8 @@ func (e *Editor) resolveEditorStyle(object GraphicObject, layer string) (Graphic
 			}
 		}
 		return object, nil
-	case "CompositeObject", "CompositeGraphicUnit":
-		for _, id := range []string{layer, object.CompositeGraphicUnit.DrawParam} {
+	case "CompositeObject":
+		for _, id := range []string{layer, object.CompositeObject.DrawParam} {
 			if _, err := e.editorDrawParam(id, make(map[string]bool)); err != nil {
 				return GraphicObject{}, err
 			}
@@ -778,9 +765,7 @@ func (e *Editor) resolveEditorStyleDefaults(object GraphicObject, base *DrawPara
 		style = mergeDrawParam(*style, &DrawParam{LineWidth: obj.LineWidth, LineWidthSet: obj.LineWidthSet, Join: obj.Join,
 			MiterLimit: obj.MiterLimit, MiterLimitSet: obj.MiterLimitSet, FillColor: obj.FillColor, StrokeColor: obj.StrokeColor, Cap: obj.Cap,
 			DashPattern: obj.DashPattern, DashPatternSet: obj.DashPatternSet, DashOffset: obj.DashOffset})
-		text := mergeDrawParam(*dp, &DrawParam{Font: obj.Font, Size: obj.Size, Weight: obj.Weight, Italic: obj.Italic})
 		obj.DrawParam = ""
-		obj.Font, obj.Size, obj.Weight, obj.Italic = text.Font, text.Size, text.Weight, text.Italic
 		obj.LineWidth, obj.Join, obj.MiterLimit = style.LineWidth, style.Join, style.MiterLimit
 		obj.MiterLimitSet = style.MiterLimitSet
 		obj.LineWidthSet = style.LineWidthSet
@@ -823,9 +808,9 @@ func (e *Editor) styleObject(object GraphicObject, style ObjectStyle) (GraphicOb
 		if style.Alpha != nil {
 			object.ImageObject.Alpha = style.Alpha
 		}
-	case "CompositeObject", "CompositeGraphicUnit":
+	case "CompositeObject":
 		if style.Alpha != nil {
-			object.CompositeGraphicUnit.Alpha = style.Alpha
+			object.CompositeObject.Alpha = style.Alpha
 		}
 	case "TextObject", "PathObject":
 		path := object.PathObject

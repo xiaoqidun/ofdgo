@@ -299,13 +299,17 @@ func verifySignatureOCSP(raw, cert, issuer []byte, at time.Time, maxAge time.Dur
 		}
 		var basic struct {
 			TBSResponseData    asn1.RawValue
-			SignatureAlgorithm pkix.AlgorithmIdentifier
+			SignatureAlgorithm asn1.RawValue
 			Signature          asn1.BitString
 			Certs              []asn1.RawValue `asn1:"optional,explicit,tag:0"`
 		}
 		rest, err = asn1.Unmarshal(outer.Bytes.Response, &basic)
 		if err != nil || len(rest) != 0 || basic.TBSResponseData.Tag != asn1.TagSequence || basic.Signature.BitLength%8 != 0 {
 			return fmt.Errorf("invalid basic OCSP response")
+		}
+		sigMethod, err := parseGBTAlgorithm(basic.SignatureAlgorithm)
+		if err != nil {
+			return fmt.Errorf("invalid basic OCSP signature algorithm")
 		}
 		var data struct {
 			Version    int `asn1:"optional,explicit,tag:0"`
@@ -362,7 +366,7 @@ func verifySignatureOCSP(raw, cert, issuer []byte, at time.Time, maxAge time.Dur
 		if len(responder.UnhandledCriticalExtensions) != 0 || !timeInRange(at, responder.NotBefore, responder.NotAfter) || !timeInRange(data.ProducedAt, responder.NotBefore, responder.NotAfter) {
 			return fmt.Errorf("OCSP responder certificate not valid")
 		}
-		if err := verifyOCSPResponseSignature(responder, basic.SignatureAlgorithm.Algorithm.String(), basic.TBSResponseData.FullBytes, basic.Signature.RightAlign()); err != nil {
+		if err := verifyOCSPResponseSignature(responder, sigMethod, basic.SignatureAlgorithm, basic.TBSResponseData.FullBytes, basic.Signature.RightAlign()); err != nil {
 			return err
 		}
 		status, thisUpdate, nextUpdate, revokedAt, err := parseOCSPSingleResponse(data.Responses, c, parent)
@@ -423,10 +427,10 @@ func ocspMatchResponderID(cert *smx509.Certificate, rawName, keyHash []byte) boo
 	return bytes.Equal(keyHash, signatureHashBytes(crypto.SHA1, keyBytes)) || len(keyHash) == 32 && bytes.Equal(keyHash, signSM3(keyBytes))
 }
 
-// verifyOCSPResponseSignature 验证BasicOCSPResponse签名值
-// 入参: responder 响应者证书, method 签名算法OID, tbs 待签名原文, sig 签名值
-// 返回: error 验证错误
-func verifyOCSPResponseSignature(responder *smx509.Certificate, method string, tbs, sig []byte) error {
+// verifyOCSPResponseSignature 验证BasicOCSPResponse签名值，支持SM2、Ed25519、RSA/ECDSA与RSASSA-PSS
+// 入参: responder 响应者证书, method 签名算法标识, algRaw 签名算法ASN.1原值, tbs 待签名数据, sig 签名值
+// 返回: error 验签错误
+func verifyOCSPResponseSignature(responder *smx509.Certificate, method string, algRaw asn1.RawValue, tbs, sig []byte) error {
 	if isSM2SignatureMethod(method) {
 		pub, err := parseSM2PublicKeyFromCert(responder.Raw)
 		if err != nil {
@@ -443,7 +447,13 @@ func verifyOCSPResponseSignature(responder *smx509.Certificate, method string, t
 		}
 		return nil
 	}
-	ok, err := verifyPublicKeySignature(method, "", responder.Raw, tbs, sig)
+	var ok bool
+	var err error
+	if signatureMethodText(method) == "1.2.840.113549.1.1.10" {
+		ok, err = verifyRSAPSSSignature(algRaw, "", responder.Raw, tbs, sig)
+	} else {
+		ok, err = verifyPublicKeySignature(method, "", responder.Raw, tbs, sig)
+	}
 	if err != nil {
 		return err
 	}

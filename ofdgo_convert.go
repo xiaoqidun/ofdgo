@@ -249,23 +249,24 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 		return report, fmt.Errorf("PDF input does not support document index or version selection")
 	}
 	extractDoc := report.Input == "ofd" && (options.ExtractDocument || options.VersionID != "" || options.PrimaryVersion)
-	if options.SkipUnchanged && !extractDoc && options.DocumentIndex == 0 && options.Fonts == FontKeep && options.Compression.Mode == CompressionUnchanged && report.Input == format && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
+	skipUnchanged := options.SkipUnchanged && !extractDoc && options.Fonts == FontKeep && options.Compression.Mode == CompressionUnchanged && report.Input == format && options.Pages == nil && strings.TrimSpace(options.PageRange) == ""
+	if skipUnchanged && report.Input == "pdf" {
 		report.Unchanged = true
 		return report, nil
 	}
-	if output == nil && options.PageOutput == nil {
+	if !skipUnchanged && output == nil && options.PageOutput == nil {
 		return report, fmt.Errorf("missing output writer")
 	}
 	if report.Input == "pdf" && format == "pdf" && options.Pages == nil && strings.TrimSpace(options.PageRange) == "" {
 		pdfReader, openErr := pdfgo.NewReaderWithOptions(operationInput, size, pdfgo.ReaderOptions{Password: options.PDF.Password, PasswordUTF8: options.PDF.PasswordUTF8, Workers: conversionWorkers(ctx)})
 		if openErr != nil {
-			return report, openErr
+			return report, wrapPDFOpenError(openErr)
 		}
 		defer pdfReader.Close()
 		if pageErr := pdfReader.WalkPages(ctx, func(_ int, _ *pdfgo.Page) error { report.Pages++; return nil }); pageErr != nil {
 			return report, pageErr
 		}
-		result, optimizeErr := pdfReader.OptimizeTo(ctx, output, pdfgo.OptimizeOptions{Compression: options.Compression, Creator: ofdCreator, OnProgress: writeProgress})
+		result, optimizeErr := pdfReader.OptimizeTo(ctx, output, pdfgo.OptimizeOptions{Compression: options.Compression.pdfOptions(), Creator: ofdCreator, OnProgress: writeProgress})
 		report.Bytes, report.Unchanged = result.Bytes, result.Preserved
 		return report, optimizeErr
 	}
@@ -278,10 +279,9 @@ func Convert(ctx context.Context, input *Input, output io.Writer, options Conver
 		}
 		pdfOptions.RendererOptions = append(append([]RendererOption(nil), pdfOptions.RendererOptions...), options.RendererOptions...)
 		if options.Backends != nil {
-			pdfOptions.Backends = options.Backends
+			pdfOptions.RendererOptions = append(pdfOptions.RendererOptions, WithRenderBackends(*options.Backends))
 		}
 		options.RendererOptions = pdfOptions.RendererOptions
-		options.Backends = pdfOptions.Backends
 		pdfOptions.OnProgress = func(stage string, completed, total int) error {
 			if err := progress(stage, completed, total); err != nil {
 				return err
@@ -555,7 +555,7 @@ func convertPagedOutput(ctx context.Context, renderer *Renderer, indices []int, 
 		}
 		return progress("export", len(indices), len(indices))
 	}
-	if _, err := renderer.reader.DocContext(ctx); err != nil {
+	if _, err := renderer.reader.docContext(ctx); err != nil {
 		return err
 	}
 	runCtx, cancel := context.WithCancel(ctx)
@@ -563,9 +563,7 @@ func convertPagedOutput(ctx context.Context, renderer *Renderer, indices []int, 
 	forked := make([]*Renderer, 0, workers)
 	defer func() {
 		for _, clone := range forked {
-			if clone != nil && clone.reader != nil {
-				_ = clone.reader.Close()
-			}
+			_ = clone.Close()
 		}
 	}()
 	for range workers {
@@ -687,7 +685,7 @@ func conversionWorkers(ctx context.Context) int {
 	p.mu.Lock()
 	active := p.active
 	p.mu.Unlock()
-	return max(1, p.options.Parallelism/max(1, active))
+	return max(1, p.parallelism()/max(1, active))
 }
 
 // estimateRasterPageBytes 按页面物理区域与渲染DPI估算单页RGBA光栅缓冲字节数
@@ -974,9 +972,18 @@ func filterPrimarySignatureFiles(ctx context.Context, reader *Reader, entry, lis
 	return editorPatchXML(listData, dropPatches), keptFiles, ctx.Err()
 }
 
+// parallelism 返回有效的并发上限，零值配置回退到GOMAXPROCS
+// 返回: int 有效并发上限
+func (p *ConversionPool) parallelism() int {
+	if p != nil && p.options.Parallelism > 0 {
+		return p.options.Parallelism
+	}
+	return max(1, runtime.GOMAXPROCS(0))
+}
+
 // Parallelism 返回同时运行的转换数量上限
 // 返回: int 并行上限
-func (p *ConversionPool) Parallelism() int { return p.options.Parallelism }
+func (p *ConversionPool) Parallelism() int { return p.parallelism() }
 
 // ReadAt 读取前后响应取消，保留读取字节数和源错误
 // 入参: data 目标缓冲, offset 源偏移
@@ -1059,10 +1066,11 @@ func (p *ConversionPool) acquire(ctx context.Context, image bool, size int64) er
 			return err
 		}
 		limit := p.memoryLimit()
+		parallelism := p.parallelism()
 		p.mu.Lock()
-		allowed := p.active < p.options.Parallelism && (p.active == 0 || limit != 0)
+		allowed := p.active < parallelism && (p.active == 0 || limit != 0)
 		if image {
-			allowed = p.images < p.options.Parallelism && (p.images == 0 || limit < 0 || size <= limit-p.memory)
+			allowed = p.images < parallelism && (p.images == 0 || limit < 0 || size <= limit-p.memory)
 		}
 		if allowed {
 			if image {
@@ -1073,6 +1081,9 @@ func (p *ConversionPool) acquire(ctx context.Context, image bool, size int64) er
 			}
 			p.mu.Unlock()
 			return nil
+		}
+		if p.changed == nil {
+			p.changed = make(chan struct{})
 		}
 		changed := p.changed
 		p.mu.Unlock()
@@ -1107,6 +1118,8 @@ func (p *ConversionPool) release(image bool, size int64) {
 	} else {
 		p.active--
 	}
-	close(p.changed)
+	if p.changed != nil {
+		close(p.changed)
+	}
 	p.changed = make(chan struct{})
 }

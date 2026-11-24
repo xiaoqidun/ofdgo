@@ -306,7 +306,7 @@ func (r *Renderer) readFontSourceKey(key fontSourceKey) ([]byte, error) {
 		data, err = basefont.ExtractCollectionFont(data, key.face)
 	}
 	if err == nil {
-		data, _, err = basefont.SymbolProgram(context.Background(), data, "")
+		data, _, err = basefont.SymbolProgram(ctx, data, "")
 	}
 	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		r.fontSourcesCache.data.put(key, fontSourceData{data, err}, len(data)+256)

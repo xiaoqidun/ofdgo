@@ -347,20 +347,6 @@ func (e *Editor) DeleteDocumentContext(ctx context.Context, index int) error {
 		if err != nil {
 			return 0, err
 		}
-		directory := path.Dir(cleanPackagePath(reader.ofd.DocBody[index].DocRoot))
-		if directory != "." && !slices.ContainsFunc(reader.ofd.DocBody, func(body DocBody) bool {
-			name := cleanPackagePath(body.DocRoot)
-			return name != cleanPackagePath(reader.ofd.DocBody[index].DocRoot) && strings.HasPrefix(name, directory+"/")
-		}) {
-			for name := range reader.fileNames {
-				if err := ctx.Err(); err != nil {
-					return 0, err
-				}
-				if strings.HasPrefix(name, directory+"/") {
-					removed[name] = true
-				}
-			}
-		}
 		var others []int
 		for other := range reader.ofd.DocBody {
 			if other != index {
@@ -370,6 +356,57 @@ func (e *Editor) DeleteDocumentContext(ctx context.Context, index int) error {
 		kept, err := reader.documentFiles(ctx, others...)
 		if err != nil {
 			return 0, err
+		}
+		signedKept, err := reader.signatureReferenceFiles(ctx, index)
+		if err != nil {
+			if ctx.Err() != nil {
+				return 0, ctx.Err()
+			}
+			return 0, err
+		}
+		maps.Copy(kept, signedKept)
+		directory := path.Dir(cleanPackagePath(reader.ofd.DocBody[index].DocRoot))
+		sharedDir := false
+		if directory != "." {
+			prefix := directory + "/"
+			for otherIdx, body := range reader.ofd.DocBody {
+				if otherIdx == index {
+					continue
+				}
+				if name := cleanPackagePath(body.DocRoot); name != "" && strings.HasPrefix(name, prefix) {
+					sharedDir = true
+					break
+				}
+				if body.Versions != nil {
+					for _, ver := range body.Versions.Version {
+						if vloc := cleanPackagePath(resolveResourcePath("OFD.xml", "", ver.BaseLoc)); vloc != "" && strings.HasPrefix(vloc, prefix) {
+							sharedDir = true
+							break
+						}
+					}
+				}
+				if sharedDir {
+					break
+				}
+			}
+			if !sharedDir {
+				for name := range kept {
+					if strings.HasPrefix(name, prefix) {
+						sharedDir = true
+						break
+					}
+				}
+			}
+			if !sharedDir {
+				for name := range reader.fileNames {
+					if err := ctx.Err(); err != nil {
+						return 0, err
+					}
+					if strings.HasPrefix(name, prefix) {
+						removed[name] = true
+					}
+				}
+			}
 		}
 		for name := range kept {
 			if err := ctx.Err(); err != nil {
@@ -514,7 +551,7 @@ func (e *Editor) editDocumentSnapshotWithRetired(ctx context.Context, reader *Re
 	if err := reader.initRootContext(ctx); err != nil {
 		return err
 	}
-	if _, err := reader.DocContext(ctx); err != nil {
+	if _, err := reader.docContext(ctx); err != nil {
 		return err
 	}
 	next := *e

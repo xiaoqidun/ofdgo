@@ -70,18 +70,18 @@ var canvasGammaCache = struct {
 	linear: make(map[uint64]*[256]float64),
 }
 
-// canvasColorSpaceKind 表示Canvas光栅输出的色彩空间类型
+// canvasColorSpaceKind 表示光栅输出的色彩空间类型
 type canvasColorSpaceKind uint8
 
-// CanvasColorSpace 指定Canvas光栅输出的色彩空间，零值采用默认色彩空间
-type CanvasColorSpace struct {
+// RasterColorSpace 指定光栅输出的色彩空间，零值采用默认色彩空间
+type RasterColorSpace struct {
 	kind  canvasColorSpaceKind
 	gamma float64
 }
 
-// CanvasBackend canvas页面编译与绘制适配器，ColorSpace仅影响光栅输出
-type CanvasBackend struct {
-	ColorSpace CanvasColorSpace
+// DefaultBackend 内置页面编译与绘制后端，ColorSpace仅影响光栅输出
+type DefaultBackend struct {
+	ColorSpace RasterColorSpace
 }
 
 // rasterStrokeGradientCanvas 保留页面坐标描边的局部渐变定位
@@ -97,33 +97,33 @@ type rasterGradientCanvas struct {
 	mesh     *MeshSampler
 }
 
-// init 注册Canvas适配器和默认组合
+// init 注册默认渲染后端组合
 func init() {
-	if err := RegisterRenderBackend("canvas", defaultRenderBackends); err != nil {
+	if err := RegisterRenderBackend("default", defaultRenderBackends); err != nil {
 		panic(err)
 	}
 }
 
 // LinearColorSpace 返回线性光栅色彩空间
-// 返回: CanvasColorSpace 线性色彩空间
-func LinearColorSpace() CanvasColorSpace {
-	return CanvasColorSpace{kind: canvasColorSpaceLinear}
+// 返回: RasterColorSpace 线性色彩空间
+func LinearColorSpace() RasterColorSpace {
+	return RasterColorSpace{kind: canvasColorSpaceLinear}
 }
 
 // SRGBColorSpace 返回sRGB光栅色彩空间
-// 返回: CanvasColorSpace sRGB色彩空间
-func SRGBColorSpace() CanvasColorSpace {
-	return CanvasColorSpace{kind: canvasColorSpaceSRGB}
+// 返回: RasterColorSpace sRGB色彩空间
+func SRGBColorSpace() RasterColorSpace {
+	return RasterColorSpace{kind: canvasColorSpaceSRGB}
 }
 
 // GammaColorSpace 返回指定Gamma值的光栅色彩空间，非正或非有限值回退默认色彩空间
 // 入参: gamma 伽马指数
-// 返回: CanvasColorSpace Gamma色彩空间
-func GammaColorSpace(gamma float64) CanvasColorSpace {
+// 返回: RasterColorSpace Gamma色彩空间
+func GammaColorSpace(gamma float64) RasterColorSpace {
 	if !finite(gamma) || gamma <= 0 {
-		return CanvasColorSpace{}
+		return RasterColorSpace{}
 	}
-	return CanvasColorSpace{kind: canvasColorSpaceGamma, gamma: gamma}
+	return RasterColorSpace{kind: canvasColorSpaceGamma, gamma: gamma}
 }
 
 // newRasterGradientCanvas 准备渐变适配器及独立网格采样器
@@ -539,13 +539,13 @@ func buildCanvasColorTables(space canvas.ColorSpace) [2]*[256][256]uint8 {
 // defaultRenderBackends 创建默认组合，调用方可按职责替换任意后端
 // 返回: RenderBackends 默认后端组合
 func defaultRenderBackends() RenderBackends {
-	backend := CanvasBackend{}
+	backend := DefaultBackend{}
 	return RenderBackends{FontResources: SFNTBackend{}, Fonts: SFNTBackend{}, Geometry: backend, Compiler: backend, Raster: backend, SVG: backend, PDF: backend, EPS: backend}
 }
 
-// canvasSpace 转换为内部Canvas光栅色彩空间
+// canvasSpace 转换为内部光栅色彩空间
 // 返回: canvas.ColorSpace 内部色彩空间
-func (s CanvasColorSpace) canvasSpace() canvas.ColorSpace {
+func (s RasterColorSpace) canvasSpace() canvas.ColorSpace {
 	switch s.kind {
 	case canvasColorSpaceDefault:
 		return canvas.DefaultColorSpace
@@ -563,12 +563,12 @@ func (s CanvasColorSpace) canvasSpace() canvas.ColorSpace {
 
 // Name 返回后端标识
 // 返回: string 后端标识
-func (CanvasBackend) Name() string { return "canvas" }
+func (DefaultBackend) Name() string { return "default" }
 
 // Render 按取消上下文绘制已编译页面，不修改输入数据
 // 入参: ctx 取消上下文, page 只读页面
 // 返回: image.Image 图像, error 绘制或取消错误
-func (b CanvasBackend) Render(ctx context.Context, page *RasterPage) (image.Image, error) {
+func (b DefaultBackend) Render(ctx context.Context, page *RasterPage) (image.Image, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -586,7 +586,7 @@ func (b CanvasBackend) Render(ctx context.Context, page *RasterPage) (image.Imag
 // RenderInto 按取消上下文在调用方独占的紧密RGBA缓冲中重新绘制，不修改页面或保留缓冲
 // 入参: ctx 取消上下文, page 只读页面, target 原点为零且尺寸匹配的目标，不与输入图像共享数据
 // 返回: error 参数、取消或绘制错误，绘制失败时目标可能包含部分结果
-func (b CanvasBackend) RenderInto(ctx context.Context, page *RasterPage, target *image.RGBA) error {
+func (b DefaultBackend) RenderInto(ctx context.Context, page *RasterPage, target *image.RGBA) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -608,14 +608,14 @@ func (b CanvasBackend) RenderInto(ctx context.Context, page *RasterPage, target 
 // OpenFont 使用独立字体后端读取字体度量
 // 入参: data 字体数据
 // 返回: FontMetrics 字体度量, error 解析错误
-func (CanvasBackend) OpenFont(data []byte) (FontMetrics, error) {
+func (DefaultBackend) OpenFont(data []byte) (FontMetrics, error) {
 	return (SFNTBackend{}).OpenFont(data)
 }
 
 // ResolveFont 使用独立字体后端解析字体来源
 // 入参: r 渲染器, id 字体标识, exact 是否禁止无关回退
 // 返回: ResolvedFont 字体与来源, error 解析错误
-func (CanvasBackend) ResolveFont(r *Renderer, id string, exact bool) (ResolvedFont, error) {
+func (DefaultBackend) ResolveFont(r *Renderer, id string, exact bool) (ResolvedFont, error) {
 	return (SFNTBackend{}).ResolveFont(r, id, exact)
 }
 
@@ -670,7 +670,7 @@ func (g rasterGradientCanvas) SetColorSpace(space canvas.ColorSpace) canvas.Grad
 // renderImageContext 按取消上下文将页面绘制到已清空且尺寸匹配的目标
 // 入参: ctx 取消上下文, page 只读页面, img 独占目标
 // 返回: image.Image 目标图像, error 绘制或取消错误
-func (b CanvasBackend) renderImageContext(ctx context.Context, page *RasterPage, img *image.RGBA) (image.Image, error) {
+func (b DefaultBackend) renderImageContext(ctx context.Context, page *RasterPage, img *image.RGBA) (image.Image, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -706,7 +706,7 @@ func (b CanvasBackend) renderImageContext(ctx context.Context, page *RasterPage,
 // renderCommands 在带页面像素偏移的目标缓冲上执行指令序列并支持嵌套离屏透明组合成
 // 入参: ctx 取消上下文, page 页面定义, commands 指令切片, img 当前目标缓冲, offset 目标左上角在整页中的像素偏移, pageW 整页像素宽, pageH 整页像素高, space 线性或目标色彩空间, toLinear 非线性转线性单像素函数, linearLUT 八位非线性转线性查表, linearImages 页内线性图像缓存, masks 裁剪蒙版缓存, scratch 可复用离屏裁剪缓冲
 // 返回: error 绘制或取消错误
-func (b CanvasBackend) renderCommands(ctx context.Context, page *RasterPage, commands []RasterCommand, img *image.RGBA, offset image.Point, pageW, pageH int, space canvas.ColorSpace, toLinear func(color.RGBA) color.RGBA, linearLUT *[256]float64, linearImages map[image.Image]*image.RGBA, masks *renderCache[[32]byte, *image.Alpha], scratch *[]byte) error {
+func (b DefaultBackend) renderCommands(ctx context.Context, page *RasterPage, commands []RasterCommand, img *image.RGBA, offset image.Point, pageW, pageH int, space canvas.ColorSpace, toLinear func(color.RGBA) color.RGBA, linearLUT *[256]float64, linearImages map[image.Image]*image.RGBA, masks *renderCache[[32]byte, *image.Alpha], scratch *[]byte) error {
 	scale := page.DPI / 25.4
 	dstPageBounds := img.Rect.Add(offset)
 	r := rasterizer.FromImage(img, canvas.DPMM(scale), space)

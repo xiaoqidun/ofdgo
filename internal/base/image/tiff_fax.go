@@ -47,6 +47,9 @@ func decodeTIFFFax(ctx context.Context, data []byte, layout TIFFLayout) (image.I
 	if layout.Samples != 1 || layout.compression == 3 && layout.t4 & ^uint32(7) != 0 || layout.compression == 4 && layout.t6 & ^uint32(2) != 0 {
 		return nil, fmt.Errorf("invalid TIFF fax options")
 	}
+	if layout.compression == 3 && layout.t4&2 != 0 || layout.compression == 4 && layout.t6&2 != 0 {
+		return nil, fmt.Errorf("unsupported TIFF fax uncompressed mode")
+	}
 	var order binary.ByteOrder = binary.LittleEndian
 	if data[0] == 'M' {
 		order = binary.BigEndian
@@ -137,6 +140,9 @@ func decodeTIFFFax(ctx context.Context, data []byte, layout TIFFLayout) (image.I
 			}
 			encoded = reversed
 		}
+		if layout.compression == 3 && layout.t4&4 != 0 && !validTIFFFaxFillBitsPrefix(encoded) {
+			return nil, fmt.Errorf("TIFF fax block %d: invalid T.4 fill bits alignment", i)
+		}
 		rows := height
 		if !tiled {
 			rows = min(height, uint32(uint64(layout.Height)-i*uint64(height)))
@@ -163,6 +169,19 @@ func decodeTIFFFax(ctx context.Context, data []byte, layout TIFFLayout) (image.I
 		return nil, err
 	}
 	return result, nil
+}
+
+// validTIFFFaxFillBitsPrefix 校验T.4 Fill bits模式块首EOL以至少4个前导零位并对齐到字节边界结束
+// 入参: encoded 传真块编码数据
+// 返回: bool 块首填充对齐是否合法
+func validTIFFFaxFillBitsPrefix(encoded []byte) bool {
+	for i, b := range encoded {
+		if b == 0 {
+			continue
+		}
+		return i >= 1 && b == 1
+	}
+	return false
 }
 
 // Bounds 返回主图显示区域，不包含边缘瓦片的填充像素

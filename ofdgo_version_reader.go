@@ -131,7 +131,7 @@ func (r *Reader) DocumentVersionContext(ctx context.Context, id string) (*Reader
 	if err := next.initRootContext(ctx); err != nil {
 		return nil, err
 	}
-	if _, err := next.DocContext(ctx); err != nil {
+	if _, err := next.docContext(ctx); err != nil {
 		return nil, err
 	}
 	next.bindEncryptionHold()

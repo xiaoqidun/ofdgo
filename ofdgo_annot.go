@@ -59,7 +59,7 @@ type Annotation struct {
 	ReadOnly    *bool                 `xml:"ReadOnly,attr"`
 	Remark      string                `xml:"Remark"`
 	Parameters  *AnnotationParameters `xml:"Parameters,omitempty"`
-	Appearance  Appearance
+	Appearance  *Appearance           `xml:"Appearance,omitempty"`
 }
 
 // AnnotationParameters 保存注释参数集合
@@ -96,19 +96,23 @@ type AnnotationInfo struct {
 
 // Appearance 注释外观
 type Appearance struct {
-	Boundary             string                 `xml:"Boundary,attr"`
-	Objects              []GraphicObject        `xml:"-"`
-	TextObject           []TextObject           `xml:"TextObject"`
-	PathObject           []PathObject           `xml:"PathObject"`
-	ImageObject          []ImageObject          `xml:"ImageObject"`
-	CompositeGraphicUnit []CompositeGraphicUnit `xml:"CompositeGraphicUnit"`
+	Boundary        string            `xml:"Boundary,attr"`
+	Objects         []GraphicObject   `xml:"-"`
+	TextObject      []TextObject      `xml:"TextObject"`
+	PathObject      []PathObject      `xml:"PathObject"`
+	ImageObject     []ImageObject     `xml:"ImageObject"`
+	CompositeObject []CompositeObject `xml:"CompositeObject"`
+	PageBlock       []PageBlock       `xml:"PageBlock"`
 }
 
 // annotationInfo 提取单条注释摘要，不保留外观图元引用
 // 入参: index 页面索引, pageID 页面标识, annotation 注释
 // 返回: AnnotationInfo 注释摘要
 func annotationInfo(index int, pageID string, annotation Annotation) AnnotationInfo {
-	box, _ := ParseBox(annotation.Appearance.Boundary)
+	var box Box
+	if annotation.Appearance != nil {
+		box, _ = ParseBox(annotation.Appearance.Boundary)
+	}
 	return AnnotationInfo{
 		ID:          annotation.ID,
 		Page:        index + 1,
@@ -333,6 +337,9 @@ func (r *Reader) PageAnnotationsContext(ctx context.Context, pageID string) ([]A
 // 返回: iter.Seq[*GraphicObject] 图形对象指针序列
 func (a *Appearance) objects() iter.Seq[*GraphicObject] {
 	return func(yield func(*GraphicObject) bool) {
+		if a == nil {
+			return
+		}
 		if len(a.Objects) != 0 {
 			for i := range a.Objects {
 				if !yield(&a.Objects[i]) {
@@ -359,13 +366,67 @@ func (a *Appearance) objects() iter.Seq[*GraphicObject] {
 				return
 			}
 		}
-		for _, object := range a.CompositeGraphicUnit {
-			item := GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: object}
+		for _, object := range a.CompositeObject {
+			item := GraphicObject{Type: "CompositeObject", CompositeObject: object}
 			if !yield(&item) {
 				return
 			}
 		}
+		for i := range a.PageBlock {
+			if !yieldPageBlockPtrs(&a.PageBlock[i], nil, yield) {
+				return
+			}
+		}
 	}
+}
+
+// yieldPageBlockPtrs 递归按绘制顺序遍历页块中的图形对象指针
+// 入参: block 页块, prefix 父级页块标识栈, yield 回调函数
+// 返回: bool 是否继续遍历
+func yieldPageBlockPtrs(block *PageBlock, prefix []string, yield func(*GraphicObject) bool) bool {
+	stack := append(slices.Clone(prefix), block.ID)
+	if len(block.Objects) != 0 {
+		for i := range block.Objects {
+			item := block.Objects[i]
+			if len(item.pageBlocks) == 0 {
+				item.pageBlocks = stack
+			}
+			if !yield(&item) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, object := range block.TextObject {
+		item := GraphicObject{Type: "TextObject", TextObject: object, pageBlocks: stack}
+		if !yield(&item) {
+			return false
+		}
+	}
+	for _, object := range block.PathObject {
+		item := GraphicObject{Type: "PathObject", PathObject: object, pageBlocks: stack}
+		if !yield(&item) {
+			return false
+		}
+	}
+	for _, object := range block.ImageObject {
+		item := GraphicObject{Type: "ImageObject", ImageObject: object, pageBlocks: stack}
+		if !yield(&item) {
+			return false
+		}
+	}
+	for _, object := range block.CompositeObject {
+		item := GraphicObject{Type: "CompositeObject", CompositeObject: object, pageBlocks: stack}
+		if !yield(&item) {
+			return false
+		}
+	}
+	for i := range block.PageBlock {
+		if !yieldPageBlockPtrs(&block.PageBlock[i], stack, yield) {
+			return false
+		}
+	}
+	return true
 }
 
 // annotationInfos 提取已加载页面的注释摘要列表

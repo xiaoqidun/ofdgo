@@ -307,6 +307,7 @@ func editorCloneFields(kind reflect.Type) []int {
 // 入参: value 原值
 // 返回: GraphicObject 独立副本
 func copyEditorGraphicObject(value GraphicObject) GraphicObject {
+	value.pageBlocks = slices.Clone(value.pageBlocks)
 	switch value.Type {
 	case "TextObject", "Text":
 		value.TextObject = copyEditorTextObject(value.TextObject)
@@ -314,13 +315,13 @@ func copyEditorGraphicObject(value GraphicObject) GraphicObject {
 		value.PathObject = copyEditorPathObject(value.PathObject)
 	case "ImageObject":
 		value.ImageObject = copyEditorImageObject(value.ImageObject)
-	case "CompositeObject", "CompositeGraphicUnit":
-		value.CompositeGraphicUnit = copyEditorCompositeGraphicUnit(value.CompositeGraphicUnit)
+	case "CompositeObject":
+		value.CompositeObject = copyEditorCompositeObject(value.CompositeObject)
 	default:
 		value.TextObject = copyEditorTextObject(value.TextObject)
 		value.PathObject = copyEditorPathObject(value.PathObject)
 		value.ImageObject = copyEditorImageObject(value.ImageObject)
-		value.CompositeGraphicUnit = copyEditorCompositeGraphicUnit(value.CompositeGraphicUnit)
+		value.CompositeObject = copyEditorCompositeObject(value.CompositeObject)
 	}
 	return value
 }
@@ -411,10 +412,10 @@ func copyEditorImageObject(value ImageObject) ImageObject {
 	return value
 }
 
-// copyEditorCompositeGraphicUnit 复制CompositeGraphicUnit的可变字段，保留内部只读状态
+// copyEditorCompositeObject 复制CompositeObject的可变字段，保留内部只读状态
 // 入参: value 原值
-// 返回: CompositeGraphicUnit 独立副本
-func copyEditorCompositeGraphicUnit(value CompositeGraphicUnit) CompositeGraphicUnit {
+// 返回: CompositeObject 独立副本
+func copyEditorCompositeObject(value CompositeObject) CompositeObject {
 	if value.DashOffset != nil {
 		copied := *value.DashOffset
 		value.DashOffset = &copied
@@ -427,16 +428,25 @@ func copyEditorCompositeGraphicUnit(value CompositeGraphicUnit) CompositeGraphic
 		copied := *value.Visible
 		value.Visible = &copied
 	}
-	hasTyped := len(value.TextObject)+len(value.PathObject)+len(value.ImageObject)+len(value.CompositeGraphicUnit) != 0
+	value.Clips = cloneEditorData(value.Clips)
+	value.Actions = cloneEditorData(value.Actions)
+	return value
+}
+
+// copyEditorCompositeGraphicUnit 复制CompositeGraphicUnit的可变字段，保留内部只读状态
+// 入参: value 原值
+// 返回: CompositeGraphicUnit 独立副本
+func copyEditorCompositeGraphicUnit(value CompositeGraphicUnit) CompositeGraphicUnit {
+	hasTyped := len(value.TextObject)+len(value.PathObject)+len(value.ImageObject)+len(value.CompositeObject) != 0
 	if len(value.Objects) != 0 {
 		value.Objects = slices.Clone(value.Objects)
 		for i := range value.Objects {
 			value.Objects[i] = copyEditorGraphicObject(value.Objects[i])
 		}
 		if hasTyped {
-			fillTypedObjects(value.Objects, &value.TextObject, &value.PathObject, &value.ImageObject, &value.CompositeGraphicUnit)
+			fillTypedObjects(value.Objects, &value.TextObject, &value.PathObject, &value.ImageObject, &value.CompositeObject)
 		} else {
-			value.TextObject, value.PathObject, value.ImageObject, value.CompositeGraphicUnit = nil, nil, nil, nil
+			value.TextObject, value.PathObject, value.ImageObject, value.CompositeObject = nil, nil, nil, nil
 		}
 	} else {
 		value.Objects = nil
@@ -452,13 +462,12 @@ func copyEditorCompositeGraphicUnit(value CompositeGraphicUnit) CompositeGraphic
 		for i := range value.ImageObject {
 			value.ImageObject[i] = copyEditorImageObject(value.ImageObject[i])
 		}
-		value.CompositeGraphicUnit = slices.Clone(value.CompositeGraphicUnit)
-		for i := range value.CompositeGraphicUnit {
-			value.CompositeGraphicUnit[i] = copyEditorCompositeGraphicUnit(value.CompositeGraphicUnit[i])
+		value.CompositeObject = slices.Clone(value.CompositeObject)
+		for i := range value.CompositeObject {
+			value.CompositeObject[i] = copyEditorCompositeObject(value.CompositeObject[i])
 		}
 	}
-	value.Clips = cloneEditorData(value.Clips)
-	value.Actions = cloneEditorData(value.Actions)
+	value.PageBlock = copyEditorPageBlocks(value.PageBlock)
 	return value
 }
 
@@ -476,20 +485,65 @@ func copyEditorPageContent(value PageContent) PageContent {
 	return value
 }
 
+// copyEditorPageBlocks 递归复制PageBlock切片
+// 入参: blocks 原页块切片
+// 返回: []PageBlock 独立副本
+func copyEditorPageBlocks(blocks []PageBlock) []PageBlock {
+	if len(blocks) == 0 {
+		return nil
+	}
+	out := slices.Clone(blocks)
+	for i := range out {
+		if len(out[i].Objects) != 0 {
+			out[i].Objects = slices.Clone(out[i].Objects)
+			for j := range out[i].Objects {
+				out[i].Objects[j] = copyEditorGraphicObject(out[i].Objects[j])
+			}
+		}
+		if len(out[i].TextObject) != 0 {
+			out[i].TextObject = slices.Clone(out[i].TextObject)
+			for j := range out[i].TextObject {
+				out[i].TextObject[j] = copyEditorTextObject(out[i].TextObject[j])
+			}
+		}
+		if len(out[i].PathObject) != 0 {
+			out[i].PathObject = slices.Clone(out[i].PathObject)
+			for j := range out[i].PathObject {
+				out[i].PathObject[j] = copyEditorPathObject(out[i].PathObject[j])
+			}
+		}
+		if len(out[i].ImageObject) != 0 {
+			out[i].ImageObject = slices.Clone(out[i].ImageObject)
+			for j := range out[i].ImageObject {
+				out[i].ImageObject[j] = copyEditorImageObject(out[i].ImageObject[j])
+			}
+		}
+		if len(out[i].CompositeObject) != 0 {
+			out[i].CompositeObject = slices.Clone(out[i].CompositeObject)
+			for j := range out[i].CompositeObject {
+				out[i].CompositeObject[j] = copyEditorCompositeObject(out[i].CompositeObject[j])
+			}
+		}
+		out[i].PageBlock = copyEditorPageBlocks(out[i].PageBlock)
+	}
+	return out
+}
+
 // copyEditorLayer 复制Layer的可变字段，保留内部只读状态
 // 入参: value 原值
 // 返回: Layer 独立副本
 func copyEditorLayer(value Layer) Layer {
-	hasTyped := len(value.TextObject)+len(value.PathObject)+len(value.ImageObject)+len(value.CompositeGraphicUnit) != 0
+	value.PageBlock = copyEditorPageBlocks(value.PageBlock)
+	hasTyped := len(value.TextObject)+len(value.PathObject)+len(value.ImageObject)+len(value.CompositeObject) != 0
 	if len(value.Objects) != 0 {
 		value.Objects = slices.Clone(value.Objects)
 		for i := range value.Objects {
 			value.Objects[i] = copyEditorGraphicObject(value.Objects[i])
 		}
 		if hasTyped {
-			fillTypedObjects(value.Objects, &value.TextObject, &value.PathObject, &value.ImageObject, &value.CompositeGraphicUnit)
+			fillTypedObjects(value.Objects, &value.TextObject, &value.PathObject, &value.ImageObject, &value.CompositeObject)
 		} else {
-			value.TextObject, value.PathObject, value.ImageObject, value.CompositeGraphicUnit = nil, nil, nil, nil
+			value.TextObject, value.PathObject, value.ImageObject, value.CompositeObject = nil, nil, nil, nil
 		}
 		return value
 	}
@@ -506,16 +560,16 @@ func copyEditorLayer(value Layer) Layer {
 	for i := range value.ImageObject {
 		value.ImageObject[i] = copyEditorImageObject(value.ImageObject[i])
 	}
-	value.CompositeGraphicUnit = slices.Clone(value.CompositeGraphicUnit)
-	for i := range value.CompositeGraphicUnit {
-		value.CompositeGraphicUnit[i] = copyEditorCompositeGraphicUnit(value.CompositeGraphicUnit[i])
+	value.CompositeObject = slices.Clone(value.CompositeObject)
+	for i := range value.CompositeObject {
+		value.CompositeObject[i] = copyEditorCompositeObject(value.CompositeObject[i])
 	}
 	return value
 }
 
 // fillTypedObjects 从已克隆的图形对象列表轻量填充分类对象切片，避免二次深拷贝
-// 入参: objects 已隔离的图形对象切片, texts 文本切片指针, paths 路径切片指针, images 图像切片指针, composites 复合图元切片指针
-func fillTypedObjects(objects []GraphicObject, texts *[]TextObject, paths *[]PathObject, images *[]ImageObject, composites *[]CompositeGraphicUnit) {
+// 入参: objects 已隔离的图形对象切片, texts 文本切片指针, paths 路径切片指针, images 图像切片指针, composites 复合对象切片指针
+func fillTypedObjects(objects []GraphicObject, texts *[]TextObject, paths *[]PathObject, images *[]ImageObject, composites *[]CompositeObject) {
 	var nText, nPath, nImage, nComposite int
 	for i := range objects {
 		switch objects[i].Type {
@@ -525,14 +579,14 @@ func fillTypedObjects(objects []GraphicObject, texts *[]TextObject, paths *[]Pat
 			nPath++
 		case "ImageObject":
 			nImage++
-		case "CompositeObject", "CompositeGraphicUnit":
+		case "CompositeObject":
 			nComposite++
 		}
 	}
 	var textSlice []TextObject
 	var pathSlice []PathObject
 	var imageSlice []ImageObject
-	var compositeSlice []CompositeGraphicUnit
+	var compositeSlice []CompositeObject
 	if nText != 0 {
 		textSlice = make([]TextObject, 0, nText)
 	}
@@ -543,7 +597,7 @@ func fillTypedObjects(objects []GraphicObject, texts *[]TextObject, paths *[]Pat
 		imageSlice = make([]ImageObject, 0, nImage)
 	}
 	if nComposite != 0 {
-		compositeSlice = make([]CompositeGraphicUnit, 0, nComposite)
+		compositeSlice = make([]CompositeObject, 0, nComposite)
 	}
 	for i := range objects {
 		switch objects[i].Type {
@@ -553,8 +607,8 @@ func fillTypedObjects(objects []GraphicObject, texts *[]TextObject, paths *[]Pat
 			pathSlice = append(pathSlice, objects[i].PathObject)
 		case "ImageObject":
 			imageSlice = append(imageSlice, objects[i].ImageObject)
-		case "CompositeObject", "CompositeGraphicUnit":
-			compositeSlice = append(compositeSlice, objects[i].CompositeGraphicUnit)
+		case "CompositeObject":
+			compositeSlice = append(compositeSlice, objects[i].CompositeObject)
 		}
 	}
 	*texts, *paths, *images, *composites = textSlice, pathSlice, imageSlice, compositeSlice
@@ -589,7 +643,7 @@ func clonePageContentWithTyped(ctx context.Context, value PageContent) (PageCont
 					objects[j] = copyEditorGraphicObject(object)
 				}
 				layer.Objects = objects
-				fillTypedObjects(layer.Objects, &layer.TextObject, &layer.PathObject, &layer.ImageObject, &layer.CompositeGraphicUnit)
+				fillTypedObjects(layer.Objects, &layer.TextObject, &layer.PathObject, &layer.ImageObject, &layer.CompositeObject)
 			} else {
 				layer = copyEditorLayer(srcLayer)
 			}
@@ -715,8 +769,8 @@ func (e *Editor) copyObjectOrigin(before, after GraphicObject, maximum *uint64) 
 		target = &result.PathObject
 	case "ImageObject":
 		target = &result.ImageObject
-	case "CompositeObject", "CompositeGraphicUnit":
-		target = &result.CompositeGraphicUnit
+	case "CompositeObject":
+		target = &result.CompositeObject
 	}
 	if err := xml.Unmarshal(data, target); err != nil {
 		return GraphicObject{}, nil, err
@@ -724,7 +778,7 @@ func (e *Editor) copyObjectOrigin(before, after GraphicObject, maximum *uint64) 
 	result.TextObject.layout = after.TextObject.layout
 	copyStrokeFlags(&result, after)
 	result.state = after.state
-	result.CompositeGraphicUnit.states = remapCompositeStates(after.CompositeGraphicUnit.states, ids)
+	result.CompositeObject.states = remapCompositeStates(after.CompositeObject.states, ids)
 	root.parent = origin.node.parent
 	return result, &editorObjectOrigin{page: origin.page, data: data, node: root, object: result}, nil
 }
@@ -1251,8 +1305,8 @@ func (e *Editor) remapCopiedObject(object GraphicObject, origin *editorObjectOri
 		target = &result.PathObject
 	case "ImageObject":
 		target = &result.ImageObject
-	case "CompositeObject", "CompositeGraphicUnit":
-		target = &result.CompositeGraphicUnit
+	case "CompositeObject":
+		target = &result.CompositeObject
 	}
 	if err := xml.Unmarshal(remapped, target); err != nil {
 		return GraphicObject{}, nil, err
@@ -1260,7 +1314,7 @@ func (e *Editor) remapCopiedObject(object GraphicObject, origin *editorObjectOri
 	result.TextObject.layout = object.TextObject.layout
 	copyStrokeFlags(&result, object)
 	result.state = object.state
-	result.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
+	result.CompositeObject.states = object.CompositeObject.states
 	if origin == nil {
 		return result, nil, nil
 	}

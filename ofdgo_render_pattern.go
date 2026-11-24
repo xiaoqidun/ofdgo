@@ -42,11 +42,17 @@ type stampContentState struct {
 // stampContentStateKey 隔离渲染器私有的共享签章数据
 type stampContentStateKey struct{}
 
-// patternCellKey 区分共享底纹、透明度和影响单元语义的页面变换
+// patternCellKey 区分共享底纹、透明度、分辨率、页面资源作用域、打印状态、底纹页变换与影响单元语义的变换
 type patternCellKey struct {
-	pattern *Pattern
-	alpha   int
-	matrix  [6]float64
+	pattern        *Pattern
+	alpha          int
+	matrix         [6]float64
+	dpi            float64
+	printing       bool
+	printContents  string
+	pageScope      *pdfPageScopeNode
+	hasPatternPage bool
+	patternPage    [6]float64
 }
 
 // patternCellTranslatable 检查无需按页面位置重新解释的叶子单元
@@ -67,6 +73,9 @@ func patternCellTranslatable(pattern *PatternPaint) bool {
 			}
 			fill, stroke = object.TextObject.FillColor, (*FillColor)(object.TextObject.StrokeColor)
 		case "ImageObject":
+			if object.ImageObject.DrawParam != "" {
+				return false
+			}
 			if object.ImageObject.Border != nil {
 				stroke = (*FillColor)(object.ImageObject.Border.BorderColor)
 			}
@@ -180,18 +189,51 @@ func (c *semanticCompiler) sharedStamp(stamp Stamp, compile func(*semanticCompil
 	return nil
 }
 
+// internPageScope 驻留当前页面局部资源作用域序列以供底纹单元缓存隔离
+// 入参: res 页面局部资源列表
+// 返回: *pdfPageScopeNode 唯一作用域节点
+func (c *semanticCompiler) internPageScope(res []*parsedRes) *pdfPageScopeNode {
+	var cur *pdfPageScopeNode
+	for _, item := range res {
+		if item == nil {
+			continue
+		}
+		if c.pageScopes == nil {
+			c.pageScopes = make(map[pdfPageScopeNode]*pdfPageScopeNode)
+		}
+		k := pdfPageScopeNode{res: item, prev: cur}
+		if existing, ok := c.pageScopes[k]; ok {
+			cur = existing
+			continue
+		}
+		node := &pdfPageScopeNode{res: item, prev: cur}
+		c.pageScopes[k] = node
+		cur = node
+	}
+	return cur
+}
+
 // patternCell 复用同次编译中相同底纹单元并施加单元宽高边界裁剪，不污染单元内部默认颜色
 // 入参: pattern 底纹画刷, matrix 单元到页面矩阵
 // 返回: []RasterCommand 只读单元指令, error 编译错误
 func (c *semanticCompiler) patternCell(pattern *PatternPaint, matrix Matrix) ([]RasterCommand, error) {
+	ctx := c.renderer.pageContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if c.patternReferences[pattern.Pattern] {
 		return nil, fmt.Errorf("cyclic pattern paint")
 	}
 	if pattern.Width <= 0 || pattern.Height <= 0 {
 		return nil, nil
 	}
+	tileMatrix := matrix
 	x, y := 0.0, 0.0
-	if patternCellTranslatable(pattern) {
+	translatable := patternCellTranslatable(pattern)
+	if translatable {
 		x, y = matrix.e, matrix.f
 		matrix.e, matrix.f = 0, 0
 	}
@@ -202,7 +244,19 @@ func (c *semanticCompiler) patternCell(pattern *PatternPaint, matrix Matrix) ([]
 	if patternAlpha == 0 {
 		return nil, nil
 	}
-	key := patternCellKey{pattern: pattern.Pattern, alpha: patternAlpha, matrix: matrix.Values()}
+	key := patternCellKey{
+		pattern:       pattern.Pattern,
+		alpha:         patternAlpha,
+		matrix:        matrix.Values(),
+		dpi:           c.page.DPI,
+		printing:      c.renderer.printing,
+		printContents: c.renderer.printContents,
+		pageScope:     c.internPageScope(c.renderer.pageResources),
+	}
+	if !translatable && c.patternPage != nil {
+		key.hasPatternPage = true
+		key.patternPage = c.patternPage.Values()
+	}
 	if commands, ok := c.patterns.get(key); ok {
 		return translatePatternCommands(commands, x, y), nil
 	}
@@ -223,20 +277,35 @@ func (c *semanticCompiler) patternCell(pattern *PatternPaint, matrix Matrix) ([]
 		}
 	}
 	useGroup := patternAlpha < 255 && count > 1
-	child := &semanticCompiler{renderer: c.renderer, geometry: c.geometry, page: &RasterPage{Width: c.page.Width, Height: c.page.Height, DPI: c.page.DPI}, pattern: true, patterns: c.patterns, patternReferences: c.patternReferences, patternPage: &matrix}
+	cellPatternPage := tileMatrix
+	child := &semanticCompiler{renderer: c.renderer, geometry: c.geometry, page: &RasterPage{Width: c.page.Width, Height: c.page.Height, DPI: c.page.DPI}, pattern: true, patterns: c.patterns, patternReferences: c.patternReferences, patternPage: &cellPatternPage, pageScopes: c.pageScopes}
+	prevPatternPage := c.renderer.patternPage
+	c.renderer.patternPage = &cellPatternPage
+	defer func() {
+		c.renderer.patternPage = prevPatternPage
+		if c.pageScopes == nil && child.pageScopes != nil {
+			c.pageScopes = child.pageScopes
+		}
+	}()
 	if useGroup {
 		child.page.Commands = append(child.page.Commands, RasterCommand{Group: RasterGroupBegin, GroupAlpha: uint8(patternAlpha)})
 	}
 	for object := range pattern.CellContent.objects() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !useGroup {
 			object = mergeGraphicObjectAlpha(object, pattern.Alpha)
 		}
-		if err := c.renderer.WalkObject(&object, RenderState{Defaults: nil, Parent: &matrix, BoundaryInCTM: true, Clip: cellClip}, child); err != nil {
+		if err := c.renderer.WalkObjectContext(ctx, &object, RenderState{Defaults: nil, Parent: &matrix, BoundaryInCTM: true, Clip: cellClip}, child); err != nil {
 			return nil, err
 		}
 	}
 	if useGroup {
 		child.page.Commands = append(child.page.Commands, RasterCommand{Group: RasterGroupEnd})
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	cost := rasterCommandsCost(child.page.Commands, c.patterns.limit)
 	c.patterns.put(key, child.page.Commands, cost)

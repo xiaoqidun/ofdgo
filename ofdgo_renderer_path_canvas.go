@@ -242,18 +242,27 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 	if parentCTM != nil {
 		ctm = parentCTM.Multiply(ctm)
 	}
-	style := r.newPathStyle(defaults, bx, by, pageH, styleObj.Alpha)
-	if obj.DrawParam != "" {
-		if dp := r.getDrawParam(obj.DrawParam, nil); dp != nil {
-			style.applyDrawParam(r, dp, bx, by, pageH, styleObj.Alpha)
+	buildStyle := func(src PathObject) (pathStyle, float64, float64, []float64) {
+		st := r.newPathStyle(defaults, bx, by, pageH, src.Alpha)
+		if src.DrawParam != "" {
+			if dp := r.getDrawParam(src.DrawParam, nil); dp != nil {
+				st.applyDrawParam(r, dp, bx, by, pageH, src.Alpha)
+			}
 		}
+		st.applyPathObject(r, src, bx, by, pageH)
+		lw := st.lineWidth
+		do := st.dashOffset
+		dpPat := slices.Clone(st.dashPattern)
+		st.scale(ctm)
+		st.lineWidth = r.deviceLineWidth(st.lineWidth)
+		transformShdPaint(st.fillPaint, parentCTM, bx, by, pageH, boundaryInCTM)
+		transformShdPaint(st.strokePaint, parentCTM, bx, by, pageH, boundaryInCTM)
+		if st.fillPaint == nil {
+			st.fillPaint = st.fillColor
+		}
+		return st, lw, do, dpPat
 	}
-	style.applyPathObject(r, styleObj, bx, by, pageH)
-	localLineWidth := style.lineWidth
-	localDashOffset := style.dashOffset
-	localDashPattern := slices.Clone(style.dashPattern)
-	style.scale(ctm)
-	style.lineWidth = r.deviceLineWidth(style.lineWidth)
+	style, localLineWidth, localDashOffset, localDashPattern := buildStyle(styleObj)
 	patternOrigin := TranslationMatrix(bx, by)
 	if parentCTM != nil {
 		if boundaryInCTM {
@@ -262,8 +271,6 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 			patternOrigin = patternOrigin.Multiply(*parentCTM)
 		}
 	}
-	transformShdPaint(style.fillPaint, parentCTM, bx, by, pageH, boundaryInCTM)
-	transformShdPaint(style.strokePaint, parentCTM, bx, by, pageH, boundaryInCTM)
 	pathCTM := ctm
 	if boundaryInCTM {
 		pathCTM = localCTM
@@ -276,12 +283,12 @@ func (r *Renderer) renderPath(ctx *canvas.Context, obj PathObject, pageH float64
 		})
 	}
 	clipPath := r.intersectCachedClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
-	if style.fillPaint == nil {
-		style.fillPaint = style.fillColor
-	}
 	if useGroup {
 		if endGroup, ok := beginCanvasTransparencyGroup(ctx.Renderer, objAlpha); ok {
 			defer endGroup()
+		} else {
+			styleObj = obj
+			style, localLineWidth, localDashOffset, localDashPattern = buildStyle(styleObj)
 		}
 	}
 	if shouldFill {
@@ -507,6 +514,9 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 	}
 	startX, endX := int(startXF), int(endXF)
 	startY, endY := int(startYF), int(endYF)
+	if compiler, ok := ctx.Renderer.(*canvasPageCompiler); ok && countX*countY > 1 && r.renderPatternCompiled(ctx, compiler, pattern, patternCTM, xStep, yStep, startX, endX, startY, endY, pageH, clip, grouped) {
+		return
+	}
 	for ix := startX; ix <= endX; ix++ {
 		for iy := startY; iy <= endY; iy++ {
 			tileCTM := patternCTM.Multiply(TranslationMatrix(float64(ix)*xStep, float64(iy)*yStep))
@@ -533,6 +543,209 @@ func (r *Renderer) renderPattern(ctx *canvas.Context, pattern *PatternPaint, pag
 			}
 		}
 	}
+}
+
+// renderPatternCompiled 在光栅编译后端复用单个底纹单元的已编译命令，按瓦片平移展开
+// 入参: ctx 绘制上下文, compiler 光栅页面编译器, pattern 底纹画刷, patternCTM 底纹基础变换矩阵, xStep X向步距, yStep Y向步距, startX X向起始瓦片索引, endX X向结束瓦片索引, startY Y向起始瓦片索引, endY Y向结束瓦片索引, pageH 页面高度, clip 裁剪路径, grouped 是否已启用外层透明组
+// 返回: bool 是否完成快速编译展开
+func (r *Renderer) renderPatternCompiled(ctx *canvas.Context, compiler *canvasPageCompiler, pattern *PatternPaint, patternCTM Matrix, xStep, yStep float64, startX, endX, startY, endY int, pageH float64, clip *canvas.Path, grouped bool) bool {
+	if ctx.View() != canvas.Identity || ctx.CoordSystemView() != canvas.Identity {
+		return false
+	}
+	if r.patternContentUsesPagePattern(pattern.CellContent) {
+		return false
+	}
+	clipRect, clipIsRect := rectangularPath(clip)
+	clipBounds := clip.Bounds()
+	type cellTemplate struct {
+		ready    bool
+		commands []RasterCommand
+		bounds   canvas.Rect
+	}
+	var templates [4]cellTemplate
+	compileCell := func(flipX, flipY bool) *cellTemplate {
+		idx := 0
+		if flipX {
+			idx |= 1
+		}
+		if flipY {
+			idx |= 2
+		}
+		tpl := &templates[idx]
+		if tpl.ready {
+			return tpl
+		}
+		baseCTM := patternCTM
+		if flipX {
+			baseCTM = baseCTM.Multiply(Matrix{a: -1, d: 1, e: pattern.Width})
+		}
+		if flipY {
+			baseCTM = baseCTM.Multiply(Matrix{a: 1, d: -1, f: pattern.Height})
+		}
+		cellClip := canvas.Rectangle(pattern.Width, pattern.Height).Transform(canvas.Matrix{{baseCTM.a, baseCTM.c, baseCTM.e}, {-baseCTM.b, -baseCTM.d, pageH - baseCTM.f}})
+		tpl.bounds = cellClip.Bounds()
+		subPage := &RasterPage{Width: compiler.page.Width, Height: compiler.page.Height, DPI: compiler.page.DPI}
+		subCompiler := &canvasPageCompiler{page: subPage, geometry: compiler.geometry}
+		subCtx := canvas.NewContext(subCompiler)
+		r.patternPage = &baseCTM
+		for obj := range pattern.CellContent.objects() {
+			if !grouped {
+				obj = mergeGraphicObjectAlpha(obj, pattern.Alpha)
+			}
+			r.renderObject(subCtx, &obj, pageH, nil, &baseCTM, true, cellClip)
+			if r.renderError != nil {
+				return tpl
+			}
+		}
+		if subCompiler.err != nil {
+			compiler.err = subCompiler.err
+			return tpl
+		}
+		tpl.commands = subPage.Commands
+		tpl.ready = true
+		return tpl
+	}
+	reflectCol := pattern.ReflectMethod == "Column" || pattern.ReflectMethod == "RowAndColumn"
+	reflectRow := pattern.ReflectMethod == "Row" || pattern.ReflectMethod == "RowAndColumn"
+	for ix := startX; ix <= endX; ix++ {
+		if r.pageContext != nil {
+			if err := r.pageContext.Err(); err != nil {
+				r.renderError = err
+				return true
+			}
+		}
+		flipX := reflectCol && ix%2 != 0
+		for iy := startY; iy <= endY; iy++ {
+			flipY := reflectRow && iy%2 != 0
+			ox, oy := float64(ix)*xStep, float64(iy)*yStep
+			dx := patternCTM.a*ox + patternCTM.c*oy
+			dy := patternCTM.b*ox + patternCTM.d*oy
+			tpl := compileCell(flipX, flipY)
+			if r.renderError != nil || compiler.err != nil {
+				return true
+			}
+			tileBounds := canvas.Rect{X0: tpl.bounds.X0 + dx, Y0: tpl.bounds.Y0 - dy, X1: tpl.bounds.X1 + dx, Y1: tpl.bounds.Y1 - dy}
+			if !clipBounds.Overlaps(tileBounds) {
+				continue
+			}
+			if clipIsRect && clipRect.Contains(tileBounds) {
+				for i := range tpl.commands {
+					cmd := tpl.commands[i]
+					cmd.Transform[4] += dx
+					cmd.Transform[5] += dy
+					if len(cmd.Clip) > 0 {
+						translated := make([]RasterSegment, len(cmd.Clip))
+						for j, seg := range cmd.Clip {
+							seg.End.X += dx
+							seg.End.Y += dy
+							seg.Control1.X += dx
+							seg.Control1.Y += dy
+							seg.Control2.X += dx
+							seg.Control2.Y += dy
+							translated[j] = seg
+						}
+						cmd.Clip = translated
+					}
+					compiler.page.Commands = append(compiler.page.Commands, cmd)
+				}
+				continue
+			}
+			tileCTM := patternCTM.Multiply(TranslationMatrix(ox, oy))
+			if flipX {
+				tileCTM = tileCTM.Multiply(Matrix{a: -1, d: 1, e: pattern.Width})
+			}
+			if flipY {
+				tileCTM = tileCTM.Multiply(Matrix{a: 1, d: -1, f: pattern.Height})
+			}
+			cellClip := canvas.Rectangle(pattern.Width, pattern.Height).Transform(canvas.Matrix{{tileCTM.a, tileCTM.c, tileCTM.e}, {-tileCTM.b, -tileCTM.d, pageH - tileCTM.f}})
+			tileClip := r.intersectCachedClipPath(clip, cellClip)
+			if tileClip != nil && tileClip.Empty() {
+				continue
+			}
+			r.patternPage = &tileCTM
+			for obj := range pattern.CellContent.objects() {
+				if !grouped {
+					obj = mergeGraphicObjectAlpha(obj, pattern.Alpha)
+				}
+				r.renderObject(ctx, &obj, pageH, nil, &tileCTM, true, tileClip)
+				if r.renderError != nil {
+					return true
+				}
+			}
+		}
+	}
+	return true
+}
+
+// patternContentUsesPagePattern 检测底纹单元内部是否嵌套引用了页面相对底纹
+// 入参: content 底纹单元内容
+// 返回: bool 是否引用页面相对底纹
+func (r *Renderer) patternContentUsesPagePattern(content PatternContent) bool {
+	var seen map[*CompositeGraphicUnit]bool
+	var seenPatterns map[*Pattern]bool
+	var hasPagePattern func(*FillColor) bool
+	var checkSeq func(func(func(GraphicObject) bool)) bool
+	hasPagePattern = func(fc *FillColor) bool {
+		if fc == nil || fc.Pattern == nil {
+			return false
+		}
+		if fc.Pattern.RelativeTo == "Page" {
+			return true
+		}
+		if seenPatterns[fc.Pattern] {
+			return false
+		}
+		if seenPatterns == nil {
+			seenPatterns = make(map[*Pattern]bool)
+		}
+		seenPatterns[fc.Pattern] = true
+		defer delete(seenPatterns, fc.Pattern)
+		return checkSeq(fc.Pattern.CellContent.objects())
+	}
+	checkDrawParam := func(id string) bool {
+		if id == "" {
+			return false
+		}
+		dp := r.drawParamDefaults(id, nil)
+		if dp == nil {
+			return false
+		}
+		return hasPagePattern(dp.FillColor) || hasPagePattern((*FillColor)(dp.StrokeColor))
+	}
+	checkSeq = func(seq func(func(GraphicObject) bool)) bool {
+		for member := range seq {
+			switch member.Type {
+			case "PathObject":
+				if hasPagePattern(member.PathObject.FillColor) || hasPagePattern((*FillColor)(member.PathObject.StrokeColor)) || checkDrawParam(member.PathObject.DrawParam) {
+					return true
+				}
+			case "TextObject":
+				if hasPagePattern(member.TextObject.FillColor) || hasPagePattern((*FillColor)(member.TextObject.StrokeColor)) || checkDrawParam(member.TextObject.DrawParam) {
+					return true
+				}
+			case "ImageObject":
+				if member.ImageObject.Border != nil && hasPagePattern((*FillColor)(member.ImageObject.Border.BorderColor)) {
+					return true
+				}
+			case "CompositeObject":
+				if member.CompositeObject.ResourceID != "" {
+					if child := r.compositeDefinition(member.CompositeObject.ResourceID); child != nil && !seen[child] {
+						if seen == nil {
+							seen = make(map[*CompositeGraphicUnit]bool)
+						}
+						seen[child] = true
+						found := checkSeq(child.objects())
+						delete(seen, child)
+						if found {
+							return true
+						}
+					}
+				}
+			}
+		}
+		return false
+	}
+	return checkSeq(content.objects())
 }
 
 // buildPath 解析路径并返回Canvas Path

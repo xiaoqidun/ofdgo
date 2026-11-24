@@ -27,8 +27,11 @@ import (
 )
 
 func main() {
-	paths, dataDir := commandLine()
-	if err := webview.Run(context.Background(), paths, dataDir); err != nil {
+	paths, dataDir, err := commandLine()
+	if err == nil {
+		err = webview.Run(context.Background(), paths, dataDir)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		message, _ := syscall.UTF16PtrFromString(err.Error())
 		title, _ := syscall.UTF16PtrFromString("OFDGo")

@@ -569,7 +569,7 @@ func (e *Editor) validateStructureReferencesContext(ctx context.Context, root *S
 		}
 		defer r.Close()
 	}
-	doc, err := r.DocContext(ctx)
+	doc, err := r.docContext(ctx)
 	if err != nil {
 		return nil, err
 	}

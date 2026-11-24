@@ -50,6 +50,9 @@ var ErrOFDEntryProtected = fmt.Errorf("%w: OFD.xml protected", ErrSignatureDepen
 type SignatureWriteMode uint8
 
 // SignatureWriteOptions 最终包签署选项，不修改Editor或调用方的原件
+// Signer用于执行底层签名；SM2/SM3签署时库直接传入待签原文与gmsm/sm2的SM2SignerOption(true, nil)，
+// 要求SM2签署器支持该选项并在内部以默认用户标识计算Z_A及SM3(Z_A||M)摘要（如ParseSignatureIdentity返回的密钥）；
+// RSA与ECDSA签署时库先预计算SHA-256/384/512摘要，再将摘要与对应crypto.Hash传给Signer.Sign
 // SM2数字签名使用GB/T35275-2017 Detached SignedData，RSA/ECDSA使用RFC5652 Detached CMS SignedData
 // 数字签名内嵌签署证书及中间证书链，验签无需额外提供签署证书
 // Seal仅接受已有合法SES v4电子印章，使用SM2/SM3，不声明GM/T0031-2025兼容
@@ -235,24 +238,9 @@ func signatureWriteOutput(ctx context.Context, r *Reader, writer io.Writer, opti
 	}
 	baseZip := r.zip
 	encSource := r.encryptedSource()
-	var overlay map[string][]byte
-	hasSignatures, err := r.hasOutputSignatures(ctx)
-	if err != nil {
-		return 0, err
-	}
-	if options.Compression.Mode != CompressionUnchanged && !hasSignatures {
-		parts, err := signatureWritePartsContext(ctx, r)
-		if err != nil {
-			return 0, err
-		}
-		baseZip = nil
-		encSource = nil
-		overlay = parts
-	} else {
-		overlay = make(map[string][]byte, len(r.files)+8)
-		for name, data := range r.files {
-			overlay[name] = bytes.Clone(data)
-		}
+	overlay := make(map[string][]byte, len(r.files)+8)
+	for name, data := range r.files {
+		overlay[name] = bytes.Clone(data)
 	}
 	if encryption != nil {
 		defer func() {
@@ -264,7 +252,8 @@ func signatureWriteOutput(ctx context.Context, r *Reader, writer io.Writer, opti
 	if err := options.progress.report("sign", 0, 1); err != nil {
 		return 0, err
 	}
-	if err := signatureWriteOverlayPackage(ctx, baseZip, encSource, overlay, r.resources, options, r.DocumentIndex(), r.selectedVersion); err != nil {
+	removed := make(map[string]bool)
+	if err := signatureWriteOverlayPackage(ctx, &baseZip, &encSource, overlay, removed, r.resources, options, r.DocumentIndex(), r.selectedVersion); err != nil {
 		return 0, err
 	}
 	if err := options.progress.report("sign", 1, 1); err != nil {
@@ -276,6 +265,9 @@ func signatureWriteOutput(ctx context.Context, r *Reader, writer io.Writer, opti
 			return 0, err
 		}
 		var staged editorSnapshotBuffer
+		if r.resources != nil && r.resources.options.SnapshotBytes > 0 {
+			staged.spillLimit = r.resources.options.SnapshotBytes
+		}
 		defer func() { _ = staged.Close() }()
 		if _, err := encryptPackageToWriter(ctx, &staged, encReader, *encryption, options.progress); err != nil {
 			return 0, err
@@ -290,35 +282,16 @@ func signatureWriteOutput(ctx context.Context, r *Reader, writer io.Writer, opti
 	}
 	var count int64
 	output := convertWriter{ctx: ctx, writer: writer, count: &count}
-	err = signatureWriteZIPOverlayTo(ctx, output, baseZip, encSource, overlay, options.Compression)
+	err := signatureWriteZIPOverlayTo(ctx, output, baseZip, encSource, overlay, removed, options.Compression)
 	return count, err
 }
 
-// signatureWritePartsContext 逐条读取可取消的独立包快照
-// 入参: ctx 取消上下文, r 阅读器
-// 返回: map[string][]byte 包文件, error 读取或取消错误
-func signatureWritePartsContext(ctx context.Context, r *Reader) (map[string][]byte, error) {
-	if r == nil {
-		return nil, fmt.Errorf("nil signature reader")
-	}
-	if err := r.indexPackageContext(ctx); err != nil {
-		return nil, err
-	}
-	parts := make(map[string][]byte, len(r.fileNames))
-	for name := range r.fileNames {
-		data, err := r.readFileViewContext(ctx, name)
-		if err != nil {
-			return nil, err
-		}
-		parts[name] = bytes.Clone(data)
-	}
-	return parts, ctx.Err()
-}
-
 // signatureWriteOverlayPackage 基于只读底包与增量覆盖层流式计算摘要、生成签名并完成回验
-// 入参: ctx 取消上下文, baseZip 源只读ZIP归档, encSource 加密按需解密源, overlay 修改与新增文件覆盖层, resources 资源选项, options 签署选项, index 文档索引, selectedVersion 显式版本选择
-// 返回: error 签署或取消错误
-func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encSource *encryptedPackageSource, overlay map[string][]byte, resources *Resources, options SignatureWriteOptions, index int, selectedVersion *string) error {
+// 入参: ctx 取消上下文, baseZipPtr 只读底包指针, encSourcePtr 加密只读源指针, overlay 增量覆盖层, removed 已删除条目集合, resources 资源配置, options 签名写入选项, index 文档索引, selectedVersion 选中版本标识
+// 返回: error 签名或回验错误
+func signatureWriteOverlayPackage(ctx context.Context, baseZipPtr **zip.Reader, encSourcePtr **encryptedPackageSource, overlay map[string][]byte, removed map[string]bool, resources *Resources, options SignatureWriteOptions, index int, selectedVersion *string) error {
+	baseZip := *baseZipPtr
+	encSource := *encSourcePtr
 	if err := options.Compression.Validate(); err != nil {
 		return err
 	}
@@ -332,7 +305,7 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 	if err := r.initRootContext(ctx); err != nil {
 		return err
 	}
-	doc, err := r.DocContext(ctx)
+	doc, err := r.docContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -364,44 +337,107 @@ func signatureWriteOverlayPackage(ctx context.Context, baseZip *zip.Reader, encS
 	if err != nil {
 		return err
 	}
-	if options.Compression.Mode != CompressionUnchanged && baseZip == nil && encSource == nil && r.versionInfo == nil && doc.Signatures == "" && len(protected) == 0 {
-		images, sizes, err := r.compressionImagePlan(ctx, options.Compression)
-		if err != nil {
-			return err
+	if options.Compression.Mode != CompressionUnchanged {
+		compressProtected := maps.Clone(protected)
+		if compressProtected == nil {
+			compressProtected = make(map[string]bool)
 		}
-		optimizer := &Editor{backends: defaultRenderBackends(), runtimeResources: resources, source: &editorSource{reader: r}, output: &outputOptimization{ctx: ctx, options: options.Compression, sizes: sizes, images: images}}
-		defer optimizer.output.release()
-		optimizer.OnWriteProgress = func(stage string, completed, total int) error {
-			return options.progress.report(stage, completed, total)
-		}
-		optParts := make(map[string][]byte)
-		removed, err := optimizer.compactResourceReferences(optParts, r, editorProgress(optimizer.OnWriteProgress), nil, nil)
-		if err != nil {
-			return err
-		}
-		if removed == nil {
-			removed = make(map[string]bool)
-		}
-		if err := optimizer.compressResourceReferences(optParts, r, removed, nil); err != nil {
-			return err
-		}
-		if err := optimizer.compactPackageFonts(ctx, optParts, removed, nil); err != nil {
-			return err
-		}
-		maps.Copy(overlay, optParts)
-		for name := range overlay {
-			if removed[cleanPackagePath(name)] {
-				delete(overlay, name)
+		for _, body := range r.ofd.DocBody {
+			if body.Signatures != "" {
+				if p := cleanPackagePath(resolveResourcePath("OFD.xml", "", body.Signatures)); validPackagePath(p) {
+					compressProtected[p] = true
+				}
 			}
 		}
-		clear(digestCache)
-		r = &Reader{files: overlay, documentIndex: index, selectedVersion: selectedVersion, resources: resources}
-		if err := r.initRootContext(ctx); err != nil {
-			return err
+		if options.Mode == SignatureAppend && doc.Signatures != "" {
+			if currentRefs, refErr := r.signatureReferenceFiles(ctx, -1); refErr == nil {
+				maps.Copy(compressProtected, currentRefs)
+			} else {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				compressProtected = nil
+			}
 		}
-		doc, err = r.DocContext(ctx)
-		if err != nil {
-			return err
+		if compressProtected != nil && r.versionInfo != nil {
+			shared, sharedErr := r.versionSharedFiles(ctx)
+			if sharedErr != nil {
+				return sharedErr
+			}
+			maps.Copy(compressProtected, shared)
+			if verLoc := cleanPackagePath(r.versionInfo.Location); validPackagePath(verLoc) {
+				compressProtected[verLoc] = true
+			}
+		}
+		if compressProtected != nil {
+			images, sizes, err := r.compressionImagePlanProtected(ctx, options.Compression, nil, compressProtected)
+			if err != nil {
+				return err
+			}
+			optimizer := &Editor{backends: defaultRenderBackends(), runtimeResources: resources, source: &editorSource{reader: r}, output: &outputOptimization{ctx: ctx, options: options.Compression, sizes: sizes, images: images, protectedFiles: compressProtected, protectionReady: true}}
+			defer optimizer.output.release()
+			optimizer.OnWriteProgress = func(stage string, completed, total int) error {
+				return options.progress.report(stage, completed, total)
+			}
+			optParts := make(map[string][]byte)
+			optRemoved, err := optimizer.compactResourceReferences(optParts, r, editorProgress(optimizer.OnWriteProgress), nil, nil)
+			if err != nil {
+				return err
+			}
+			if optRemoved == nil {
+				optRemoved = make(map[string]bool)
+			}
+			if err := optimizer.compressResourceReferences(optParts, r, optRemoved, nil); err != nil {
+				return err
+			}
+			if err := optimizer.compactPackageFonts(ctx, optParts, optRemoved, nil); err != nil {
+				return err
+			}
+			for name := range optParts {
+				if compressProtected[cleanPackagePath(name)] {
+					delete(optParts, name)
+				}
+			}
+			for name := range optRemoved {
+				if compressProtected[cleanPackagePath(name)] {
+					delete(optRemoved, name)
+				}
+			}
+			if len(optParts) != 0 || len(optRemoved) != 0 {
+				for name, data := range optParts {
+					clean := cleanPackagePath(name)
+					overlay[clean] = data
+					deleteSignatureDigestCachePath(digestCache, clean)
+				}
+				for name := range optRemoved {
+					clean := cleanPackagePath(name)
+					removed[clean] = true
+					delete(overlay, clean)
+					deleteSignatureDigestCachePath(digestCache, clean)
+				}
+				if len(removed) != 0 {
+					if baseZip != nil {
+						tmp := &Reader{zip: baseZip}
+						pruneReaderZip(tmp, func(file *zip.File) bool {
+							return !removed[cleanPackagePath(file.Name)]
+						})
+						baseZip = tmp.zip
+						*baseZipPtr = baseZip
+					}
+					if encSource != nil {
+						encSource = encSource.omit(removed)
+						*encSourcePtr = encSource
+					}
+				}
+				r = &Reader{zip: baseZip, encrypted: encSource, files: overlay, documentIndex: index, selectedVersion: selectedVersion, resources: resources}
+				if err := r.initRootContext(ctx); err != nil {
+					return err
+				}
+				doc, err = r.docContext(ctx)
+				if err != nil {
+					return err
+				}
+			}
 		}
 	}
 	stamps, err := signatureWriteStamps(r, options.Stamps)
@@ -888,12 +924,12 @@ func signatureTargetFiles(ctx context.Context, scoped *Reader, index int, listPa
 	}
 	if scoped.versionInfo != nil {
 		verLoc := cleanPackagePath(scoped.versionInfo.Location)
-		if lock && validPackagePath(verLoc) {
+		if validPackagePath(verLoc) {
 			allowed[verLoc] = true
 		}
 		for _, vf := range scoped.versionInfo.Files {
 			clean := cleanPackagePath(vf.Location)
-			if validPackagePath(clean) && (lock || clean != verLoc) {
+			if validPackagePath(clean) {
 				allowed[clean] = true
 			}
 		}
@@ -955,12 +991,8 @@ func signatureTargetFiles(ctx context.Context, scoped *Reader, index int, listPa
 	}
 	if scoped.versionInfo != nil {
 		verLoc := cleanPackagePath(scoped.versionInfo.Location)
-		if lock {
-			if validPackagePath(verLoc) {
-				allowed[verLoc] = true
-			}
-		} else {
-			delete(allowed, verLoc)
+		if validPackagePath(verLoc) {
+			allowed[verLoc] = true
 		}
 	}
 	names := make([]string, 0, len(allowed))
@@ -1289,9 +1321,9 @@ func signatureWriteAvailableInView(view *Reader, overlay map[string][]byte, name
 }
 
 // signatureWriteZIPOverlayTo 写出已回验包内容，对未修改ZIP源条目采用OpenRaw与CreateRaw原样直通
-// 入参: ctx 取消上下文, writer 输出目标, baseZip 源ZIP归档, encSource 加密按需解密源, overlay 覆盖与新增文件, compression 压缩配置
-// 返回: error 输出或取消错误
-func signatureWriteZIPOverlayTo(ctx context.Context, writer io.Writer, baseZip *zip.Reader, encSource *encryptedPackageSource, overlay map[string][]byte, compression CompressionOptions) error {
+// 入参: ctx 取消上下文, writer 目标写入器, baseZip 只读底包, encSource 加密只读源, overlay 增量覆盖层, removed 已删除条目集合, compression 压缩选项
+// 返回: error 写出或取消错误
+func signatureWriteZIPOverlayTo(ctx context.Context, writer io.Writer, baseZip *zip.Reader, encSource *encryptedPackageSource, overlay map[string][]byte, removed map[string]bool, compression CompressionOptions) error {
 	all := make(map[string]*zip.File)
 	namesSet := make(map[string]bool, len(overlay))
 	if baseZip != nil {
@@ -1300,16 +1332,24 @@ func signatureWriteZIPOverlayTo(ctx context.Context, writer io.Writer, baseZip *
 				continue
 			}
 			clean := cleanPackagePath(zf.Name)
+			if removed[clean] {
+				continue
+			}
 			all[clean] = zf
 			namesSet[clean] = true
 		}
 	} else if encSource != nil {
 		for _, name := range encSource.names() {
-			namesSet[name] = true
+			if !removed[name] {
+				namesSet[name] = true
+			}
 		}
 	}
 	for name := range overlay {
-		namesSet[cleanPackagePath(name)] = true
+		clean := cleanPackagePath(name)
+		if !removed[clean] {
+			namesSet[clean] = true
+		}
 	}
 	names := slices.Sorted(maps.Keys(namesSet))
 	w := zip.NewWriter(writer)
@@ -1629,7 +1669,10 @@ func (e *Editor) SignToContext(ctx context.Context, writer io.Writer, options Si
 		return 0, err
 	}
 	defer snapshot.output.release()
-	var plain editorSnapshotBuffer
+	plain := editorSnapshotBuffer{encryptSpill: e.encryption != nil || options.Encryption != nil}
+	if e.runtimeResources != nil && e.runtimeResources.options.SnapshotBytes > 0 {
+		plain.spillLimit = e.runtimeResources.options.SnapshotBytes
+	}
 	defer func() { _ = plain.Close() }()
 	if _, err := snapshot.writePlaintext(&plain); err != nil {
 		return 0, err
@@ -1697,7 +1740,7 @@ func (e *Editor) removeSignatures(ctx context.Context, id string) error {
 		return err
 	}
 	defer reader.Close()
-	doc, err := reader.DocContext(ctx)
+	doc, err := reader.docContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -1716,6 +1759,17 @@ func (e *Editor) removeSignatures(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	var scope *versionSignatureScope
+	if reader.versionInfo != nil {
+		var sigList Signatures
+		if err := xml.Unmarshal(data, &sigList); err != nil {
+			return err
+		}
+		scope, err = reader.buildVersionSignatureScope(ctx, name, sigList)
+		if err != nil {
+			return err
+		}
+	}
 	removed := make(map[string]bool)
 	candidates := make(map[string]bool)
 	var patches []editorXMLPatch
@@ -1723,6 +1777,13 @@ func (e *Editor) removeSignatures(ctx context.Context, id string) error {
 	for _, node := range root.children {
 		if !node.matchesOFD("Signature") {
 			continue
+		}
+		if scope != nil {
+			sigRef := Signature{ID: node.attr("ID"), Type: SignType(node.attr("Type")), BaseLoc: node.attr("BaseLoc")}
+			if !reader.versionSignatureMatches(ctx, scope, sigRef) {
+				remaining++
+				continue
+			}
 		}
 		if id != "" && node.attr("ID") != id {
 			remaining++
@@ -1742,6 +1803,9 @@ func (e *Editor) removeSignatures(ctx context.Context, id string) error {
 	}
 	if id != "" && !removed[id] {
 		return fmt.Errorf("signature not found: %s", id)
+	}
+	if len(removed) == 0 {
+		return nil
 	}
 	listShared := false
 	if reader.versionInfo != nil {
@@ -1783,6 +1847,41 @@ func (e *Editor) removeSignatures(ctx context.Context, id string) error {
 		shared, err := reader.versionSharedFiles(ctx)
 		if err != nil {
 			return err
+		}
+		verLoc := cleanPackagePath(reader.versionInfo.Location)
+		if shared[verLoc] && !protected[verLoc] {
+			otherRef := false
+			for docIdx := range reader.DocumentCount() {
+				if !reader.ofd.DocBody[docIdx].versioned {
+					continue
+				}
+				otherFiles, otherErr := reader.documentNonCurrentVersionFiles(ctx, docIdx)
+				if otherErr != nil {
+					return otherErr
+				}
+				if otherFiles[verLoc] {
+					otherRef = true
+					break
+				}
+			}
+			if !otherRef {
+				var otherDocs []int
+				for docIdx := range reader.DocumentCount() {
+					if docIdx != reader.documentIndex {
+						otherDocs = append(otherDocs, docIdx)
+					}
+				}
+				if len(otherDocs) != 0 {
+					otherFiles, otherErr := reader.documentFiles(ctx, otherDocs...)
+					if otherErr != nil {
+						return otherErr
+					}
+					otherRef = otherFiles[verLoc]
+				}
+			}
+			if !otherRef {
+				delete(shared, verLoc)
+			}
 		}
 		if err := reader.versionManifest(ctx, parts, nil, used, shared, removedFiles); err != nil {
 			return err

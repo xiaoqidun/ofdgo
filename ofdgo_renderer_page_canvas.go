@@ -303,7 +303,7 @@ func (v *canvasPageVisitor) renderTemplatePage(template *PageContent, offsetX, o
 // renderCompositeForm 在PDF后端下将复合图元引用直接输出为Form对象
 // 入参: ref 复合图元定义, object 复合图元实例, matrix 变换矩阵, clip 页面裁剪, references 当前资源引用链
 // 返回: bool 是否已由Form路径完成输出, error 输出错误
-func (v *canvasPageVisitor) renderCompositeForm(ref *CompositeGraphicUnit, object CompositeGraphicUnit, matrix Matrix, clip *GeometryPath, references map[*CompositeGraphicUnit]bool) (bool, error) {
+func (v *canvasPageVisitor) renderCompositeForm(ref *CompositeGraphicUnit, object CompositeObject, matrix Matrix, clip *GeometryPath, references map[*CompositeGraphicUnit]bool) (bool, error) {
 	if v.ctx.View() != canvas.Identity || v.ctx.CoordSystemView() != canvas.Identity {
 		return false, nil
 	}
@@ -311,10 +311,12 @@ func (v *canvasPageVisitor) renderCompositeForm(ref *CompositeGraphicUnit, objec
 	if !isPDF || pdfOut.imageError != nil {
 		return false, nil
 	}
-	effAlpha := mergeAlpha(ref.Alpha, object.Alpha)
+	if matrix != IdentityMatrix() && v.renderer.compositeUsesPagePattern(ref, references) {
+		return false, nil
+	}
 	alphaByte := uint8(255)
-	if effAlpha != nil {
-		alphaByte = uint8(clampColor(*effAlpha))
+	if object.Alpha != nil {
+		alphaByte = uint8(clampColor(*object.Alpha))
 	}
 	needGroup := alphaByte < 255
 	return true, v.renderer.drawPDFCompositeForm(pdfOut, ref, matrix, clip, v.clip, v.height, alphaByte, needGroup, references)
@@ -421,10 +423,10 @@ func (r *Renderer) renderCanvasPageClipped(ctx *canvas.Context, page *PageConten
 	return nil
 }
 
-// renderCompositeGraphicUnit 通过公共遍历绘制复合图元
-// 入参: ctx 画布上下文, cgu 复合图元, pageH 页面高度, defaults 默认样式, parentCTM 父变换, boundaryInCTM 边界是否参与变换, parentClip 父裁剪
-func (r *Renderer) renderCompositeGraphicUnit(ctx *canvas.Context, cgu CompositeGraphicUnit, pageH float64, defaults *DrawParam, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
-	if err := r.walkComposite(cgu, canvasRenderState(pageH, defaults, parentCTM, boundaryInCTM, parentClip), &canvasPageVisitor{renderer: r, ctx: ctx, height: pageH}, nil); err != nil {
+// renderCompositeObject 通过公共遍历绘制复合图元对象
+// 入参: ctx 画布上下文, obj 复合图元对象, pageH 页面高度, defaults 默认样式, parentCTM 父变换, boundaryInCTM 边界是否参与变换, parentClip 父裁剪
+func (r *Renderer) renderCompositeObject(ctx *canvas.Context, obj CompositeObject, pageH float64, defaults *DrawParam, parentCTM *Matrix, boundaryInCTM bool, parentClip *canvas.Path) {
+	if err := r.walkComposite(obj, canvasRenderState(pageH, defaults, parentCTM, boundaryInCTM, parentClip), &canvasPageVisitor{renderer: r, ctx: ctx, height: pageH}, nil); err != nil {
 		r.renderError = err
 	}
 }

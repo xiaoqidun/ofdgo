@@ -143,7 +143,7 @@ func (e *Editor) GroupObjects(page int, ids []string) (id string, err error) {
 			return "", err
 		}
 		content = append(content, bytes.TrimPrefix(data, []byte(xml.Header))...)
-		maps.Copy(states, object.CompositeGraphicUnit.states)
+		maps.Copy(states, object.CompositeObject.states)
 		state := object.state
 		if object.Type == "TextObject" && object.TextObject.layout != nil {
 			state.layout = object.TextObject.layout
@@ -205,7 +205,7 @@ func (e *Editor) GroupObjects(page int, ids []string) (id string, err error) {
 		parent = &editorXML{name: xml.Name{Local: "Layer"}, attrs: []xml.Attr{{Name: xml.Name{Local: "ID"}, Value: layer.ID}}, parent: &editorXML{name: xml.Name{Local: "Content"}}}
 	}
 	group.node.parent = parent
-	group.object.CompositeGraphicUnit.states = states
+	group.object.CompositeObject.states = states
 	origin := &editorObjectOrigin{page: source, data: data, node: group.node, object: group.object}
 	e.replaceGroup(page, indexes, []GraphicObject{group.object}, map[string]*editorObjectOrigin{id: origin})
 	return id, nil
@@ -239,7 +239,7 @@ func (e *Editor) UngroupObject(page int, id string) ([]string, error) {
 				copy := *object.origin
 				copy.node.parent = origin.node.parent
 				copy.object.TextObject.layout = object.TextObject.layout
-				copy.object.CompositeGraphicUnit.states = object.CompositeGraphicUnit.states
+				copy.object.CompositeObject.states = object.CompositeObject.states
 				object.origin = nil
 				objID := editorObjectID(*object)
 				origins[objID] = &copy

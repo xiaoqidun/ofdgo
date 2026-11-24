@@ -302,7 +302,7 @@ func hasUsableCmap(data []byte) bool {
 		platformID := binary.BigEndian.Uint16(data[pos : pos+2])
 		encodingID := binary.BigEndian.Uint16(data[pos+2 : pos+4])
 		offset := binary.BigEndian.Uint32(data[pos+4 : pos+8])
-		if uint32(len(data)) < offset+2 {
+		if uint64(offset)+2 > uint64(len(data)) {
 			return false
 		}
 		format := binary.BigEndian.Uint16(data[offset : offset+2])

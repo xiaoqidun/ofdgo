@@ -18,6 +18,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -58,6 +59,13 @@ type Extension struct {
 	Property   []Property      `xml:"Property"`
 	ExtendData []string        `xml:"ExtendData"`
 	Data       []ExtensionData `xml:"Data"`
+	order      []extensionItem
+}
+
+// extensionItem 记录扩展节点内子元素的原始顺序
+type extensionItem struct {
+	kind  string
+	index int
 }
 
 // Property 扩展属性
@@ -69,8 +77,9 @@ type Property struct {
 
 // ExtensionData 扩展数据
 type ExtensionData struct {
-	Attr    []xml.Attr `xml:",any,attr"`
-	Content string     `xml:",innerxml"`
+	Attr       []xml.Attr `xml:",any,attr"`
+	Content    string     `xml:",innerxml"`
+	namespaces []xml.Attr
 }
 
 // Attachments 附件集合
@@ -193,17 +202,15 @@ type VPreferences struct {
 
 // Permissions 权限声明
 type Permissions struct {
-	Edit          bool         `xml:"Edit" json:"edit"`
-	Annot         bool         `xml:"Annot" json:"annot"`
-	Export        bool         `xml:"Export" json:"export"`
-	Signature     bool         `xml:"Signature" json:"signature"`
-	Watermark     bool         `xml:"Watermark" json:"watermark"`
-	PrintScreen   bool         `xml:"PrintScreen" json:"printScreen"`
-	Print         bool         `xml:"-" json:"print"`
-	Copies        int          `xml:"-" json:"copies"`
-	Copy          bool         `xml:"CopyText" json:"copy"`
-	ContentRegist bool         `xml:"ContentRegist" json:"contentRegist"`
-	ValidPeriod   *ValidPeriod `xml:"ValidPeriod" json:"validPeriod,omitempty"`
+	Edit        bool         `xml:"Edit" json:"edit"`
+	Annot       bool         `xml:"Annot" json:"annot"`
+	Export      bool         `xml:"Export" json:"export"`
+	Signature   bool         `xml:"Signature" json:"signature"`
+	Watermark   bool         `xml:"Watermark" json:"watermark"`
+	PrintScreen bool         `xml:"PrintScreen" json:"printScreen"`
+	Print       bool         `xml:"-" json:"print"`
+	Copies      int          `xml:"-" json:"copies"`
+	ValidPeriod *ValidPeriod `xml:"ValidPeriod" json:"validPeriod,omitempty"`
 }
 
 // ValidPeriod 文档访问有效期
@@ -222,16 +229,14 @@ type print struct {
 // 返回: Permissions 默认文档权限
 func DefaultPermissions() Permissions {
 	return Permissions{
-		Edit:          true,
-		Annot:         true,
-		Export:        true,
-		Signature:     true,
-		Watermark:     true,
-		PrintScreen:   true,
-		Print:         true,
-		Copies:        -1,
-		Copy:          true,
-		ContentRegist: true,
+		Edit:        true,
+		Annot:       true,
+		Export:      true,
+		Signature:   true,
+		Watermark:   true,
+		PrintScreen: true,
+		Print:       true,
+		Copies:      -1,
 	}
 }
 
@@ -453,7 +458,34 @@ func (doc *Document) OutlineInfos() []OutlineInfo {
 	return outlineInfos(doc.Outlines.OutlineElem, bookmarks, pages)
 }
 
-// UnmarshalXML 读取扩展信息索引或文档中的索引路径
+// collectXMLNamespaces 合并父级与当前元素的命名空间声明，保持首次声明顺序并按前缀去重
+// 入参: attrs 当前元素属性, inherited 继承的命名空间声明
+// 返回: []xml.Attr 合并后的命名空间声明
+func collectXMLNamespaces(attrs, inherited []xml.Attr) []xml.Attr {
+	result := slices.Clone(inherited)
+	put := func(key, uri string) {
+		for i := range result {
+			if result[i].Name.Local == key {
+				result[i].Value = uri
+				return
+			}
+		}
+		result = append(result, xml.Attr{Name: xml.Name{Local: key}, Value: uri})
+	}
+	for _, attr := range attrs {
+		switch {
+		case attr.Name.Space == "" && attr.Name.Local == "xmlns":
+			put("xmlns", attr.Value)
+		case attr.Name.Space == "xmlns" && attr.Name.Local != "":
+			put("xmlns:"+attr.Name.Local, attr.Value)
+		case attr.Name.Space == "" && strings.HasPrefix(attr.Name.Local, "xmlns:"):
+			put(attr.Name.Local, attr.Value)
+		}
+	}
+	return result
+}
+
+// UnmarshalXML 读取扩展信息索引或文档中的索引路径并向下传递命名空间声明
 // 入参: d XML解码器, start 起始节点
 // 返回: error 解析错误
 func (extensions *Extensions) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
@@ -461,17 +493,8 @@ func (extensions *Extensions) UnmarshalXML(d *xml.Decoder, start xml.StartElemen
 		return fmt.Errorf("expected Extensions root, got %s", start.Name.Local)
 	}
 	*extensions = Extensions{XMLName: start.Name}
-	return decodeDocumentIndex(d, start, "Extension", &extensions.Path, &extensions.Extension)
-}
-
-// UnmarshalXML 读取扩展项，Data中的任意属性和XML原文保持不变
-// 入参: d XML解码器, start 起始节点
-// 返回: error 解析错误
-func (extension *Extension) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	*extension = Extension{
-		AppName: attrValue(start, "AppName"), Company: attrValue(start, "Company"),
-		AppVersion: attrValue(start, "AppVersion"), Date: attrValue(start, "Date"), RefID: attrValue(start, "RefId"),
-	}
+	inherited := collectXMLNamespaces(start.Attr, nil)
+	var text strings.Builder
 	for {
 		token, err := d.Token()
 		if err != nil {
@@ -479,23 +502,78 @@ func (extension *Extension) UnmarshalXML(d *xml.Decoder, start xml.StartElement)
 		}
 		switch node := token.(type) {
 		case xml.StartElement:
-			var target any
+			if node.Name.Local == "Extension" && ofdXMLChild(start.Name, node.Name) {
+				var item Extension
+				if err := item.decodeXML(d, node, inherited); err != nil {
+					return err
+				}
+				extensions.Extension = append(extensions.Extension, item)
+			} else if err := d.Skip(); err != nil {
+				return err
+			}
+		case xml.CharData:
+			text.Write(node)
+		case xml.EndElement:
+			if node.Name == start.Name {
+				extensions.Path = text.String()
+				return nil
+			}
+		}
+	}
+}
+
+// UnmarshalXML 读取扩展项，保留子节点顺序与命名空间声明
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (extension *Extension) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	return extension.decodeXML(d, start, nil)
+}
+
+// decodeXML 解析扩展项并继承外层命名空间声明，保持Property、ExtendData与Data的原始顺序
+// 入参: d XML解码器, start 起始节点, inherited 继承的命名空间声明
+// 返回: error 解析错误
+func (extension *Extension) decodeXML(d *xml.Decoder, start xml.StartElement, inherited []xml.Attr) error {
+	*extension = Extension{
+		AppName: attrValue(start, "AppName"), Company: attrValue(start, "Company"),
+		AppVersion: attrValue(start, "AppVersion"), Date: attrValue(start, "Date"), RefID: attrValue(start, "RefId"),
+	}
+	ns := collectXMLNamespaces(start.Attr, inherited)
+	for {
+		token, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch node := token.(type) {
+		case xml.StartElement:
 			if ofdXMLChild(start.Name, node.Name) {
 				switch node.Name.Local {
 				case "Property":
-					target = &extension.Property
+					var prop Property
+					if err := d.DecodeElement(&prop, &node); err != nil {
+						return err
+					}
+					extension.Property = append(extension.Property, prop)
+					extension.order = append(extension.order, extensionItem{kind: "Property", index: len(extension.Property) - 1})
+					continue
 				case "ExtendData":
-					target = &extension.ExtendData
+					var loc string
+					if err := d.DecodeElement(&loc, &node); err != nil {
+						return err
+					}
+					extension.ExtendData = append(extension.ExtendData, loc)
+					extension.order = append(extension.order, extensionItem{kind: "ExtendData", index: len(extension.ExtendData) - 1})
+					continue
 				case "Data":
-					target = &extension.Data
+					var data ExtensionData
+					if err := data.decodeXML(d, node, ns); err != nil {
+						return err
+					}
+					extension.Data = append(extension.Data, data)
+					extension.order = append(extension.order, extensionItem{kind: "Data", index: len(extension.Data) - 1})
+					continue
 				}
 			}
-			if target == nil {
-				err = d.Skip()
-			} else {
-				err = d.DecodeElement(target, &node)
-			}
-			if err != nil {
+			if err := d.Skip(); err != nil {
 				return err
 			}
 		case xml.EndElement:
@@ -504,6 +582,160 @@ func (extension *Extension) UnmarshalXML(d *xml.Decoder, start xml.StartElement)
 			}
 		}
 	}
+}
+
+// MarshalXML 按原始子节点顺序写出扩展项
+// 入参: e XML编码器, start 起始节点
+// 返回: error 编码错误
+func (extension Extension) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+	if start.Name.Local == "" {
+		start.Name = xml.Name{Local: "Extension"}
+	}
+	start.Attr = nil
+	for _, pair := range [][2]string{
+		{"AppName", extension.AppName},
+		{"Company", extension.Company},
+		{"AppVersion", extension.AppVersion},
+		{"Date", extension.Date},
+		{"RefId", extension.RefID},
+	} {
+		if pair[1] != "" {
+			start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Local: pair[0]}, Value: pair[1]})
+		}
+	}
+	if err := e.EncodeToken(start); err != nil {
+		return err
+	}
+	childName := func(local string) xml.StartElement {
+		return xml.StartElement{Name: xml.Name{Space: start.Name.Space, Local: local}}
+	}
+	usedProp := make([]bool, len(extension.Property))
+	usedExt := make([]bool, len(extension.ExtendData))
+	usedData := make([]bool, len(extension.Data))
+	encodeItem := func(kind string, idx int) error {
+		switch kind {
+		case "Property":
+			if idx < 0 || idx >= len(extension.Property) || usedProp[idx] {
+				return nil
+			}
+			usedProp[idx] = true
+			return e.EncodeElement(extension.Property[idx], childName("Property"))
+		case "ExtendData":
+			if idx < 0 || idx >= len(extension.ExtendData) || usedExt[idx] {
+				return nil
+			}
+			usedExt[idx] = true
+			return e.EncodeElement(extension.ExtendData[idx], childName("ExtendData"))
+		case "Data":
+			if idx < 0 || idx >= len(extension.Data) || usedData[idx] {
+				return nil
+			}
+			usedData[idx] = true
+			return e.EncodeElement(extension.Data[idx], childName("Data"))
+		}
+		return nil
+	}
+	for _, item := range extension.order {
+		if err := encodeItem(item.kind, item.index); err != nil {
+			return err
+		}
+	}
+	for i := range extension.Property {
+		if err := encodeItem("Property", i); err != nil {
+			return err
+		}
+	}
+	for i := range extension.ExtendData {
+		if err := encodeItem("ExtendData", i); err != nil {
+			return err
+		}
+	}
+	for i := range extension.Data {
+		if err := encodeItem("Data", i); err != nil {
+			return err
+		}
+	}
+	return e.EncodeToken(start.End())
+}
+
+// UnmarshalXML 解析扩展数据，保留属性、命名空间声明与原始内部XML
+// 入参: d XML解码器, start 起始节点
+// 返回: error 解析错误
+func (data *ExtensionData) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	return data.decodeXML(d, start, nil)
+}
+
+// decodeXML 解析扩展数据并合并继承自祖先元素的命名空间声明
+// 入参: d XML解码器, start 起始节点, inherited 继承的命名空间声明
+// 返回: error 解析错误
+func (data *ExtensionData) decodeXML(d *xml.Decoder, start xml.StartElement, inherited []xml.Attr) error {
+	var raw struct {
+		Content string `xml:",innerxml"`
+	}
+	if err := d.DecodeElement(&raw, &start); err != nil {
+		return err
+	}
+	*data = ExtensionData{
+		Attr:       slices.Clone(start.Attr),
+		Content:    raw.Content,
+		namespaces: collectXMLNamespaces(start.Attr, inherited),
+	}
+	return nil
+}
+
+// MarshalXML 写出扩展数据，准确还原命名空间声明与属性前缀并保持内部XML顺序
+// 入参: e XML编码器, start 起始节点
+// 返回: error 编码错误
+func (data ExtensionData) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+	if start.Name.Local == "" {
+		start.Name = xml.Name{Local: "Data"}
+	}
+	nsDecls := collectXMLNamespaces(data.Attr, data.namespaces)
+	nsDecls = collectXMLNamespaces(start.Attr, nsDecls)
+	uriPrefix := make(map[string]string, len(nsDecls))
+	usedPrefix := make(map[string]bool, len(nsDecls))
+	var attrs []xml.Attr
+	for _, decl := range nsDecls {
+		if decl.Name.Local == "xmlns" && start.Name.Space != "" && decl.Value == start.Name.Space {
+			continue
+		}
+		if prefix, ok := strings.CutPrefix(decl.Name.Local, "xmlns:"); ok {
+			usedPrefix[prefix] = true
+			if _, exists := uriPrefix[decl.Value]; !exists {
+				uriPrefix[decl.Value] = prefix
+			}
+		}
+		attrs = append(attrs, decl)
+	}
+	nextPrefix := 1
+	for _, attr := range data.Attr {
+		if attr.Name.Space == "xmlns" || attr.Name.Space == "" && (attr.Name.Local == "xmlns" || strings.HasPrefix(attr.Name.Local, "xmlns:")) {
+			continue
+		}
+		if attr.Name.Space == "" {
+			attrs = append(attrs, attr)
+			continue
+		}
+		prefix, ok := uriPrefix[attr.Name.Space]
+		if !ok {
+			for {
+				candidate := "ns" + strconv.Itoa(nextPrefix)
+				nextPrefix++
+				if !usedPrefix[candidate] {
+					prefix = candidate
+					break
+				}
+			}
+			usedPrefix[prefix] = true
+			uriPrefix[attr.Name.Space] = prefix
+			attrs = append(attrs, xml.Attr{Name: xml.Name{Local: "xmlns:" + prefix}, Value: attr.Name.Space})
+		}
+		attrs = append(attrs, xml.Attr{Name: xml.Name{Local: prefix + ":" + attr.Name.Local}, Value: attr.Value})
+	}
+	start.Attr = attrs
+	return e.EncodeElement(struct {
+		Content string `xml:",innerxml"`
+	}{Content: data.Content}, start)
 }
 
 // UnmarshalXML 读取扩展属性名称、类型及文本值，忽略限定命名空间的同名属性
@@ -829,10 +1061,6 @@ func (p *Permissions) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error
 			return decodeOFDTrimmedBool(d, node, &p.Watermark)
 		case "PrintScreen":
 			return decodeOFDTrimmedBool(d, node, &p.PrintScreen)
-		case "CopyText":
-			return decodeOFDTrimmedBool(d, node, &p.Copy)
-		case "ContentRegist":
-			return decodeOFDTrimmedBool(d, node, &p.ContentRegist)
 		case "Print":
 			var pr print
 			node = ofdXMLStart(node)
@@ -916,16 +1144,6 @@ func (p Permissions) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
 			return err
 		}
 		if err := e.EncodeToken(vpElem.End()); err != nil {
-			return err
-		}
-	}
-	if !p.Copy {
-		if err := encodeBool("CopyText", p.Copy); err != nil {
-			return err
-		}
-	}
-	if !p.ContentRegist {
-		if err := encodeBool("ContentRegist", p.ContentRegist); err != nil {
 			return err
 		}
 	}

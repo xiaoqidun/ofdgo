@@ -70,7 +70,7 @@ func layoutWatermark(ctx context.Context, base GraphicObject, bounds, box Box, o
 	if !finite(columns*rows) || columns*rows > 100000 {
 		return Annotation{}, fmt.Errorf("too many watermark tiles")
 	}
-	annotation := Annotation{Type: "Watermark", Creator: options.Creator, Appearance: Appearance{Boundary: editorBoxString(area)}}
+	annotation := Annotation{Type: "Watermark", Creator: options.Creator, Appearance: &Appearance{Boundary: editorBoxString(area)}}
 	annotation.Appearance.Objects = make([]GraphicObject, 0, int(columns*rows))
 	for row := 0; row < int(rows); row++ {
 		if err := ctx.Err(); err != nil {

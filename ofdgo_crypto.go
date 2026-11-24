@@ -74,19 +74,23 @@ type EncryptionRecipient struct {
 // EncryptionOptions 设置GM/T0099加密，口令与证书方案二选一
 // UserName标记口令接收者，不参与口令派生，留空不写入用户名
 // 口令方案应使用足够长的随机口令；标准密钥派生不提供慢速口令哈希
+// Resources可选指定读取与单条目大小上限策略
 type EncryptionOptions struct {
 	Password   []byte
 	UserName   string
 	UserType   string
 	Recipients []EncryptionRecipient
 	Provider   CryptoProvider
+	Resources  *Resources
 }
 
 // EncryptionInfo 不含敏感凭据的文档加密信息
 // PolicyRequired表示无法继承原策略，保存前需显式设置加密方式
+// Methods按从内到外顺序保留全部加密层的方案标识
 type EncryptionInfo struct {
 	Encrypted      bool
 	Method         string
+	Methods        []string
 	Users          []string
 	Layers         int
 	PolicyRequired bool
@@ -468,11 +472,12 @@ func (e *Editor) SetEncryption(options *EncryptionOptions) error {
 	if err := validateEncryptionOptions(*options); err != nil {
 		return err
 	}
-	info := EncryptionInfo{Encrypted: true, Method: "1.1.1", Layers: 1}
+	info := EncryptionInfo{Encrypted: true, Method: "1.1.1", Methods: []string{"1.1.1"}, Layers: 1}
 	if len(options.Password) != 0 {
 		info.Users = []string{options.UserName}
 	} else {
 		info.Method = "1.1.2"
+		info.Methods = []string{"1.1.2"}
 		for _, recipient := range options.Recipients {
 			info.Users = append(info.Users, recipient.UserName)
 		}
@@ -485,21 +490,22 @@ func (e *Editor) SetEncryption(options *EncryptionOptions) error {
 }
 
 // summary 复制不含凭据的加密状态
-// 返回: EncryptionInfo 加密状态
+// 返回: EncryptionInfo 加密信息摘要
 func (s *encryptionState) summary() EncryptionInfo {
 	if s == nil {
 		return EncryptionInfo{}
 	}
 	info := s.info
 	info.PolicyRequired = s.options == nil
+	info.Methods = append([]string(nil), info.Methods...)
 	info.Users = append([]string(nil), info.Users...)
 	return info
 }
 
 // writeEncrypted 在全部准备及加密成功后写出结果，取消不产生输出
 // 输出流自身写入失败时调用方仍需丢弃本次输出
-// 入参: writer 输出流
-// 返回: int64 写入字节数, error 错误信息
+// 入参: writer 目标写入器
+// 返回: int64 写入字节数, error 写入错误
 func (e *Editor) writeEncrypted(writer io.Writer) (int64, error) {
 	if e.encryption.options == nil {
 		return 0, ErrEncryptionPolicyRequired
@@ -507,27 +513,48 @@ func (e *Editor) writeEncrypted(writer io.Writer) (int64, error) {
 	if err := validateEncryptionOptions(*e.encryption.options); err != nil {
 		return 0, err
 	}
-	var plain editorSnapshotBuffer
-	defer func() { _ = plain.Close() }()
-	if _, err := e.writePlaintext(&plain); err != nil {
-		return 0, err
-	}
-	r, err := NewReader(&Input{reader: &plain, size: plain.size})
-	if err != nil {
-		return 0, err
-	}
-	defer r.Close()
 	ctx := context.Background()
 	if e.output != nil && e.output.ctx != nil {
 		ctx = e.output.ctx
 	}
-	var out editorSnapshotBuffer
-	defer func() { _ = out.Close() }()
-	if _, err := encryptPackageToWriter(ctx, &out, r, *e.encryption.options, editorProgress(e.OnWriteProgress)); err != nil {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	res := e.encryption.options.Resources
+	if res == nil {
+		res = e.runtimeResources
+	}
+	limit := int64(editorSnapshotArchiveLimit)
+	if res != nil && res.options.SnapshotBytes > 0 {
+		limit = res.options.SnapshotBytes
+	}
+	plain := editorSnapshotBuffer{spillLimit: limit, encryptSpill: true}
+	defer func() { _ = plain.Close() }()
+	if _, err := e.writePlaintext(&plain); err != nil {
 		return 0, err
 	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	return io.Copy(writer, io.NewSectionReader(&out, 0, out.size))
+	var readerOpts []ReaderOption
+	if res != nil {
+		readerOpts = append(readerOpts, WithResources(res))
+	}
+	r, err := NewReaderContext(ctx, &Input{reader: &plain, size: plain.size}, readerOpts...)
+	if err != nil {
+		return 0, err
+	}
+	defer r.Close()
+	out := editorSnapshotBuffer{spillLimit: limit}
+	defer func() { _ = out.Close() }()
+	if _, err := encryptPackageToWriter(ctx, &out, r, *e.encryption.options, editorProgress(e.OnWriteProgress).withContext(ctx)); err != nil {
+		return 0, err
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	var count int64
+	output := convertWriter{ctx: ctx, writer: writer, count: &count}
+	_, err = io.Copy(output, io.NewSectionReader(&out, 0, out.size))
+	return count, err
 }

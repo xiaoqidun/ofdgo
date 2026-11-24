@@ -301,7 +301,7 @@ func (e *Editor) ImportSelectionContext(ctx context.Context, source *Reader, pag
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	doc, err := source.DocContext(ctx)
+	doc, err := source.docContext(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1287,7 +1287,7 @@ func (m *editorPageImport) signatureID(source, kind, id string) (string, error) 
 	}
 	if m.signatureIDs == nil {
 		var sequence signatureIDSequence
-		doc, err := m.target.Doc()
+		doc, err := m.target.docInternal()
 		if err != nil {
 			return "", err
 		}
@@ -1668,7 +1668,7 @@ func (m *editorPageImport) merge(base *editorSource, refs []Page, annotations, s
 	if err := reader.initRoot(); err != nil {
 		return nil, err
 	}
-	doc, err := reader.DocContext(m.ctx)
+	doc, err := reader.docContext(m.ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1733,7 +1733,7 @@ func (e *Editor) importSelection(ctx context.Context, source *Editor, sourcePage
 		return nil, nil, err
 	}
 	defer reader.Close()
-	doc, err := reader.Doc()
+	doc, err := reader.docInternal()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1841,8 +1841,8 @@ func (e *Editor) importSelection(ctx context.Context, source *Editor, sourcePage
 			object := layer.Objects[0]
 			object.TextObject.layout = objects[i].TextObject.layout
 			object.state = objects[i].state
-			srcStates := source.collectCompositeStates(objects[i].CompositeGraphicUnit)
-			object.CompositeGraphicUnit.states = remapCompositeStates(srcStates, migration.ids)
+			srcStates := source.collectCompositeStates(objects[i].CompositeObject)
+			object.CompositeObject.states = remapCompositeStates(srcStates, migration.ids)
 			imported[i], err = editor.copiedObjectStyle(object, layer.DrawParam)
 			if err != nil {
 				return err
@@ -1880,7 +1880,7 @@ func (e *Editor) importPages(ctx context.Context, source *Reader, indexes []int,
 	if at < 0 || at > len(e.pages) {
 		return nil, fmt.Errorf("page index %d out of range", at)
 	}
-	doc, err := source.DocContext(ctx)
+	doc, err := source.docContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1990,7 +1990,7 @@ func (e *Editor) importPages(ctx context.Context, source *Reader, indexes []int,
 						state.layout = layout
 					}
 					states[id] = state
-					groups[id] = remapCompositeStates(object.CompositeGraphicUnit.states, m.ids)
+					groups[id] = remapCompositeStates(object.CompositeObject.states, m.ids)
 				}
 			}
 			if err := preview.loadSourcePage(i); err != nil {
@@ -2004,7 +2004,7 @@ func (e *Editor) importPages(ctx context.Context, source *Reader, indexes []int,
 					if object.Type == "TextObject" {
 						object.TextObject.layout = object.state.layout
 					}
-					object.CompositeGraphicUnit.states = groups[id]
+					object.CompositeObject.states = groups[id]
 				}
 			}
 		}

@@ -489,7 +489,7 @@ func (e *Editor) editLayerPageMode(page int, appendOnly bool, edit func(*Reader,
 			}
 			defer r.Close()
 		}
-		doc, err := r.DocStructure()
+		doc, err := r.docStructure()
 		if err != nil {
 			return err
 		}
@@ -608,7 +608,7 @@ func (e *Editor) commitLayerTemplatePartsMode(reader *Reader, parts map[string][
 		if err != nil {
 			return err
 		}
-		doc, err := reader.Doc()
+		doc, err := reader.docInternal()
 		if err != nil {
 			return err
 		}
@@ -673,7 +673,7 @@ func (e *Editor) commitLayerTemplatePartsMode(reader *Reader, parts map[string][
 				if old, ok := states[editorObjectID(*object)]; ok {
 					object.state = old.state
 					object.TextObject.layout = old.TextObject.layout
-					object.CompositeGraphicUnit.states = old.CompositeGraphicUnit.states
+					object.CompositeObject.states = old.CompositeObject.states
 				}
 			}
 		}
@@ -867,7 +867,7 @@ func (e *Editor) commitLayerPartsIncremental(ctx context.Context, reader *Reader
 						if old, ok := states[editorObjectID(*object)]; ok {
 							object.state = old.state
 							object.TextObject.layout = old.TextObject.layout
-							object.CompositeGraphicUnit.states = old.CompositeGraphicUnit.states
+							object.CompositeObject.states = old.CompositeObject.states
 						}
 					}
 				}

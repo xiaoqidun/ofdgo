@@ -101,6 +101,7 @@ func NewResources(options ResourceOptions) (*Resources, error) {
 	if err != nil {
 		return nil, err
 	}
+	cacheDisabled := options.CacheBytes < 0
 	if options.CacheBytes == 0 {
 		options.CacheBytes = defaultResourceCacheBytes
 	}
@@ -108,7 +109,11 @@ func NewResources(options ResourceOptions) (*Resources, error) {
 	if options.SnapshotBytes == 0 {
 		options.SnapshotBytes = options.CacheBytes / 2
 	}
-	options.SnapshotBytes = max(0, min(options.SnapshotBytes, options.CacheBytes))
+	if cacheDisabled {
+		options.SnapshotBytes = max(0, options.SnapshotBytes)
+	} else {
+		options.SnapshotBytes = max(0, min(options.SnapshotBytes, options.CacheBytes))
+	}
 	if options.MaxEntryBytes == 0 {
 		options.MaxEntryBytes = defaultMaxEntryBytes
 	}

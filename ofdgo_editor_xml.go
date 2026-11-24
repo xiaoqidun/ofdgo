@@ -138,24 +138,34 @@ func parseEditorXMLContext(ctx context.Context, data []byte) (*editorXML, error)
 	return root, nil
 }
 
-// editorPatchXML 按位置应用互不重叠的替换
-// 入参: data 原文, patches 修改区间
-// 返回: []byte 修改后的XML
+// editorPatchXML 按位置应用互不重叠的替换，自动跳过越界或重叠区间避免切片越界
+// 入参: data 原文, patches 替换区间列表
+// 返回: []byte 替换后的数据
 func editorPatchXML(data []byte, patches []editorXMLPatch) []byte {
-	slices.SortStableFunc(patches, func(a, b editorXMLPatch) int {
+	ordered := slices.Clone(patches)
+	slices.SortStableFunc(ordered, func(a, b editorXMLPatch) int {
 		if a.start != b.start {
 			return a.start - b.start
 		}
 		return a.end - b.end
 	})
+	valid := ordered[:0]
+	position := 0
 	size := len(data)
-	for _, patch := range patches {
+	for _, patch := range ordered {
+		if patch.start < 0 || patch.end < patch.start || patch.end > len(data) || patch.start < position {
+			continue
+		}
+		valid = append(valid, patch)
 		size += len(patch.data) - (patch.end - patch.start)
+		position = patch.end
 	}
 	var result bytes.Buffer
-	result.Grow(size)
-	position := 0
-	for _, patch := range patches {
+	if size > 0 {
+		result.Grow(size)
+	}
+	position = 0
+	for _, patch := range valid {
 		result.Write(data[position:patch.start])
 		result.Write(patch.data)
 		position = patch.end

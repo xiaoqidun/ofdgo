@@ -588,7 +588,7 @@ func (r *Renderer) StructureTargetsContext(ctx context.Context, index int, path 
 	if len(references) == 0 {
 		return nil, ctx.Err()
 	}
-	doc, err := r.reader.DocContext(ctx)
+	doc, err := r.reader.docContext(ctx)
 	if err != nil {
 		return nil, err
 	}

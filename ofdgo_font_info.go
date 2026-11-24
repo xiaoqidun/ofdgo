@@ -661,7 +661,7 @@ func (r *Renderer) fontInfoDocument() (*Document, error) {
 	if r == nil || r.reader == nil {
 		return nil, fmt.Errorf("ofd renderer is not initialized")
 	}
-	doc, err := r.reader.Doc()
+	doc, err := r.reader.docInternal()
 	if err != nil {
 		return nil, err
 	}
@@ -887,8 +887,8 @@ func (r *Renderer) countLayerFonts(layer Layer, usage map[string]int) {
 	for _, image := range layer.ImageObject {
 		r.countObjectFonts(GraphicObject{Type: "ImageObject", ImageObject: image}, usage, defaults, nil)
 	}
-	for _, cgu := range layer.CompositeGraphicUnit {
-		r.countCompositeFonts(cgu, usage, defaults, nil)
+	for _, obj := range layer.CompositeObject {
+		r.countCompositeFonts(obj, usage, defaults, nil)
 	}
 }
 
@@ -902,9 +902,6 @@ func (r *Renderer) countObjectFonts(obj GraphicObject, usage map[string]int, def
 	case "TextObject":
 		text := obj.TextObject
 		defaults = r.drawParamDefaults(text.DrawParam, defaults)
-		if text.Font == "" && defaults != nil && defaults.Font != "" {
-			text.Font = defaults.Font
-		}
 		r.countTextFont(text, usage)
 		fill, stroke = text.FillColor, text.StrokeColor
 		shouldFill = text.Fill == nil || *text.Fill
@@ -922,8 +919,8 @@ func (r *Renderer) countObjectFonts(obj GraphicObject, usage map[string]int, def
 			r.countPatternFonts((*FillColor)(border.BorderColor), usage, visited)
 		}
 		return
-	case "CompositeGraphicUnit", "CompositeObject":
-		r.countCompositeFonts(obj.CompositeGraphicUnit, usage, defaults, visited)
+	case "CompositeObject":
+		r.countCompositeFonts(obj.CompositeObject, usage, defaults, visited)
 		return
 	}
 	if defaults != nil {
@@ -943,27 +940,29 @@ func (r *Renderer) countObjectFonts(obj GraphicObject, usage map[string]int, def
 }
 
 // countCompositeFonts 统计复合图元字体使用次数
-// 入参: cgu 复合图元, usage 字体使用次数, defaults 默认绘制参数, visited 当前引用路径
-func (r *Renderer) countCompositeFonts(cgu CompositeGraphicUnit, usage map[string]int, defaults *DrawParam, visited *fontUsageReferences) {
-	r.countClipFonts(cgu.Clips, usage)
-	defaults = r.compositeGraphicUnitDefaults(cgu, defaults)
-	if cgu.ResourceID != "" {
-		if ref := r.compositeDefinition(cgu.ResourceID); ref != nil {
-			if visited == nil {
-				visited = &fontUsageReferences{}
-			}
-			if visited.composites[ref] {
-				return
-			}
-			if visited.composites == nil {
-				visited.composites = make(map[*CompositeGraphicUnit]bool)
-			}
-			visited.composites[ref] = true
-			r.countCompositeFonts(*ref, usage, defaults, visited)
-			defer delete(visited.composites, ref)
-		}
+// 入参: obj 复合图元对象, usage 字体使用次数, defaults 默认绘制参数, visited 当前引用路径
+func (r *Renderer) countCompositeFonts(obj CompositeObject, usage map[string]int, defaults *DrawParam, visited *fontUsageReferences) {
+	r.countClipFonts(obj.Clips, usage)
+	defaults = r.compositeObjectDefaults(obj, defaults)
+	if obj.ResourceID == "" {
+		return
 	}
-	for object := range cgu.objects() {
+	ref := r.compositeDefinition(obj.ResourceID)
+	if ref == nil {
+		return
+	}
+	if visited == nil {
+		visited = &fontUsageReferences{}
+	}
+	if visited.composites[ref] {
+		return
+	}
+	if visited.composites == nil {
+		visited.composites = make(map[*CompositeGraphicUnit]bool)
+	}
+	visited.composites[ref] = true
+	defer delete(visited.composites, ref)
+	for object := range ref.objects() {
 		r.countObjectFonts(object, usage, defaults, visited)
 	}
 }

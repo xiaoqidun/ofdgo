@@ -156,7 +156,7 @@ func ParseType1Program(data []byte) (Type1Program, error) {
 				continue
 			}
 			index, err := strconv.Atoi(scanner.next())
-			if err != nil || index < 0 || index > len(decrypted) {
+			if err != nil || index < 0 || index >= math.MaxUint16 || index > len(decrypted) {
 				return Type1Program{}, fmt.Errorf("invalid Type1 subroutine index")
 			}
 			length, err := strconv.Atoi(scanner.next())
@@ -493,27 +493,42 @@ func (p *Type1Program) ToCFF(name string) ([]byte, error) {
 		}
 		strings = append(strings, []byte(glyph.name))
 		sid := 391 + index - 1
-		if sid > math.MaxUint16 {
+		if sid > 64999 {
 			return nil, fmt.Errorf("Type1 font has too many glyph names")
 		}
 		binary.BigEndian.PutUint16(charset[1+(index-1)*2:], uint16(sid))
 	}
-	nameIndex := encodeCFFIndex([][]byte{[]byte(name)})
-	stringIndex := encodeCFFIndex(strings)
-	globalSubrs := encodeCFFIndex(nil)
-	charIndex := encodeCFFIndex(chars)
+	nameIndex, err := encodeCFFIndexChecked([][]byte{[]byte(name)})
+	if err != nil {
+		return nil, err
+	}
+	stringIndex, err := encodeCFFIndexChecked(strings)
+	if err != nil {
+		return nil, err
+	}
+	globalSubrs := []byte{0, 0}
+	charIndex, err := encodeCFFIndexChecked(chars)
+	if err != nil {
+		return nil, err
+	}
 	topDict := make([]byte, 12)
 	topDict[0], topDict[5], topDict[6], topDict[11] = 29, 15, 29, 17
 	topDict = append(topDict, encodeCFFDict(cffDict{18: {0, 0}})...)
 	if p.matrix != nil {
 		topDict = append(topDict, encodeCFFDict(cffDict{1207: p.matrix})...)
 	}
-	topIndex := encodeCFFIndex([][]byte{topDict})
+	topIndex, err := encodeCFFIndexChecked([][]byte{topDict})
+	if err != nil {
+		return nil, err
+	}
 	charsetOffset := 4 + len(nameIndex) + len(topIndex) + len(stringIndex) + len(globalSubrs)
 	charOffset := charsetOffset + len(charset)
 	binary.BigEndian.PutUint32(topDict[1:5], uint32(charsetOffset))
 	binary.BigEndian.PutUint32(topDict[7:11], uint32(charOffset))
-	topIndex = encodeCFFIndex([][]byte{topDict})
+	topIndex, err = encodeCFFIndexChecked([][]byte{topDict})
+	if err != nil {
+		return nil, err
+	}
 	data := make([]byte, 0, charOffset+len(charIndex))
 	data = append(data, 1, 0, 4, 4)
 	data = append(data, nameIndex...)

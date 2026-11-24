@@ -204,7 +204,7 @@ func invalidateResourcePreviews(ctx context.Context, scan *editorFontDocument, c
 		}
 		defer reader.Close()
 	}
-	doc, err := reader.DocContext(ctx)
+	doc, err := reader.docContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -346,7 +346,7 @@ func invalidateScopedResourcePreviews(ctx context.Context, catalog *resourceCata
 		}
 		defer reader.Close()
 	}
-	doc, err := reader.DocContext(ctx)
+	doc, err := reader.docContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -514,8 +514,8 @@ func resourceObjectActions(object GraphicObject) ([]Action, error) {
 		return object.ImageObject.Actions, nil
 	case "Path", "PathObject":
 		return object.PathObject.Actions, nil
-	case "CompositeObject", "CompositeGraphicUnit":
-		return object.CompositeGraphicUnit.Actions, nil
+	case "CompositeObject":
+		return object.CompositeObject.Actions, nil
 	default:
 		return nil, fmt.Errorf("object does not support actions")
 	}
@@ -622,7 +622,7 @@ func (e *Editor) ImportMedia(ctx context.Context, kind, format string, data []by
 	if err != nil {
 		return "", err
 	}
-	doc, err := reader.DocContext(ctx)
+	doc, err := reader.docContext(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -647,20 +647,30 @@ func (e *Editor) ImportMedia(ctx context.Context, kind, format string, data []by
 	if working.maxID > maxUnitID {
 		return "", fmt.Errorf("MaxUnitID %d exceeds uint32 range", working.maxID)
 	}
-	patch := editorXMLPatch{common.open, common.open, common.textXML("MaxUnitID", formatUnitID(working.maxID))}
-	if maximum := common.child("MaxUnitID"); maximum != nil {
-		patch = editorXMLPatch{maximum.start, maximum.end, maximum.textXML("MaxUnitID", formatUnitID(working.maxID))}
-	}
-	patches := []editorXMLPatch{patch}
-	if added {
-		position := common.close
-		for _, child := range common.children {
-			if child.matchesOFD("TemplatePage") || child.matchesOFD("DefaultCS") {
-				position = child.start
-				break
-			}
+	var patches []editorXMLPatch
+	if common.open == common.end {
+		var inner []byte
+		inner = append(inner, common.textXML("MaxUnitID", formatUnitID(working.maxID))...)
+		if added {
+			inner = append(inner, common.textXML("DocumentRes", "/"+name)...)
 		}
-		patches = append(patches, editorXMLPatch{position, position, common.textXML("DocumentRes", "/"+name)})
+		patches = append(patches, editorXMLContent(content, common, inner))
+	} else {
+		patch := editorXMLPatch{common.open, common.open, common.textXML("MaxUnitID", formatUnitID(working.maxID))}
+		if maximum := common.child("MaxUnitID"); maximum != nil {
+			patch = editorXMLPatch{maximum.start, maximum.end, maximum.textXML("MaxUnitID", formatUnitID(working.maxID))}
+		}
+		patches = append(patches, patch)
+		if added {
+			position := common.close
+			for _, child := range common.children {
+				if child.matchesOFD("TemplatePage") || child.matchesOFD("DefaultCS") {
+					position = child.start
+					break
+				}
+			}
+			patches = append(patches, editorXMLPatch{position, position, common.textXML("DocumentRes", "/"+name)})
+		}
 	}
 	parts[entry] = editorPatchXML(content, patches)
 	scan := &editorFontDocument{reader: reader, index: reader.DocumentIndex()}

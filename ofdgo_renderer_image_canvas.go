@@ -166,6 +166,42 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 	}
 	var effectKey imageEffectKey
 	hasEffectKey := false
+	if img == nil && !isPDF && r.decodeImages && obj.ImageMask == "" && r.pageContext != nil && r.reader != nil {
+		if pf, ok := r.pageContext.Value(pageImagePrefetchKey{}).(*pageImagePrefetch); ok && pf != nil && len(pf.byPath) > 0 {
+			primary := obj.ResourceID
+			if obj.Substitution != "" && !sameResourceID(obj.Substitution, obj.ResourceID) && (r.printing || r.dpi >= 300) {
+				primary = obj.Substitution
+			}
+			if resolved, ok := r.reader.resolveResPathScoped(r.pageResources, primary); ok {
+				cleanPath := cleanPackagePath(r.reader.ResPath(resolved))
+				if entry, hit := pf.byPath[cleanPath]; hit {
+					effAlpha := uint8(255)
+					if imgAlpha != nil {
+						effAlpha = uint8(clampColor(*imgAlpha))
+					}
+					if effAlpha == 255 {
+						img = entry.raw
+					} else {
+						ak := pagePrefetchedAlphaKey{path: cleanPath, alpha: effAlpha}
+						if cached, ok := pf.byAlpha[ak]; ok {
+							img = cached
+						} else {
+							applied, err := imageWithEffects(r.pageContext, entry.raw, nil, imgAlpha)
+							if err != nil {
+								r.renderError = err
+								return
+							}
+							if pf.byAlpha == nil {
+								pf.byAlpha = make(map[pagePrefetchedAlphaKey]image.Image)
+							}
+							pf.byAlpha[ak] = applied
+							img = applied
+						}
+					}
+				}
+			}
+		}
+	}
 	if img == nil {
 		var err error
 		img, effectKey, hasEffectKey, err = r.imageObjectWithEffects(obj, imgAlpha)
@@ -206,7 +242,7 @@ func (r *Renderer) renderImage(ctx *canvas.Context, obj ImageObject, pageH float
 		}
 	}
 	clipPath := r.intersectCachedClipPath(parentClip, r.buildObjectClipPath(obj.Clips, pageH, obj.Boundary, localCTM, parentCTM, boundaryInCTM))
-	r.drawClippedImageInterpolate(ctx, img, clipPath, m, obj.Interpolate)
+	r.drawClippedImageInterpolate(ctx, img, clipPath, m, obj.interpolate)
 	if r.renderError != nil {
 		return
 	}

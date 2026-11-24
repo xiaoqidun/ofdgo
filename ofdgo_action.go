@@ -42,18 +42,15 @@ type Goto struct {
 }
 
 // Dest 文档内跳转目标，坐标单位为毫米
-// Omit字段保留属性省略状态；Left和Top省略时取0，Zoom省略或为0时保持当前缩放
+// Left、Right、Top、Bottom、Zoom为nil表示省略；Left和Top省略时取0，Zoom省略或为0时保持当前缩放
 type Dest struct {
-	Type     string  `xml:"Type,attr"`
-	PageID   string  `xml:"PageID,attr"`
-	Left     float64 `xml:"Left"`
-	Right    float64 `xml:"Right"`
-	Top      float64 `xml:"Top"`
-	Bottom   float64 `xml:"Bottom"`
-	Zoom     float64 `xml:"Zoom"`
-	OmitLeft bool    `xml:"-"`
-	OmitTop  bool    `xml:"-"`
-	OmitZoom bool    `xml:"-"`
+	Type   string   `xml:"Type,attr"`
+	PageID string   `xml:"PageID,attr"`
+	Left   *float64 `xml:"Left,attr,omitempty"`
+	Right  *float64 `xml:"Right,attr,omitempty"`
+	Top    *float64 `xml:"Top,attr,omitempty"`
+	Bottom *float64 `xml:"Bottom,attr,omitempty"`
+	Zoom   *float64 `xml:"Zoom,attr,omitempty"`
 }
 
 // GotoBookmark 书签跳转目标
@@ -250,21 +247,18 @@ func (dest *Dest) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 		Bottom *float64 `xml:"Bottom"`
 		Zoom   *float64 `xml:"Zoom"`
 	}
-	*dest = Dest{Type: attrValue(start, "Type"), PageID: attrValue(start, "PageID"), OmitLeft: true, OmitTop: true, OmitZoom: true}
+	*dest = Dest{Type: attrValue(start, "Type"), PageID: attrValue(start, "PageID")}
 	for _, attr := range start.Attr {
 		if attr.Name.Space != "" {
 			continue
 		}
-		var target *float64
+		var target **float64
 		switch attr.Name.Local {
 		case "Left":
-			dest.OmitLeft = false
 			target = &dest.Left
 		case "Top":
-			dest.OmitTop = false
 			target = &dest.Top
 		case "Zoom":
-			dest.OmitZoom = false
 			target = &dest.Zoom
 		case "Right":
 			target = &dest.Right
@@ -276,7 +270,7 @@ func (dest *Dest) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 			if err != nil || !finite(v) {
 				return fmt.Errorf("invalid destination %s", attr.Name.Local)
 			}
-			*target = v
+			*target = &v
 		}
 	}
 	if err := decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
@@ -300,25 +294,22 @@ func (dest *Dest) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 		return err
 	}
 	if value.Left != nil {
-		dest.Left = *value.Left
-		dest.OmitLeft = false
+		dest.Left = value.Left
 	}
 	if value.Right != nil {
-		dest.Right = *value.Right
+		dest.Right = value.Right
 	}
 	if value.Top != nil {
-		dest.Top = *value.Top
-		dest.OmitTop = false
+		dest.Top = value.Top
 	}
 	if value.Bottom != nil {
-		dest.Bottom = *value.Bottom
+		dest.Bottom = value.Bottom
 	}
 	if value.Zoom != nil {
-		dest.Zoom = *value.Zoom
-		dest.OmitZoom = false
+		dest.Zoom = value.Zoom
 	}
-	for _, number := range []float64{dest.Left, dest.Right, dest.Top, dest.Bottom, dest.Zoom} {
-		if !finite(number) {
+	for _, number := range []*float64{dest.Left, dest.Right, dest.Top, dest.Bottom, dest.Zoom} {
+		if number != nil && !finite(*number) {
 			return fmt.Errorf("invalid destination coordinate")
 		}
 	}
@@ -367,12 +358,27 @@ func (region *Region) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error
 	})
 }
 
-// UnmarshalXML 按原顺序读取区域指令，外部同名节点不参与路径绘制
+// validRegionCommandType 校验动作区域路径绘制指令是否属于GB/T33190标准白名单
+// 入参: kind 绘制指令类型
+// 返回: bool 是否合法
+func validRegionCommandType(kind string) bool {
+	switch kind {
+	case "Move", "Line", "QuadraticBezier", "CubicBezier", "Arc", "Close":
+		return true
+	default:
+		return false
+	}
+}
+
+// UnmarshalXML 按原顺序读取区域指令，外部同名节点及非法指令不参与路径绘制
 // 入参: d XML解码器, start 起始节点
-// 返回: error 错误信息
+// 返回: error 解析错误
 func (a *RegionArea) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	*a = RegionArea{Start: attrValue(start, "Start")}
 	return decodeOFDChildren(d, start, func(d *xml.Decoder, node xml.StartElement) error {
+		if !validRegionCommandType(node.Name.Local) {
+			return d.Skip()
+		}
 		command := RegionCommand{
 			Type:           node.Name.Local,
 			Point1:         attrValue(node, "Point1"),
@@ -447,7 +453,7 @@ func (r *Renderer) appendLayerActionSources(sources []actionSource, layers []Lay
 		if layerOrder(layer.Type) != order {
 			continue
 		}
-		for object := range (PatternContent{Objects: layer.Objects, TextObject: layer.TextObject, PathObject: layer.PathObject, ImageObject: layer.ImageObject, CompositeGraphicUnit: layer.CompositeGraphicUnit}).objects() {
+		for object := range (PatternContent{Objects: layer.Objects, TextObject: layer.TextObject, PathObject: layer.PathObject, ImageObject: layer.ImageObject, CompositeObject: layer.CompositeObject}).objects() {
 			sources = r.appendGraphicActionSources(sources, object, IdentityMatrix(), false, nil)
 		}
 	}
@@ -464,7 +470,7 @@ func (r *Renderer) annotationActionSources(page *PageContent, annotations []Anno
 	sources := make([]actionSource, 0)
 	for i := range annotations {
 		annotation := &annotations[i]
-		if annotation.Visible != nil && !*annotation.Visible {
+		if annotation.Visible != nil && !*annotation.Visible || annotation.Appearance == nil {
 			continue
 		}
 		var box Box
@@ -502,11 +508,11 @@ func (r *Renderer) appendGraphicActionSources(sources []actionSource, object Gra
 		boundary = object.ImageObject.Boundary
 		ctm = object.ImageObject.CTM
 		actions = object.ImageObject.Actions
-	case "CompositeGraphicUnit", "CompositeObject":
-		boundary = object.CompositeGraphicUnit.Boundary
-		ctm = object.CompositeGraphicUnit.CTM
-		resource = object.CompositeGraphicUnit.ResourceID
-		actions = object.CompositeGraphicUnit.Actions
+	case "CompositeObject":
+		boundary = object.CompositeObject.Boundary
+		ctm = object.CompositeObject.CTM
+		resource = object.CompositeObject.ResourceID
+		actions = object.CompositeObject.Actions
 		composite = true
 	}
 	box, _ := ParseBox(boundary)
@@ -537,13 +543,10 @@ func (r *Renderer) appendGraphicActionSources(sources []actionSource, object Gra
 				seen = make(map[*CompositeGraphicUnit]bool)
 			}
 			seen[unit] = true
-			sources = r.appendGraphicActionSources(sources, GraphicObject{Type: "CompositeGraphicUnit", CompositeGraphicUnit: *unit}, matrix, true, seen)
+			for child := range unit.objects() {
+				sources = r.appendGraphicActionSources(sources, child, matrix, true, seen)
+			}
 			delete(seen, unit)
-		}
-	}
-	if composite {
-		for child := range object.CompositeGraphicUnit.objects() {
-			sources = r.appendGraphicActionSources(sources, child, matrix, true, seen)
 		}
 	}
 	return sources
@@ -572,71 +575,129 @@ func (r *Renderer) actionLinkRegion(source actionSource, action Action) (Box, st
 	return box, outline, err
 }
 
-// effective 应用省略属性的默认值，不改变原始声明
-// 返回: Dest 生效的目标参数
-func (dest Dest) effective() Dest {
-	if dest.OmitLeft {
-		dest.Left = 0
-	}
-	if dest.OmitTop {
-		dest.Top = 0
-	}
-	if dest.OmitZoom {
-		dest.Zoom = 0
-	}
-	return dest
+// float64Ptr 返回指向浮点值的独立指针
+// 入参: value 浮点数值
+// 返回: *float64 独立指针
+func float64Ptr(value float64) *float64 {
+	return &value
 }
 
-// attributes 校验并生成目标属性，缩放为0表示沿用当前比例
+// cloneFloat64Ptr 复制浮点指针，nil原样返回
+// 入参: value 原浮点指针
+// 返回: *float64 独立副本
+func cloneFloat64Ptr(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	v := *value
+	return &v
+}
+
+// float64PtrEqual 比较两个浮点指针的省略状态与数值是否一致
+// 入参: left 左侧指针, right 右侧指针
+// 返回: bool 是否相等
+func float64PtrEqual(left, right *float64) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
+}
+
+// destEqual 比较两个跳转目标的值语义是否完全一致
+// 入参: left 左侧目标, right 右侧目标
+// 返回: bool 是否相等
+func destEqual(left, right Dest) bool {
+	return left.Type == right.Type &&
+		left.PageID == right.PageID &&
+		float64PtrEqual(left.Left, right.Left) &&
+		float64PtrEqual(left.Right, right.Right) &&
+		float64PtrEqual(left.Top, right.Top) &&
+		float64PtrEqual(left.Bottom, right.Bottom) &&
+		float64PtrEqual(left.Zoom, right.Zoom)
+}
+
+// effective 复制跳转目标的独立指针副本，避免外部修改污染原始声明
+// 返回: Dest 生效的目标参数
+func (dest Dest) effective() Dest {
+	return Dest{
+		Type:   dest.Type,
+		PageID: dest.PageID,
+		Left:   cloneFloat64Ptr(dest.Left),
+		Right:  cloneFloat64Ptr(dest.Right),
+		Top:    cloneFloat64Ptr(dest.Top),
+		Bottom: cloneFloat64Ptr(dest.Bottom),
+		Zoom:   cloneFloat64Ptr(dest.Zoom),
+	}
+}
+
+// attributes 校验并生成目标属性，缩放省略或为0表示沿用当前比例
 // 返回: ofdAttrs 标准属性, error 模式或参数错误
 func (dest Dest) attributes() (ofdAttrs, error) {
-	dest = dest.effective()
 	attrs := ofdAttrs{{Name: xml.Name{Local: "Type"}, Value: dest.Type}, {Name: xml.Name{Local: "PageID"}, Value: dest.PageID}}
 	if dest.PageID == "" {
 		return nil, fmt.Errorf("missing destination page")
 	}
-	add := func(name string, value float64, omit bool) error {
-		if !finite(value) {
+	add := func(name string, value *float64) error {
+		if value == nil {
+			return nil
+		}
+		if !finite(*value) {
 			return fmt.Errorf("invalid destination %s", name)
 		}
-		if !omit {
-			attrs.add(name, ofdNumber(value))
-		}
+		attrs.add(name, ofdNumber(*value))
 		return nil
 	}
 	switch dest.Type {
 	case "XYZ":
-		if dest.Zoom != 0 && (dest.Zoom < 0.1 || dest.Zoom > 64) {
-			return nil, fmt.Errorf("destination zoom must be zero or between 0.1 and 64")
+		if dest.Zoom != nil {
+			if !finite(*dest.Zoom) {
+				return nil, fmt.Errorf("invalid destination Zoom")
+			}
+			if *dest.Zoom != 0 && (*dest.Zoom < 0.1 || *dest.Zoom > 64) {
+				return nil, fmt.Errorf("destination zoom must be zero or between 0.1 and 64")
+			}
+			attrs.add("Zoom", ofdNumber(*dest.Zoom))
 		}
-		if err := add("Zoom", dest.Zoom, dest.OmitZoom); err != nil {
+		if err := add("Left", dest.Left); err != nil {
 			return nil, err
 		}
-		fallthrough
+		if err := add("Top", dest.Top); err != nil {
+			return nil, err
+		}
 	case "FitR":
-		if err := add("Left", dest.Left, dest.OmitLeft); err != nil {
+		if err := add("Left", dest.Left); err != nil {
 			return nil, err
 		}
-		if err := add("Top", dest.Top, dest.OmitTop); err != nil {
+		if err := add("Top", dest.Top); err != nil {
 			return nil, err
 		}
-		if dest.Type == "FitR" {
-			if dest.Right <= dest.Left || dest.Bottom <= dest.Top {
-				return nil, fmt.Errorf("empty destination rectangle")
-			}
-			if err := add("Right", dest.Right, false); err != nil {
-				return nil, err
-			}
-			if err := add("Bottom", dest.Bottom, false); err != nil {
-				return nil, err
-			}
+		if dest.Right == nil || dest.Bottom == nil {
+			return nil, fmt.Errorf("empty destination rectangle")
 		}
+		if !finite(*dest.Right) {
+			return nil, fmt.Errorf("invalid destination Right")
+		}
+		if !finite(*dest.Bottom) {
+			return nil, fmt.Errorf("invalid destination Bottom")
+		}
+		left, top := 0.0, 0.0
+		if dest.Left != nil {
+			left = *dest.Left
+		}
+		if dest.Top != nil {
+			top = *dest.Top
+		}
+		if *dest.Right <= left || *dest.Bottom <= top {
+			return nil, fmt.Errorf("empty destination rectangle")
+		}
+		attrs.add("Right", ofdNumber(*dest.Right))
+		attrs.add("Bottom", ofdNumber(*dest.Bottom))
 	case "FitH":
-		if err := add("Top", dest.Top, dest.OmitTop); err != nil {
+		if err := add("Top", dest.Top); err != nil {
 			return nil, err
 		}
 	case "FitV":
-		if err := add("Left", dest.Left, dest.OmitLeft); err != nil {
+		if err := add("Left", dest.Left); err != nil {
 			return nil, err
 		}
 	case "Fit":

@@ -1112,7 +1112,7 @@ func (r *Reader) invoiceBindings(ctx context.Context, source InvoiceSource, dige
 	if err != nil {
 		return nil, err
 	}
-	doc, err := r.DocContext(ctx)
+	doc, err := r.docContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1198,7 +1198,7 @@ func (e *Editor) invoiceOwnedPages(ctx context.Context, ids []string) ([]invoice
 		return nil, err
 	}
 	defer r.Close()
-	doc, err := r.DocContext(ctx)
+	doc, err := r.docContext(ctx)
 	if err != nil {
 		return nil, err
 	}
