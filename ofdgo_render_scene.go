@@ -21,21 +21,13 @@ import (
 
 // 场景遍历的绘制、分组及跳过指令
 const (
-	// sceneObject 绘制单个图形对象
 	sceneObject sceneCommandKind = iota
-	// sceneStamp 绘制签章外观
 	sceneStamp
-	// sceneBeginObject 开始图形对象分组
 	sceneBeginObject
-	// sceneBeginAnnotation 开始页面注解分组
 	sceneBeginAnnotation
-	// sceneEnd 结束当前对象或注解分组
 	sceneEnd
-	// sceneSkip 跳过不可见对象计数
 	sceneSkip
-	// sceneBeginTransparencyGroup 开始透明组隔离
 	sceneBeginTransparencyGroup
-	// sceneEndTransparencyGroup 结束透明组隔离
 	sceneEndTransparencyGroup
 )
 

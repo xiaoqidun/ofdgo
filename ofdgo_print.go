@@ -22,7 +22,6 @@ import (
 	"sync"
 )
 
-// 打印排版模式枚举
 const (
 	// PrintModeSingle 单页逐页打印
 	PrintModeSingle PrintMode = "single"
@@ -34,7 +33,6 @@ const (
 	PrintModePoster PrintMode = "poster"
 )
 
-// 打印缩放方式枚举
 const (
 	// PrintScalingFit 缩放至贴合单元区域
 	PrintScalingFit PrintScaling = "fit"
@@ -46,7 +44,6 @@ const (
 	PrintScalingCustom PrintScaling = "custom"
 )
 
-// 打印双面模式枚举
 const (
 	// PrintDuplexSimplex 单面打印
 	PrintDuplexSimplex PrintDuplex = "simplex"
@@ -56,7 +53,6 @@ const (
 	PrintDuplexShortEdge PrintDuplex = "shortEdge"
 )
 
-// 打印源页奇偶过滤枚举
 const (
 	// PrintParityAll 打印全部选中页
 	PrintParityAll PrintParity = "all"
@@ -66,7 +62,6 @@ const (
 	PrintParityEven PrintParity = "even"
 )
 
-// 打印纸面正反过滤枚举
 const (
 	// PrintSidesAll 输出正反全部纸面
 	PrintSidesAll PrintSides = "all"
@@ -76,7 +71,6 @@ const (
 	PrintSidesBack PrintSides = "back"
 )
 
-// 多页合印排列顺序枚举
 const (
 	// PrintPageOrderHorizontal 横向从左到右逐行排列
 	PrintPageOrderHorizontal PrintPageOrder = "horizontal"
@@ -88,7 +82,6 @@ const (
 	PrintPageOrderVerticalReverse PrintPageOrder = "verticalReverse"
 )
 
-// 小册子装订边枚举
 const (
 	// PrintBindingLeft 左侧装订
 	PrintBindingLeft PrintBinding = "left"
@@ -96,7 +89,6 @@ const (
 	PrintBindingRight PrintBinding = "right"
 )
 
-// 打印内容筛选枚举
 const (
 	// PrintContentsDocumentAndAnnotations 打印文档正文及全部注释
 	PrintContentsDocumentAndAnnotations PrintContents = "documentAndAnnotations"

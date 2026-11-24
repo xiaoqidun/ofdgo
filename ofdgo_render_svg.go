@@ -40,16 +40,12 @@ const (
 )
 
 // SVGPathMergeOptions 配置SVG纯色填充路径合并策略及安全窗口上限
-// MaxExtent、MaxOps、MaxBytes仅在SVGPathMergeAuto下生效，非正数或非有限值自动取默认值
+// Mode默认为SVGPathMergeAuto，MaxExtent(默认16毫米)、MaxOps(默认160)、MaxBytes(默认2048)仅在自动模式下生效
 type SVGPathMergeOptions struct {
-	// Mode 指定路径合并策略，默认为SVGPathMergeAuto
-	Mode SVGPathMergeMode
-	// MaxExtent 指定合并后联合包围盒单轴上限，单位毫米，默认16
+	Mode      SVGPathMergeMode
 	MaxExtent float64
-	// MaxOps 指定单条合并路径最大绘图命令数，默认160
-	MaxOps int
-	// MaxBytes 指定单条合并路径追加前最大字节长度，默认2048
-	MaxBytes int
+	MaxOps    int
+	MaxBytes  int
 }
 
 // normalize 规范化路径合并参数并保证同模式缓存键唯一
@@ -100,17 +96,15 @@ type SVGResources struct {
 }
 
 // PreviewOptions 指定页面显示方式，光栅预览不提供SVG对象分组
+// KnownResources标识调用方已持有的资源以避免重复返回数据，IDPrefix指定SVG内部局部ID前缀
+// Precision指定纯矢量路径毫米坐标小数位数(非正数默认3位)，PathMerge覆盖单次渲染的路径合并策略
 type PreviewOptions struct {
-	Raster  bool
-	Objects bool
-	// KnownResources 标识调用方仍持有的资源，返回引用但不重复返回数据
+	Raster         bool
+	Objects        bool
 	KnownResources map[string]bool
-	// IDPrefix 指定页面SVG内部局部ID前缀，为空保持默认命名
-	IDPrefix string
-	// Precision 指定纯矢量路径毫米坐标小数位数，非正数默认3位
-	Precision int
-	// PathMerge 覆盖单次渲染的路径合并策略，为空时继承Renderer配置
-	PathMerge *SVGPathMergeOptions
+	IDPrefix       string
+	Precision      int
+	PathMerge      *SVGPathMergeOptions
 }
 
 // RenderStampToSVG 构造独立透明背景单页视图并将印章渲染为SVG

@@ -709,8 +709,7 @@ func validateSM2DERSignature(sig []byte) error {
 	return nil
 }
 
-// signMessage 通过crypto.Signer调用成熟实现或硬件签署器
-// SM2签署器必须接受gmsm的SM2SignerOption，接收原文并计算默认用户标识的ZA
+// signMessage 使用签署器对数据签名
 // 入参: data 待签名原文, signer 签署器
 // 返回: []byte 签名值, error 签名错误
 func (key *signatureWriteKey) signMessage(data []byte, signer crypto.Signer) ([]byte, error) {

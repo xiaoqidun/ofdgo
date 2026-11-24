@@ -23,17 +23,13 @@ import (
 	"time"
 )
 
+// GB/T35275与CMS签名内容类型及属性对象标识
 const (
-	// signContentData GB/T35275数据内容类型对象标识
-	signContentData = "1.2.156.10197.6.1.4.2.1"
-	// signContentSignedData GB/T35275签名数据内容类型对象标识
+	signContentData       = "1.2.156.10197.6.1.4.2.1"
 	signContentSignedData = "1.2.156.10197.6.1.4.2.2"
-	// signContentCMSData 标准CMS数据内容类型对象标识
-	signContentCMSData = "1.2.840.113549.1.7.1"
-	// signAttrMessageDigest 消息摘要属性对象标识
+	signContentCMSData    = "1.2.840.113549.1.7.1"
 	signAttrMessageDigest = "1.2.840.113549.1.9.4"
-	// signAttrSigningTime 签名时间属性对象标识
-	signAttrSigningTime = "1.2.840.113549.1.9.5"
+	signAttrSigningTime   = "1.2.840.113549.1.9.5"
 )
 
 // digitalVerifyResult 数字签名验证结果

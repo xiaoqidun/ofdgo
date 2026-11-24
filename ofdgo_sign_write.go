@@ -32,7 +32,6 @@ import (
 	"time"
 )
 
-// 签署输出模式
 const (
 	// SignatureAppend 追加签署，要求原活动签名有效且未保护签名列表
 	SignatureAppend SignatureWriteMode = iota

@@ -35,27 +35,22 @@ import (
 	"github.com/xiaoqidun/ofdgo"
 )
 
+// 平台值类型枚举
 const (
-	// platformTypeUndefined 表示未定义值
 	platformTypeUndefined = iota
-	// platformTypeNumber 表示数值
 	platformTypeNumber
-	// platformTypeString 表示字符串
 	platformTypeString
-	// platformTypeBoolean 表示布尔值
 	platformTypeBoolean
-	// platformTypeObject 表示对象
 	platformTypeObject
-	// platformTypeFunction 表示函数
 	platformTypeFunction
-	// renderPriorityMain 表示主画布页面默认调度优先级
-	renderPriorityMain = 2
-	// renderPriorityPreview 表示缩略图与后台预览默认调度优先级
+)
+
+// 主画布与预览渲染的默认调度优先级及资源配额
+const (
+	renderPriorityMain    = 2
 	renderPriorityPreview = 5
-	// renderQuotaMain 表示主画布复杂页渲染的资源预留配额
-	renderQuotaMain = 64 << 20
-	// renderQuotaPreview 表示低优缩略图渲染的轻配额
-	renderQuotaPreview = 8 << 20
+	renderQuotaMain       = 64 << 20
+	renderQuotaPreview    = 8 << 20
 )
 
 // nativeFields 缓存可直接展开的JSON字段，空值使用标准编码
@@ -81,42 +76,34 @@ type NativeOutputTarget struct {
 }
 
 // NativeEngine 保存独立会话，页面渲染可并行，修改等待已开始的只读任务完成
-// 同一实例的回调不可重入Call或Close
-// hooks应在首次Call前配置，Resolve返回的资源需保持有效直到相应会话关闭
+// Resources、RenderParallelism及各回调应在首次Call前配置，回调不可重入Call或Close
+// Resolve返回的资源需保持有效直到相应会话关闭，RenderParallelism为零时使用可用处理器数
+// OpenWriter须避免覆盖已有文件，成功时Close提交，失败时调用可选Abort，CleanupOutput须幂等
 type NativeEngine struct {
 	businessEngine
-	// Resources 协调会话的计算与缓存，需在首次Call前配置
-	Resources *ofdgo.Resources
-	// ConversionPool 协调不同会话的批量转换资源
-	ConversionPool *ofdgo.ConversionPool
-	// RenderParallelism 限制同时渲染的页面数，零值使用可用处理器数
+	Resources         *ofdgo.Resources
+	ConversionPool    *ofdgo.ConversionPool
 	RenderParallelism int
-	// Resolve 按授权标识提供资源读取源
-	Resolve NativeResolver
-	// LoadFont 按名称读取系统字体数据
-	LoadFont func(context.Context, string) ([]byte, error)
-	// OpenWriter 必须防止覆盖已有文件，成功时Close提交，失败时仅调用可选Abort
-	// 不支持Abort的输出由宿主负责回收，宿主也负责回滚已完成的批量输出
-	OpenWriter func(context.Context, any, string) (io.WriteCloser, error)
-	// ReserveOutput 为单次批量预留整体入口，返回错误时由宿主释放未交付的预留
-	ReserveOutput func(context.Context, NativeOutputRequest) (NativeOutputTarget, error)
-	// CleanupOutput 必须幂等，以兼容前端收到output事件后重复removeEntry
-	CleanupOutput  func(context.Context, NativeOutputTarget) error
-	gate           chan struct{}
-	once           sync.Once
-	saves          sync.WaitGroup
-	closed         bool
-	ctxMu          sync.Mutex
-	pdfCtx         context.Context
-	renderMu       sync.Mutex
-	renderCount    int
-	renderSeq      uint64
-	renderContexts map[uint64]context.Context
-	saveSeq        uint64
-	saveContexts   map[uint64]context.Context
-	renderDone     chan struct{}
-	renderSlots    *renderLimiter
-	renderIdle     []*session
+	Resolve           NativeResolver
+	LoadFont          func(context.Context, string) ([]byte, error)
+	OpenWriter        func(context.Context, any, string) (io.WriteCloser, error)
+	ReserveOutput     func(context.Context, NativeOutputRequest) (NativeOutputTarget, error)
+	CleanupOutput     func(context.Context, NativeOutputTarget) error
+	gate              chan struct{}
+	once              sync.Once
+	saves             sync.WaitGroup
+	closed            bool
+	ctxMu             sync.Mutex
+	pdfCtx            context.Context
+	renderMu          sync.Mutex
+	renderCount       int
+	renderSeq         uint64
+	renderContexts    map[uint64]context.Context
+	saveSeq           uint64
+	saveContexts      map[uint64]context.Context
+	renderDone        chan struct{}
+	renderSlots       *renderLimiter
+	renderIdle        []*session
 }
 
 // renderWaiter 保存优先级渲染队列中的单个等待请求

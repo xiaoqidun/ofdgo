@@ -292,6 +292,10 @@ func (h *host) httpHandler() http.Handler {
 	static := http.FileServerFS(webuiassets.NativeFS)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/__native/") {
+			if isNavigationRequest(r) {
+				http.NotFound(w, r)
+				return
+			}
 			if h.serveMemoryResource(w, r) {
 				return
 			}
@@ -1543,11 +1547,23 @@ func (r *resourceReader) Close() error {
 	return nil
 }
 
+// isNavigationRequest 判断请求是否为文档或框架导航
+// 入参: r 资源请求
+// 返回: bool 是否为导航请求
+func isNavigationRequest(r *http.Request) bool {
+	mode := r.Header.Get("Sec-Fetch-Mode")
+	dest := r.Header.Get("Sec-Fetch-Dest")
+	return mode == "navigate" || dest == "document" || dest == "iframe"
+}
+
 // resource 将静态资源、只读内存文档资源、大SVG自动释放流及文件直接交给宿主资源流
 // 入参: r 资源请求
 // 返回: *guigo.Resource 资源响应, error 读取错误
 func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return nil, nil
+	}
+	if strings.HasPrefix(r.URL.Path, "/__native/") && isNavigationRequest(r) {
 		return nil, nil
 	}
 	for _, name := range []string{"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "If-Range"} {
@@ -1561,7 +1577,6 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 	var contentType string
 	var svgRelease func(bool)
 	cacheControl := "no-store"
-	nativeData := false
 	transferred := false
 	defer func() {
 		if !transferred {
@@ -1590,7 +1605,6 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 		reader, size = bytes.NewReader(item.data), int64(len(item.data))
 		contentType = item.mime
 		cacheControl = "private, max-age=3600"
-		nativeData = true
 	} else if strings.HasPrefix(r.URL.Path, "/__native/svg/") {
 		id := strings.TrimPrefix(r.URL.Path, "/__native/svg/")
 		if id == "" || strings.Contains(id, "/") || h.svgStreams == nil {
@@ -1603,7 +1617,6 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 		reader, size = bytes.NewReader(data), int64(len(data))
 		contentType = "image/svg+xml; charset=utf-8"
 		svgRelease = releaseSVG
-		nativeData = true
 	} else if strings.HasPrefix(r.URL.Path, "/__native/data/") {
 		if h.files == nil {
 			return nil, nil
@@ -1614,7 +1627,6 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 			return nil, nil
 		}
 		contentType = "application/octet-stream"
-		nativeData = true
 	} else {
 		name := strings.TrimPrefix(r.URL.Path, "/")
 		if name == "" {
@@ -1645,10 +1657,6 @@ func (h *host) resource(r *http.Request) (*guigo.Resource, error) {
 	}
 	headers := http.Header{"Content-Type": {contentType}, "Content-Length": {strconv.FormatInt(size, 10)}, "Cache-Control": {cacheControl}, "Accept-Ranges": {"bytes"}}
 	headers.Set("X-OFDGo-Build-Version", build.Version)
-	if nativeData {
-		headers.Set("Content-Security-Policy", "sandbox")
-		headers.Set("X-Content-Type-Options", "nosniff")
-	}
 	start, length, status := int64(0), size, http.StatusOK
 	if value := r.Header.Get("Range"); value != "" && r.Method == http.MethodGet {
 		rangeStart, rangeLength, ok := parseByteRange(value, size)
@@ -1705,8 +1713,6 @@ func (h *host) serveMemoryResource(w http.ResponseWriter, r *http.Request) bool 
 		if contentType == "" {
 			contentType = http.DetectContentType(item.data[:min(len(item.data), 512)])
 		}
-		w.Header().Set("Content-Security-Policy", "sandbox")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Cache-Control", "private, max-age=3600")
 		w.Header().Set("X-OFDGo-Build-Version", build.Version)
@@ -1732,8 +1738,6 @@ func (h *host) serveMemoryResource(w http.ResponseWriter, r *http.Request) bool 
 			remove := shouldDeleteSVGStream(r, int64(len(data)))
 			defer releaseSVG(remove)
 		}
-		w.Header().Set("Content-Security-Policy", "sandbox")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-OFDGo-Build-Version", build.Version)

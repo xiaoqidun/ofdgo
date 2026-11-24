@@ -19,7 +19,6 @@ import (
 	"math"
 )
 
-// U3DRenderMode 支持的静态几何绘制模式
 const (
 	U3DRenderSolid              U3DRenderMode = iota // 实体
 	U3DRenderSolidWireframe                          // 实体线框

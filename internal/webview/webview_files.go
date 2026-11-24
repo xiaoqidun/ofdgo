@@ -1308,8 +1308,6 @@ func (s *fileStore) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	w.Header().Set("Content-Security-Policy", "sandbox")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Type", "application/octet-stream")
 	http.ServeContent(w, r, name, time.Time{}, io.NewSectionReader(reader, 0, size))
 }

@@ -38,10 +38,9 @@ type Outliner struct {
 	warnings map[uint16]error
 }
 
+// TrueType复合字形展开的最大嵌套深度和分量访问次数
 const (
-	// maxTTCompositeDepth 限制TrueType复合字形的最大嵌套深度
 	maxTTCompositeDepth = 32
-	// maxTTCompositeSteps 限制单个TrueType复合字形展开的最大分量访问次数
 	maxTTCompositeSteps = 4096
 )
 

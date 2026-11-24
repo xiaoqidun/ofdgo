@@ -40,25 +40,17 @@ type ContentResourceSink interface {
 }
 
 // TextStrokeStyle 描述PDF原生文本渲染模式与描边样式，线宽与虚线单位均为毫米
+// RenderMode对应PDF文本渲染模式，HasFill与FillAlpha用于区分填充并描边时的独立填充透明度
 type TextStrokeStyle struct {
-	// RenderMode 指定PDF文本渲染模式(Tr)，常用1描边、2填充并描边、3不可见
-	RenderMode int
-	// FillAlpha 指定HasFill为真时的填充透明度(0-255)
-	FillAlpha uint8
-	// HasFill 指示是否包含填充绘制，供RenderMode为2时区分双透明度状态
-	HasFill bool
-	// StrokeColor 指定预乘RGBA描边颜色
+	RenderMode  int
+	FillAlpha   uint8
+	HasFill     bool
 	StrokeColor color.RGBA
-	// LineWidth 指定描边线宽，单位毫米
-	LineWidth float64
-	// LineCap 指定线端样式
-	LineCap canvas.Capper
-	// LineJoin 指定折角连接样式
-	LineJoin canvas.Joiner
-	// DashOffset 指定虚线起始偏移，单位毫米
-	DashOffset float64
-	// Dashes 指定虚线线段长度列表，单位毫米
-	Dashes []float64
+	LineWidth   float64
+	LineCap     canvas.Capper
+	LineJoin    canvas.Joiner
+	DashOffset  float64
+	Dashes      []float64
 }
 
 // ContentResources 记录单个页面或Form内容流实际引用的PDF资源集合

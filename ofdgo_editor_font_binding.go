@@ -33,7 +33,6 @@ import (
 	basefont "github.com/xiaoqidun/ofdgo/internal/base/font"
 )
 
-// 字体保存方式枚举常量
 const (
 	// FontKeep 保留原有嵌入方式
 	FontKeep FontMode = iota

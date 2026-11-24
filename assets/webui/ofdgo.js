@@ -12079,6 +12079,7 @@ function pageLinkTarget(link, page, surface, openAction) {
 	let url;
 	try { url = new URL(link.uri); } catch { return null; }
 	if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+	if (nativeHost && url.origin === location.origin) return null;
 	return { href: url.href, title: url.href, external: true, activate: () => { window.open(url.href, "_blank", "noopener,noreferrer"); } };
 }
 
